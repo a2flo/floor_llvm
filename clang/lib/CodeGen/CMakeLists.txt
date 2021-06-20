@@ -22,6 +22,7 @@ set(LLVM_LINK_COMPONENTS
   ProfileData
   Remarks
   ScalarOpts
+  SPIRVLib
   Support
   Target
   TransformUtils
