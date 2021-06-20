@@ -1,0 +1,3 @@
+[submodule "llvm/projects/spirv"]
+	path = llvm/projects/spirv
+	url = ssh://a2git/llvm_spirv.git
