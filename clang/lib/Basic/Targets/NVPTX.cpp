@@ -52,6 +52,7 @@ NVPTXTargetInfo::NVPTXTargetInfo(const llvm::Triple &Triple,
                      .Case("+ptx65", 65)
                      .Case("+ptx64", 64)
                      .Case("+ptx63", 63)
+                     .Case("+ptx62", 62)
                      .Case("+ptx61", 61)
                      .Case("+ptx60", 60)
                      .Case("+ptx50", 50)
@@ -248,10 +249,14 @@ void NVPTXTargetInfo::getTargetDefines(const LangOptions &Opts,
         return "700";
       case CudaArch::SM_72:
         return "720";
+      case CudaArch::SM_73:
+        return "730";
       case CudaArch::SM_75:
         return "750";
       case CudaArch::SM_80:
         return "800";
+      case CudaArch::SM_82:
+        return "820";
       case CudaArch::SM_86:
         return "860";
       }

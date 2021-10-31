@@ -46,6 +46,10 @@
 #include "llvm/Transforms/Scalar/LowerExpectIntrinsic.h"
 #include "llvm/Transforms/Utils/PromoteMemToReg.h"
 
+#include <sstream>
+#include <unordered_set>
+#include <fstream>
+
 using namespace clang;
 using namespace CodeGen;
 
@@ -589,14 +593,28 @@ CodeGenFunction::DecodeAddrUsedInPrologue(llvm::Value *F,
 }
 
 void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
-                                               llvm::Function *Fn)
+                                               llvm::Function *Fn,
+                                               const CGFunctionInfo &FnInfo)
 {
-  if (!FD->hasAttr<OpenCLKernelAttr>())
+  if (!FD->hasAttr<ComputeKernelAttr>() &&
+      !FD->hasAttr<GraphicsVertexShaderAttr>() &&
+	  !FD->hasAttr<GraphicsFragmentShaderAttr>()) {
     return;
+  }
 
   llvm::LLVMContext &Context = getLLVMContext();
 
-  CGM.GenOpenCLArgMetadata(Fn, FD, this);
+  SmallVector<llvm::Metadata *, 5> kernelMDArgs;
+  kernelMDArgs.push_back(llvm::ConstantAsMetadata::get(Fn));
+
+  if (CGM.getCodeGenOpts().EmitOpenCLArgMetadata)
+    CGM.GenOpenCLArgMetadata(Fn, FD, this, kernelMDArgs);
+
+  if (CGM.getLangOpts().Metal)
+    CGM.GenAIRMetadata(FD, Fn, FnInfo, kernelMDArgs, Builder);
+
+  if (CGM.getLangOpts().Vulkan)
+    CGM.GenVulkanMetadata(FD, Fn, Builder);
 
   if (const VecTypeHintAttr *A = FD->getAttr<VecTypeHintAttr>()) {
     QualType HintQTy = A->getTypeHint();
@@ -636,6 +654,114 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
     Fn->setMetadata("intel_reqd_sub_group_size",
                     llvm::MDNode::get(Context, AttrMDArgs));
   }
+
+  llvm::MDNode *kernelMDNode = llvm::MDNode::get(Context, kernelMDArgs);
+  llvm::NamedMDNode *MainMetadataNode;
+  if (!CGM.getLangOpts().Metal) {
+    MainMetadataNode = CGM.getModule().getOrInsertNamedMetadata("opencl.kernels");
+  } else {
+    MainMetadataNode = CGM.getModule().getOrInsertNamedMetadata(
+      (FD->hasAttr<GraphicsVertexShaderAttr>() ? "air.vertex" :
+       (FD->hasAttr<GraphicsFragmentShaderAttr>() ? "air.fragment" : "air.kernel")));
+  }
+  // add soft-printf info
+  if (CGM.getCodeGenOpts().MetalSoftPrintf > 0 || CGM.getCodeGenOpts().VulkanSoftPrintf > 0) {
+    CGM.getModule().getOrInsertNamedMetadata("floor.soft_printf");
+  }
+  MainMetadataNode->addOperand(kernelMDNode);
+
+  // additional air info
+  if (CGM.getLangOpts().Metal) {
+	  // only do this once
+	  llvm::NamedMDNode *AIRVersion = CGM.getModule().getOrInsertNamedMetadata("air.version");
+	  if (AIRVersion->getNumOperands() > 0) return;
+	  
+	  // insert empty sampler state, this will be filled in by MetalImage later on
+	  CGM.getModule().getOrInsertNamedMetadata("air.sampler_states");
+	  
+	  // figure out which metal versions we should emit
+	  std::array<uint32_t, 3> metal_version;
+	  std::array<uint32_t, 3> metal_language_version;
+	  const auto full_version = CGM.getLangOpts().MetalVersion;
+	  metal_version = {{ full_version / 100u, (full_version % 100u) / 10u, full_version % 10u }};
+	  metal_language_version = metal_version;
+	  
+	  SmallVector <llvm::Metadata*, 3> air_version;
+	  air_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_version[0])));
+	  air_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_version[1])));
+	  air_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_version[2])));
+	  AIRVersion->addOperand(llvm::MDNode::get(Context, air_version));
+	  
+	  llvm::NamedMDNode *AIRLangVersion = CGM.getModule().getOrInsertNamedMetadata("air.language_version");
+	  SmallVector <llvm::Metadata*, 4> air_lang_version;
+	  air_lang_version.push_back(llvm::MDString::get(Context, "Metal"));
+	  air_lang_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_language_version[0])));
+	  air_lang_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_language_version[1])));
+	  air_lang_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_language_version[2])));
+	  AIRLangVersion->addOperand(llvm::MDNode::get(Context, air_lang_version));
+	  
+	  llvm::NamedMDNode *AIRCompOpts = CGM.getModule().getOrInsertNamedMetadata("air.compile_options");
+	  AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.denorms_disable")));
+	  AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.fast_math_enable")));
+	  if (CGM.getLangOpts().MetalVersion < 230) {
+	    AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.framebuffer_fetch_disable")));
+	    AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.native_double_disable")));
+	    if (CGM.getLangOpts().MetalVersion >= 220) {
+	      AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.native_long_long_enable")));
+	      AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.native_wide_vectors_disable")));
+	    }
+	  } else {
+	    AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.framebuffer_fetch_enable")));
+	  }
+
+	  // TODO/NOTE: unsure when this was added (but at least Metal 2.2)
+	  if (CGM.getLangOpts().MetalVersion >= 220) {
+	    llvm::NamedMDNode *AIRSourceFile = CGM.getModule().getOrInsertNamedMetadata("air.source_file_name");
+	    SmallVector <llvm::Metadata*, 1> air_source_file;
+	    air_source_file.push_back(llvm::MDString::get(Context, CGM.getModule().getSourceFileName()));
+	    AIRSourceFile->addOperand(llvm::MDNode::get(Context, air_source_file));
+	  }
+	  
+	  // AIR limits (since Metal 2.3)
+	  if (CGM.getLangOpts().MetalVersion >= 230) {
+	    llvm::NamedMDNode *ModuleFlags = CGM.getModule().getOrInsertNamedMetadata("llvm.module.flags");
+	    static const std::vector<std::pair<std::string, int>> limits {
+	      { "air.max_device_buffers", 31 },
+	      { "air.max_constant_buffers", 31 },
+	      { "air.max_threadgroup_buffers", 31 },
+	      { "air.max_textures", 128 },
+	      { "air.max_read_write_textures", 8 },
+	      { "air.max_samplers", 16 },
+	    };
+	    for (const auto& limit : limits) {
+	      SmallVector <llvm::Metadata*, 3> air_limit;
+	      air_limit.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(7)));
+	      air_limit.push_back(llvm::MDString::get(Context, limit.first));
+	      air_limit.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(limit.second)));
+	      ModuleFlags->addOperand(llvm::MDNode::get(Context, air_limit));
+	    }
+      }
+  }
+
+  // additional vulkan info
+  if (CGM.getLangOpts().Vulkan) {
+	  // only do this once
+	  llvm::NamedMDNode *VulkanVersion = CGM.getModule().getOrInsertNamedMetadata("vulkan.version");
+	  if (VulkanVersion->getNumOperands() > 0) return;
+	  
+	  // figure out which vulkan versions we should emit
+	  std::array<uint32_t, 2> vulkan_version {{
+		  CGM.getLangOpts().VulkanVersion / 100,
+		  (CGM.getLangOpts().VulkanVersion % 100) / 10
+	  }};
+	  
+	  SmallVector <llvm::Metadata*, 2> vulkan_version_md;
+	  vulkan_version_md.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(vulkan_version[0])));
+	  vulkan_version_md.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(vulkan_version[1])));
+	  VulkanVersion->addOperand(llvm::MDNode::get(Context, vulkan_version_md));
+  }
+
+  // NOTE: additional/global opencl metadata is handled in CGSPIRMetadataAdder
 }
 
 /// Determine whether the function F ends with a return stmt.
@@ -895,9 +1021,16 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
   if (D && D->hasAttr<NoProfileFunctionAttr>())
     Fn->addFnAttr(llvm::Attribute::NoProfile);
 
-  if (FD && getLangOpts().OpenCL) {
-    // Add metadata for a kernel function.
-    EmitOpenCLKernelMetadata(FD, Fn);
+  // emit compute metadata
+  if (FD && (getLangOpts().OpenCL || getLangOpts().CUDA || getLangOpts().FloorHostCompute)) {
+    // add floor specific metadata for kernel functions
+    EmitFloorKernelMetadata(FD, Fn, Args, FnInfo, CGM);
+    
+    // OpenCL/SPIR, Metal and Vulkan specific metadata
+    if (getLangOpts().OpenCL) {
+      // Add metadata for a kernel function.
+      EmitOpenCLKernelMetadata(FD, Fn, FnInfo);
+    }
   }
 
   // If we are checking function types, emit a function type signature as
@@ -943,8 +1076,7 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
   //     recursive code, virtual functions or make use of C++ libraries that
   //     are not compiled for the device.
   if (FD && ((getLangOpts().CPlusPlus && FD->isMain()) ||
-             getLangOpts().OpenCL || getLangOpts().SYCLIsDevice ||
-             (getLangOpts().CUDA && FD->hasAttr<CUDAGlobalAttr>())))
+             getLangOpts().SYCLIsDevice))
     Fn->addFnAttr(llvm::Attribute::NoRecurse);
 
   llvm::RoundingMode RM = getLangOpts().getFPRoundingMode();
@@ -1084,7 +1216,18 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
     Addr = Builder.CreateAlignedLoad(Ty, Addr, getPointerAlign(), "agg.result");
     ReturnValue = Address(Addr, CGM.getNaturalTypeAlignment(RetTy));
   } else {
-    ReturnValue = CreateIRTemp(RetTy, "retval");
+    // fix retval allocation for vertex/fragment shader return values (use the computed coerce type)
+    const FunctionDecl *FD = dyn_cast_or_null<FunctionDecl>(D);
+    if (FD &&
+        (FD->hasAttr<GraphicsVertexShaderAttr>() ||
+         FD->hasAttr<GraphicsFragmentShaderAttr>())) {
+      auto RetAlloc = CreateTempAlloca(FnInfo.getReturnInfo().getCoerceToType(), "retval");
+      CharUnits Align = getContext().getTypeAlignInChars(RetTy);
+      RetAlloc->setAlignment(Align.getAsAlign());
+      ReturnValue = Address(RetAlloc, Align);
+	} else {
+      ReturnValue = CreateIRTemp(RetTy, "retval");
+	}
 
     // Tell the epilog emitter to autorelease the result.  We do this
     // now so that various specialized functions can suppress it
@@ -1285,6 +1428,9 @@ QualType CodeGenFunction::BuildFunctionArgList(GlobalDecl GD,
   if (MD && (isa<CXXConstructorDecl>(MD) || isa<CXXDestructorDecl>(MD)))
     CGM.getCXXABI().addImplicitStructorParams(*this, ResTy, Args);
 
+  // add additional implicit internal args if necessary
+  CGM.getTypes().handleMetalVulkanEntryFunction(nullptr, &Args, FD);
+
   return ResTy;
 }
 
@@ -1374,7 +1520,7 @@ void CodeGenFunction::GenerateCode(GlobalDecl GD, llvm::Function *Fn,
     EmitConstructorBody(Args);
   else if (getLangOpts().CUDA &&
            !getLangOpts().CUDAIsDevice &&
-           FD->hasAttr<CUDAGlobalAttr>())
+           FD->hasAttr<ComputeKernelAttr>())
     CGM.getCUDARuntime().emitDeviceStub(*this, Args);
   else if (isa<CXXMethodDecl>(FD) &&
            cast<CXXMethodDecl>(FD)->isLambdaStaticInvoker()) {

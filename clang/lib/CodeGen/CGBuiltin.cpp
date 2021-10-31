@@ -23,6 +23,7 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
+#include "clang/AST/Expr.h"
 #include "clang/AST/OSLog.h"
 #include "clang/Basic/TargetBuiltins.h"
 #include "clang/Basic/TargetInfo.h"
@@ -3967,26 +3968,25 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
       int ord = cast<llvm::ConstantInt>(Order)->getZExtValue();
       AtomicRMWInst *Result = nullptr;
       switch (ord) {
-      case 0:  // memory_order_relaxed
+      case AtomicExpr::AtomicOrderingKind::AO_ABI_memory_order_relaxed:
       default: // invalid order
         Result = Builder.CreateAtomicRMW(llvm::AtomicRMWInst::Xchg, Ptr, NewVal,
                                          llvm::AtomicOrdering::Monotonic);
         break;
-      case 1: // memory_order_consume
-      case 2: // memory_order_acquire
+      case AtomicExpr::AtomicOrderingKind::AO_ABI_memory_order_consume:
+      case AtomicExpr::AtomicOrderingKind::AO_ABI_memory_order_acquire:
         Result = Builder.CreateAtomicRMW(llvm::AtomicRMWInst::Xchg, Ptr, NewVal,
                                          llvm::AtomicOrdering::Acquire);
         break;
-      case 3: // memory_order_release
+      case AtomicExpr::AtomicOrderingKind::AO_ABI_memory_order_release:
         Result = Builder.CreateAtomicRMW(llvm::AtomicRMWInst::Xchg, Ptr, NewVal,
                                          llvm::AtomicOrdering::Release);
         break;
-      case 4: // memory_order_acq_rel
-
+      case AtomicExpr::AtomicOrderingKind::AO_ABI_memory_order_acq_rel:
         Result = Builder.CreateAtomicRMW(llvm::AtomicRMWInst::Xchg, Ptr, NewVal,
                                          llvm::AtomicOrdering::AcquireRelease);
         break;
-      case 5: // memory_order_seq_cst
+      case AtomicExpr::AtomicOrderingKind::AO_ABI_memory_order_seq_cst:
         Result = Builder.CreateAtomicRMW(
             llvm::AtomicRMWInst::Xchg, Ptr, NewVal,
             llvm::AtomicOrdering::SequentiallyConsistent);
@@ -4050,14 +4050,14 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
       int ord = cast<llvm::ConstantInt>(Order)->getZExtValue();
       StoreInst *Store = Builder.CreateStore(NewVal, Ptr, Volatile);
       switch (ord) {
-      case 0:  // memory_order_relaxed
+      case AtomicExpr::AtomicOrderingKind::AO_ABI_memory_order_relaxed:
       default: // invalid order
         Store->setOrdering(llvm::AtomicOrdering::Monotonic);
         break;
-      case 3:  // memory_order_release
+      case AtomicExpr::AtomicOrderingKind::AO_ABI_memory_order_release:
         Store->setOrdering(llvm::AtomicOrdering::Release);
         break;
-      case 5:  // memory_order_seq_cst
+      case AtomicExpr::AtomicOrderingKind::AO_ABI_memory_order_seq_cst:
         Store->setOrdering(llvm::AtomicOrdering::SequentiallyConsistent);
         break;
       }
@@ -4107,20 +4107,20 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
     if (isa<llvm::ConstantInt>(Order)) {
       int ord = cast<llvm::ConstantInt>(Order)->getZExtValue();
       switch (ord) {
-      case 0:  // memory_order_relaxed
+      case AtomicExpr::AtomicOrderingKind::AO_ABI_memory_order_relaxed:  // memory_order_relaxed
       default: // invalid order
         break;
-      case 1:  // memory_order_consume
-      case 2:  // memory_order_acquire
+      case AtomicExpr::AtomicOrderingKind::AO_ABI_memory_order_consume:  // memory_order_consume
+      case AtomicExpr::AtomicOrderingKind::AO_ABI_memory_order_acquire:  // memory_order_acquire
         Builder.CreateFence(llvm::AtomicOrdering::Acquire, SSID);
         break;
-      case 3:  // memory_order_release
+      case AtomicExpr::AtomicOrderingKind::AO_ABI_memory_order_release:  // memory_order_release
         Builder.CreateFence(llvm::AtomicOrdering::Release, SSID);
         break;
-      case 4:  // memory_order_acq_rel
+      case AtomicExpr::AtomicOrderingKind::AO_ABI_memory_order_acq_rel:  // memory_order_acq_rel
         Builder.CreateFence(llvm::AtomicOrdering::AcquireRelease, SSID);
         break;
-      case 5:  // memory_order_seq_cst
+      case AtomicExpr::AtomicOrderingKind::AO_ABI_memory_order_seq_cst:  // memory_order_seq_cst
         Builder.CreateFence(llvm::AtomicOrdering::SequentiallyConsistent, SSID);
         break;
       }

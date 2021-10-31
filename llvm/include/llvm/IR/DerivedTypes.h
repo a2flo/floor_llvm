@@ -218,7 +218,8 @@ class StructType : public Type {
     SCDB_HasBody = 1,
     SCDB_Packed = 2,
     SCDB_IsLiteral = 4,
-    SCDB_IsSized = 8
+    SCDB_IsSized = 8,
+    SCDB_IsGraphicsReturnType = 16
   };
 
   /// For a named struct that actually has a name, this is a pointer to the
@@ -279,6 +280,15 @@ public:
   /// Return true if this is a type with an identity that has no body specified
   /// yet. These prints as 'opaque' in .ll files.
   bool isOpaque() const { return (getSubclassData() & SCDB_HasBody) == 0; }
+
+  /// isGraphicsReturnType - Return true if this type is used as a Metal vertex/fragment
+  /// shader return type.
+  bool isGraphicsReturnType() const { return (getSubclassData() & SCDB_IsGraphicsReturnType) != 0; }
+
+  /// setGraphicsReturnType - Flags this type as a Metal return type.
+  void setGraphicsReturnType() {
+    setSubclassData(getSubclassData() | SCDB_IsGraphicsReturnType);
+  }
 
   /// isSized - Return true if this is a sized type.
   bool isSized(SmallPtrSetImpl<Type *> *Visited = nullptr) const;

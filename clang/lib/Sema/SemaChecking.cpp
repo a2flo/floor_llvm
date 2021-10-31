@@ -1083,9 +1083,11 @@ static bool SemaOpenCLBuiltinEnqueueKernel(Sema &S, CallExpr *TheCall) {
   return true;
 }
 
-/// Returns OpenCL access qual.
-static OpenCLAccessAttr *getOpenCLArgAccess(const Decl *D) {
-    return D->getAttr<OpenCLAccessAttr>();
+/// Returns libfloor (OpenCL/Metal/Vulkan) access qual.
+static ImageAccessAttr *getImageArgAccess(const Decl *D) {
+  if (D->hasAttr<ImageAccessAttr>())
+    return D->getAttr<ImageAccessAttr>();
+  return nullptr;
 }
 
 /// Returns true if pipe element type is different from the pointer.
@@ -1097,8 +1099,8 @@ static bool checkOpenCLPipeArg(Sema &S, CallExpr *Call) {
         << Call->getDirectCallee() << Arg0->getSourceRange();
     return true;
   }
-  OpenCLAccessAttr *AccessQual =
-      getOpenCLArgAccess(cast<DeclRefExpr>(Arg0)->getDecl());
+  ImageAccessAttr *AccessQual =
+      getImageArgAccess(cast<DeclRefExpr>(Arg0)->getDecl());
   // Validates the access qualifier is compatible with the call.
   // OpenCL v2.0 s6.13.16 - The access qualifiers for pipe should only be
   // read_only and write_only, and assumed to be read_only if no qualifier is
@@ -2004,7 +2006,7 @@ Sema::CheckBuiltinFunctionCall(FunctionDecl *FDecl, unsigned BuiltinID,
       auto *D = DRE->getDecl();
       if (!isa<FunctionDecl>(D) && !isa<VarDecl>(D))
         return false;
-      return D->hasAttr<CUDAGlobalAttr>() || D->hasAttr<CUDADeviceAttr>() ||
+      return D->hasAttr<ComputeKernelAttr>() || D->hasAttr<CUDADeviceAttr>() ||
              D->hasAttr<CUDAConstantAttr>() || D->hasAttr<HIPManagedAttr>();
     };
     if (!Check(TheCall)) {

@@ -686,7 +686,7 @@ llvm::DIType *CGDebugInfo::CreateType(const BuiltinType *BT) {
 
 #define IMAGE_TYPE(ImgType, Id, SingletonId, Access, Suffix)                   \
   case BuiltinType::Id:                                                        \
-    return getOrCreateStructPtrType("opencl_" #ImgType "_" #Suffix "_t",       \
+    return getOrCreateStructPtrType("opencl_" #ImgType #Suffix "_t",           \
                                     SingletonId);
 #include "clang/Basic/OpenCLImageTypes.def"
   case BuiltinType::OCLSampler:
@@ -1310,9 +1310,11 @@ static unsigned getDwarfCC(CallingConv CC) {
     return llvm::dwarf::DW_CC_LLVM_AAPCS_VFP;
   case CC_IntelOclBicc:
     return llvm::dwarf::DW_CC_LLVM_IntelOclBicc;
-  case CC_SpirFunction:
+  case CC_FloorFunction:
     return llvm::dwarf::DW_CC_LLVM_SpirFunction;
-  case CC_OpenCLKernel:
+  case CC_FloorKernel:
+  case CC_FloorVertex:
+  case CC_FloorFragment:
     return llvm::dwarf::DW_CC_LLVM_OpenCLKernel;
   case CC_Swift:
     return llvm::dwarf::DW_CC_LLVM_Swift;
@@ -3120,6 +3122,8 @@ llvm::DIType *CGDebugInfo::CreateType(const AtomicType *Ty, llvm::DIFile *U) {
 }
 
 llvm::DIType *CGDebugInfo::CreateType(const PipeType *Ty, llvm::DIFile *U) {
+  // Ignore the atomic wrapping
+  // FIXME: What is the correct representation?
   return getOrCreateType(Ty->getElementType(), U);
 }
 

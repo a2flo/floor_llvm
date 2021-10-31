@@ -181,7 +181,7 @@ public:
       return __n;
     }
 
-    _LIBCPP_UNREACHABLE();
+    __builtin_unreachable();
   }
 };
 

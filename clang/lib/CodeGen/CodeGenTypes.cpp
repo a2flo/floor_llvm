@@ -397,6 +397,10 @@ llvm::Type *CodeGenTypes::ConvertType(QualType T) {
 
   const Type *Ty = T.getTypePtr();
 
+  // intercept image arrays before RT conversion
+  if (Ty->isArrayImageType(true))
+    return ConvertArrayImageType(Ty);
+
   // For the device-side compilation, CUDA device builtin surface/texture types
   // may be represented in different types.
   if (Context.getLangOpts().CUDAIsDevice) {
@@ -870,9 +874,72 @@ llvm::StructType *CodeGenTypes::ConvertRecordDeclType(const RecordDecl *RD) {
   return Ty;
 }
 
+llvm::Type *CodeGenTypes::ConvertArrayImageType(const Type* Ty) {
+  // ptr to array of images
+  if(Ty->isPointerType() &&
+     Ty->getPointeeType()->isArrayType() &&
+     Ty->getPointeeType()->getArrayElementTypeNoTypeQual()->isImageType()) {
+    return llvm::PointerType::get(ConvertArrayImageType(Ty->getPointeeType().getTypePtr()), 0);
+  }
+	
+  // simple C-style array that contains an image type
+  if(Ty->isArrayType() &&
+     Ty->getArrayElementTypeNoTypeQual()->isImageType()) {
+    const ConstantArrayType *CAT = Context.getAsConstantArrayType(QualType(Ty, 0));
+    const auto elem_type = CAT->getElementType();
+    if(elem_type->isImageType()) {
+      return llvm::ArrayType::get(ConvertType(elem_type), CAT->getSize().getZExtValue());
+    } else if(elem_type->isAggregateImageType()) {
+      // must be an aggregate image with exactly one image
+      const auto agg_img_type = elem_type->getAsCXXRecordDecl();
+      auto agg_img_fields = get_aggregate_scalar_fields(agg_img_type, agg_img_type, false, false,
+                                                        true /* TODO */);
+      if(agg_img_fields.size() != 1) return nullptr;
+      return llvm::ArrayType::get(ConvertType(agg_img_fields[0].type), CAT->getSize().getZExtValue());
+    }
+    assert(false && "invalid array of images type");
+  }
+
+  // must be struct or class, union is not allowed
+  if(!Ty->isStructureOrClassType()) return nullptr;
+
+  // must be a cxx rdecl
+  const auto decl = Ty->getAsCXXRecordDecl();
+  if(!decl) return nullptr;
+
+  // must have definition
+  if(!decl->hasDefinition()) return nullptr;
+
+  // must have exactly one field
+  const auto field_count = std::distance(decl->field_begin(), decl->field_end());
+  if(field_count != 1) return nullptr;
+
+  // field must be an array
+  const QualType arr_field_type = decl->field_begin()->getType();
+  const ConstantArrayType *CAT = Context.getAsConstantArrayType(arr_field_type);
+  if(!CAT) return nullptr;
+
+  // must be an aggregate image with exactly one image
+  const auto agg_img_type = CAT->getElementType()->getAsCXXRecordDecl();
+  auto agg_img_fields = get_aggregate_scalar_fields(agg_img_type, agg_img_type, false, false,
+                                                    true /* TODO */);
+  if(agg_img_fields.size() != 1) return nullptr;
+
+  // got everything we need
+  return llvm::ArrayType::get(ConvertType(agg_img_fields[0].type), CAT->getSize().getZExtValue());
+}
+
+
 /// getCGRecordLayout - Return record layout info for the given record decl.
 const CGRecordLayout &
-CodeGenTypes::getCGRecordLayout(const RecordDecl *RD) {
+CodeGenTypes::getCGRecordLayout(const RecordDecl *RD, llvm::Type* struct_type) {
+  // check if there is a flattened layout for this llvm struct type,
+  // return it if so, otherwise continue as usual
+  if (struct_type != nullptr) {
+    const auto flat_layout = FlattenedCGRecordLayouts.lookup(struct_type);
+    if(flat_layout) return *flat_layout;
+  }
+
   const Type *Key = Context.getTagDeclType(RD).getTypePtr();
 
   auto I = CGRecordLayouts.find(Key);
@@ -887,6 +954,11 @@ CodeGenTypes::getCGRecordLayout(const RecordDecl *RD) {
   assert(I != CGRecordLayouts.end() &&
          "Unable to find record layout information for type");
   return *I->second;
+}
+
+llvm::Type* CodeGenTypes::getFlattenedRecordType(const CXXRecordDecl* D) const {
+  const auto iter = FlattenedRecords.find_as(D);
+  return (iter != FlattenedRecords.end() ? iter->second : nullptr);
 }
 
 bool CodeGenTypes::isPointerZeroInitializable(QualType T) {
@@ -924,4 +996,231 @@ bool CodeGenTypes::isZeroInitializable(QualType T) {
 
 bool CodeGenTypes::isZeroInitializable(const RecordDecl *RD) {
   return getCGRecordLayout(RD).isZeroInitializable();
+}
+
+//
+static std::string aggregate_scalar_fields_mangle(const CXXRecordDecl* root_decl,
+												  MangleContext& MC,
+												  RecordDecl::field_iterator field_iter) {
+	std::string gen_type_name = "";
+	llvm::raw_string_ostream gen_type_name_stream(gen_type_name);
+	MC.mangleMetalFieldName(*field_iter, root_decl, gen_type_name_stream);
+	return "generated(" + gen_type_name_stream.str() + ")";
+}
+static std::string aggregate_scalar_fields_mangle(const CXXRecordDecl* root_decl,
+												  MangleContext& MC,
+												  const std::string& name,
+												  const clang::QualType type) {
+	std::string gen_type_name = "";
+	llvm::raw_string_ostream gen_type_name_stream(gen_type_name);
+	MC.mangleMetalGeneric(name, type, root_decl, gen_type_name_stream);
+	return "generated(" + gen_type_name_stream.str() + ")";
+}
+
+clang::QualType CodeGenTypes::get_compat_vector_type(const CXXRecordDecl* decl) const {
+	const auto fields = get_aggregate_scalar_fields(decl, decl, true, false, true);
+	
+	const auto vec_size = fields.size();
+	if(vec_size < 1 || vec_size > 4) {
+		assert(false && "invalid vector size (must be >= 1 && <= 4)");
+		return Context.VoidTy;
+	}
+	
+	const auto elem_type = fields[0].type.getUnqualifiedType();
+	for(size_t i = 1; i < vec_size; ++i) {
+		if(fields[i].type.getUnqualifiedType() != elem_type) {
+			assert(false && "all vector-compat element types must be equal");
+			return Context.VoidTy;
+		}
+	}
+	
+	return Context.getExtVectorType(elem_type, vec_size);
+}
+
+void CodeGenTypes::aggregate_scalar_fields_add_array(const CXXRecordDecl* root_decl,
+													 const CXXRecordDecl* parent_decl,
+													 const ConstantArrayType* CAT,
+													 const AttrVec* attrs,
+													 const FieldDecl* parent_field_decl,
+													 const std::string& name,
+													 const bool expand_array_image,
+													 std::vector<CodeGenTypes::aggregate_scalar_entry>& ret) const {
+	if(expand_array_image ||
+	   !(CAT->getElementType()->isAggregateImageType() ||
+		 CAT->getElementType()->isImageType())) {
+	const auto count = CAT->getSize().getZExtValue();
+	const auto ET = CAT->getElementType();
+	if(const auto arr_rdecl = ET->getAsCXXRecordDecl()) {
+			auto contained_ret = get_aggregate_scalar_fields(root_decl, arr_rdecl, false, false, expand_array_image);
+		for(auto& entry : contained_ret) {
+			entry.parents.push_back(parent_decl);
+		}
+		for(uint64_t i = 0; i < count; ++i) {
+			ret.insert(ret.end(), contained_ret.begin(), contained_ret.end());
+		}
+	}
+	else if(ET->isArrayType()) {
+		const auto aoa_decl = dyn_cast<ConstantArrayType>(ET->getAsArrayTypeUnsafe());
+		if(aoa_decl) {
+			for(uint64_t i = 0; i < count; ++i) {
+				const auto idx_str = "_" + std::to_string(i);
+					aggregate_scalar_fields_add_array(root_decl, parent_decl, aoa_decl, attrs, parent_field_decl,
+													  name + idx_str, expand_array_image, ret);
+			}
+		}
+		else {
+			// TODO: error
+		}
+	}
+	else {
+		for(uint64_t i = 0; i < count; ++i) {
+			const auto idx_str = "_" + std::to_string(i);
+			ret.push_back(aggregate_scalar_entry {
+				ET,
+				name + idx_str,
+				aggregate_scalar_fields_mangle(root_decl, TheCXXABI.getMangleContext(), name + idx_str, ET),
+				attrs,
+					parent_field_decl,
+				{ parent_decl },
+				false,
+				false
+			});
+		}
+	}
+}
+	else {
+		// directly add an array entry
+		ret.push_back(aggregate_scalar_entry {
+			clang::QualType(CAT, 0),
+			name,
+			aggregate_scalar_fields_mangle(root_decl, TheCXXABI.getMangleContext(), name, clang::QualType(CAT, 0)),
+			attrs,
+			parent_field_decl,
+			{ parent_decl },
+			false,
+			false
+		});
+	}
+}
+
+std::vector<CodeGenTypes::aggregate_scalar_entry>
+CodeGenTypes::get_aggregate_scalar_fields(const CXXRecordDecl* root_decl,
+										  const CXXRecordDecl* decl,
+										  const bool ignore_root_vec_compat,
+										  const bool ignore_bases,
+										  const bool expand_array_image) const {
+	if(decl == nullptr) return {};
+	
+	// must have definition
+	if(!decl->hasDefinition()) return {};
+	
+	// if the root decl is a direct compat vector, return it directly
+	if(!ignore_root_vec_compat &&
+	   decl->hasAttr<VectorCompatAttr>()) {
+		return {
+			aggregate_scalar_entry {
+				get_compat_vector_type(decl),
+				"",
+				"",
+				&decl->getAttrs(),
+				nullptr,
+				{},
+				true,
+				false
+			}
+		};
+	}
+	
+	//
+	std::vector<aggregate_scalar_entry> ret;
+	
+	// iterate over / recurse into all bases
+	if(!ignore_bases) {
+		for(const auto& base : decl->bases()) {
+			auto base_ret = get_aggregate_scalar_fields(root_decl, base.getType()->getAsCXXRecordDecl(),
+														false, false, expand_array_image);
+			for(auto& elem : base_ret) {
+				elem.is_in_base = true;
+			}
+			if(!base_ret.empty()) {
+				ret.insert(ret.end(), base_ret.begin(), base_ret.end());
+			}
+		}
+	}
+	
+	// TODO/NOTE: make sure attrs are correctly forwarded/inherited/passed-through
+	const auto add_field = [this, &root_decl, &decl, &expand_array_image, &ret](RecordDecl::field_iterator field_iter) {
+		if(const auto rdecl = field_iter->getType()->getAsCXXRecordDecl()) {
+			if(rdecl->hasAttr<VectorCompatAttr>() ||
+			   field_iter->hasAttr<GraphicsVertexPositionAttr>()) {
+				const auto vec_type = get_compat_vector_type(rdecl);
+				
+				if(field_iter->hasAttr<GraphicsVertexPositionAttr>()) {
+					const auto as_vec_type = vec_type->getAs<ExtVectorType>();
+					if(as_vec_type->getNumElements() != 4 ||
+					   !as_vec_type->getElementType()->isFloatingType()) {
+						// TODO: error!
+					}
+				}
+				
+				ret.push_back(aggregate_scalar_entry {
+					vec_type,
+					field_iter->getName().str(),
+					aggregate_scalar_fields_mangle(root_decl, TheCXXABI.getMangleContext(),
+												   field_iter->getName().str(), vec_type),
+					field_iter->hasAttrs() ? &field_iter->getAttrs() : nullptr,
+					*field_iter,
+					{ decl },
+					true,
+					false
+				});
+			}
+			else {
+				auto contained_ret = get_aggregate_scalar_fields(root_decl, rdecl,
+																 false, false, expand_array_image);
+				for(auto& entry : contained_ret) {
+					entry.parents.push_back(decl);
+				}
+				if(!contained_ret.empty()) {
+					ret.insert(ret.end(), contained_ret.begin(), contained_ret.end());
+				}
+			}
+		}
+		else if(field_iter->getType()->isArrayType()) {
+			const auto arr_decl = dyn_cast<ConstantArrayType>(field_iter->getType()->getAsArrayTypeUnsafe());
+			if(arr_decl) {
+				aggregate_scalar_fields_add_array(root_decl, decl, arr_decl,
+												  field_iter->hasAttrs() ? &field_iter->getAttrs() : nullptr,
+												  *field_iter, field_iter->getName().str(), expand_array_image, ret);
+			}
+			else {
+				// TODO: error
+			}
+		}
+		else {
+			ret.push_back(aggregate_scalar_entry {
+				field_iter->getType(),
+				field_iter->getName().str(),
+				aggregate_scalar_fields_mangle(root_decl, TheCXXABI.getMangleContext(), field_iter),
+				field_iter->hasAttrs() ? &field_iter->getAttrs() : nullptr,
+				*field_iter,
+				{ decl },
+				false,
+				false
+			});
+		}
+	};
+	
+	if(!decl->isUnion()) {
+		// iterate over all fields/members
+		for(auto iter = decl->field_begin(); iter != decl->field_end(); ++iter) {
+			add_field(iter);
+		}
+	}
+	else {
+		// for unions: only use the first field
+		add_field(decl->field_begin());
+	}
+	
+	return ret;
 }

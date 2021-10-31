@@ -85,9 +85,9 @@ static const CudaArchToStringMap arch_names[] = {
     SM(30), SM(32), SM(35), SM(37),  // Kepler
     SM(50), SM(52), SM(53),          // Maxwell
     SM(60), SM(61), SM(62),          // Pascal
-    SM(70), SM(72),                  // Volta
+    SM(70), SM(72), SM(73),          // Volta
     SM(75),                          // Turing
-    SM(80), SM(86),                  // Ampere
+    SM(80), SM(82), SM(86),          // Ampere
     GFX(600),  // gfx600
     GFX(601),  // gfx601
     GFX(602),  // gfx602
@@ -179,11 +179,13 @@ CudaVersion MinVersionForCudaArch(CudaArch A) {
   case CudaArch::SM_70:
     return CudaVersion::CUDA_90;
   case CudaArch::SM_72:
+  case CudaArch::SM_73:
     return CudaVersion::CUDA_91;
   case CudaArch::SM_75:
     return CudaVersion::CUDA_100;
   case CudaArch::SM_80:
     return CudaVersion::CUDA_110;
+  case CudaArch::SM_82:
   case CudaArch::SM_86:
     return CudaVersion::CUDA_111;
   default:

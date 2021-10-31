@@ -1005,6 +1005,43 @@ CodeGenTypes::ComputeRecordLayout(const RecordDecl *D, llvm::StructType *Ty) {
   return RL;
 }
 
+void CodeGenTypes::create_flattened_cg_layout(const CXXRecordDecl* D, llvm::StructType* Ty,
+											  const std::vector<CodeGenTypes::aggregate_scalar_entry>& fields) {
+	bool zero_init = true;
+	for(const auto& field : fields) {
+		// vector types (or replaced vector types) are always zero initializable
+		if(field.type->isExtVectorType() ||
+		   field.type->isVectorType()) {
+			continue;
+		}
+		
+		// else: need to make some calls based on the field decl type
+		const Type *Type = field.field_decl->getType()->getBaseElementTypeUnsafe();
+		if (const MemberPointerType *MPT = Type->getAs<MemberPointerType>()) {
+			if(!TheCXXABI.isZeroInitializable(MPT)) {
+				zero_init = false;
+				break;
+			}
+		}
+		else if (const CXXRecordDecl* cxx_rdecl = Type->getAsCXXRecordDecl()) {
+			if(!isZeroInitializable(cxx_rdecl)) {
+				zero_init = false;
+				break;
+			}
+		}
+		// else: it is zero initializable
+	}
+	
+	CGRecordLayout *RL = new CGRecordLayout(Ty, Ty, zero_init, zero_init);
+	uint32_t field_idx = 0;
+	for(const auto& field : fields) {
+		RL->FieldInfo.insert({ field.field_decl, field_idx++ });
+	}
+	
+	FlattenedCGRecordLayouts.insert({ Ty, RL });
+	FlattenedRecords.insert({ D, Ty });
+}
+
 void CGRecordLayout::print(raw_ostream &OS) const {
   OS << "<CGRecordLayout\n";
   OS << "  LLVMType:" << *CompleteObjectType << "\n";

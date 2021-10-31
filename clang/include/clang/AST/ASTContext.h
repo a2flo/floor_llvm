@@ -35,6 +35,7 @@
 #include "clang/Basic/LangOptions.h"
 #include "clang/Basic/Linkage.h"
 #include "clang/Basic/NoSanitizeList.h"
+#include "clang/Basic/OpenCLOptions.h"
 #include "clang/Basic/OperatorKinds.h"
 #include "clang/Basic/PartialDiagnostic.h"
 #include "clang/Basic/ProfileList.h"
@@ -603,6 +604,12 @@ private:
   ///  this ASTContext object.
   LangOptions &LangOpts;
 
+  /// enabled/used OpenCL features and options (used by Sema)
+  OpenCLOptions OpenCLFeatures;
+
+  /// module-level flag if the FP contract was ever disabled
+  bool disabledFPContract = false;
+
   /// NoSanitizeList object that is used by sanitizers to decide which
   /// entities should not be instrumented.
   std::unique_ptr<NoSanitizeList> NoSanitizeL;
@@ -763,6 +770,12 @@ public:
   bool AtomicUsesUnsupportedLibcall(const AtomicExpr *E) const;
 
   const LangOptions& getLangOpts() const { return LangOpts; }
+
+  OpenCLOptions& getOpenCLFeatures() { return OpenCLFeatures; }
+  const OpenCLOptions& getOpenCLFeatures() const { return OpenCLFeatures; }
+
+  void disableFPContract() { disabledFPContract = true; }
+  bool isFPContractDisabled() const { return disabledFPContract; }
 
   // If this condition is false, typo correction must be performed eagerly
   // rather than delayed in many places, as it makes use of dependent types.

@@ -18,6 +18,7 @@
 #include "CGDebugInfo.h"
 #include "CGObjCRuntime.h"
 #include "CGOpenCLRuntime.h"
+#include "CGSPIRMetadataAdder.h"
 #include "CGOpenMPRuntime.h"
 #include "CGOpenMPRuntimeAMDGCN.h"
 #include "CGOpenMPRuntimeNVPTX.h"
@@ -39,6 +40,7 @@
 #include "clang/Basic/CharInfo.h"
 #include "clang/Basic/CodeGenOptions.h"
 #include "clang/Basic/Diagnostic.h"
+#include "clang/Basic/DiagnosticSema.h"
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/Module.h"
 #include "clang/Basic/SourceManager.h"
@@ -64,6 +66,10 @@
 #include "llvm/Support/MD5.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/X86TargetParser.h"
+
+#include <sstream>
+#include <unordered_set>
+#include <fstream>
 
 using namespace clang;
 using namespace CodeGen;
@@ -629,7 +635,10 @@ void CodeGenModule::Release() {
     // parser will drop debug info with a different version number
     // (and warn about it, too).
     getModule().addModuleFlag(llvm::Module::Warning, "Debug Info Version",
-                              llvm::DEBUG_METADATA_VERSION);
+                              Context.getTargetInfo().getTriple().getOS() != llvm::Triple::IOS ?
+                              llvm::DEBUG_METADATA_VERSION :
+                              // Metal/iOS uses/requires a very specific metadata version number
+                              llvm::IOS_METAL_DEBUG_METADATA_VERSION);
 
   // We need to record the widths of enums and wchar_t, so that we can generate
   // the correct build attributes in the ARM backend. wchar_size is also used by
@@ -733,9 +742,10 @@ void CodeGenModule::Release() {
 
   // Emit OpenCL specific module metadata: OpenCL/SPIR version.
   if (LangOpts.OpenCL) {
-    EmitOpenCLMetadata();
     // Emit SPIR version.
     if (getTriple().isSPIR()) {
+      EmitOpenCLMetadata();
+
       // SPIR v2.0 s2.12 - The SPIR version used by the module is stored in the
       // opencl.spir.version named metadata.
       // C++ for OpenCL has a distinct mapping for version compatibility with
@@ -793,6 +803,9 @@ void CodeGenModule::Release() {
 
   SimplifyPersonality();
 
+  if (getLangOpts().OpenCL && !getLangOpts().Metal)
+    EmitOCLAnnotations();
+
   if (getCodeGenOpts().EmitDeclMetadata)
     EmitDeclMetadata();
 
@@ -801,6 +814,34 @@ void CodeGenModule::Release() {
 
   if (CGDebugInfo *DI = getModuleDebugInfo())
     DI->finalize();
+
+  const llvm::Triple TT(TheModule.getTargetTriple());
+  if (TT.getArch() == llvm::Triple::ArchType::spir ||
+      TT.getArch() == llvm::Triple::ArchType::spir64) {
+    std::list<std::string> sBuildOptions;
+    std::string tmp = getCodeGenOpts().SPIRCompileOptions;
+    while (!tmp.empty()) {
+      auto first = tmp.find_first_not_of(' ');
+      auto last = tmp.find_first_of(' ', first);
+
+      std::string s;
+      if (last != std::string::npos)
+        s = tmp.substr(first, last-first);
+      else if (first != std::string::npos)
+        s = tmp.substr(first);
+      else
+        s = "";
+
+      if (!s.empty())
+        sBuildOptions.push_back(s);
+
+      if (last != std::string::npos)
+        tmp = tmp.substr(last);
+      else
+        tmp = "";
+    }
+    AddSPIRMetadata(TheModule, getLangOpts().OpenCLVersion, sBuildOptions, LangOpts, getContext().getOpenCLFeatures());
+  }
 
   if (getCodeGenOpts().EmitVersionIdentMetadata)
     EmitVersionIdentMetadata();
@@ -1261,7 +1302,7 @@ static std::string getMangledNameImpl(CodeGenModule &CGM, GlobalDecl GD,
     if (FD &&
         FD->getType()->castAs<FunctionType>()->getCallConv() == CC_X86RegCall) {
       Out << "__regcall3__" << II->getName();
-    } else if (FD && FD->hasAttr<CUDAGlobalAttr>() &&
+    } else if (FD && FD->hasAttr<ComputeKernelAttr>() &&
                GD.getKernelReferenceKind() == KernelReferenceKind::Stub) {
       Out << "__device_stub__" << II->getName();
     } else {
@@ -1377,6 +1418,7 @@ StringRef CodeGenModule::getMangledName(GlobalDecl GD) {
   const auto *ND = cast<NamedDecl>(GD.getDecl());
   std::string MangledName = getMangledNameImpl(*this, GD, ND);
 
+#if 0 // we don't want this
   // Ensure either we have different ABIs between host and device compilations,
   // says host compilation following MSVC ABI but device compilation follows
   // Itanium C++ ABI or, if they follow the same ABI, kernel names after
@@ -1386,7 +1428,7 @@ StringRef CodeGenModule::getMangledName(GlobalDecl GD) {
   // result in undefined behavior. Even though we cannot check that naming
   // directly between host- and device-compilations, the host- and
   // device-mangling in host compilation could help catching certain ones.
-  assert(!isa<FunctionDecl>(ND) || !ND->hasAttr<CUDAGlobalAttr>() ||
+  assert(!isa<FunctionDecl>(ND) || !ND->hasAttr<ComputeKernelAttr>() ||
          getLangOpts().CUDAIsDevice ||
          (getContext().getAuxTargetInfo() &&
           (getContext().getAuxTargetInfo()->getCXXABI() !=
@@ -1396,6 +1438,7 @@ StringRef CodeGenModule::getMangledName(GlobalDecl GD) {
                  *this,
                  GD.getWithKernelReferenceKind(KernelReferenceKind::Kernel),
                  ND));
+#endif
 
   auto Result = Manglings.insert(std::make_pair(MangledName, GD));
   return MangledDeclNames[CanonicalGD] = Result.first->first();
@@ -1525,6 +1568,7 @@ void CodeGenModule::SetLLVMFunctionAttributes(GlobalDecl GD,
   F->setCallingConv(static_cast<llvm::CallingConv::ID>(CallingConv));
 }
 
+#if 0 // unused
 static void removeImageAccessQualifier(std::string& TyName) {
   std::string ReadOnlyQual("__read_only");
   std::string::size_type ReadOnlyPos = TyName.find(ReadOnlyQual);
@@ -1544,6 +1588,7 @@ static void removeImageAccessQualifier(std::string& TyName) {
     }
   }
 }
+#endif
 
 // Returns the address space id that should be produced to the
 // kernel_arg_addr_space metadata. This is always fixed to the ids
@@ -1551,6 +1596,7 @@ static void removeImageAccessQualifier(std::string& TyName) {
 // for example in clGetKernelArgInfo() implementation between the address
 // spaces with targets without unique mapping to the OpenCL address spaces
 // (basically all single AS CPUs).
+#if 0 // unused
 static unsigned ArgInfoAddressSpace(LangAS AS) {
   switch (AS) {
   case LangAS::opencl_global:
@@ -1562,152 +1608,2106 @@ static unsigned ArgInfoAddressSpace(LangAS AS) {
   case LangAS::opencl_generic:
     return 4; // Not in SPIR 2.0 specs.
   case LangAS::opencl_global_device:
-    return 5;
+    return 100;
   case LangAS::opencl_global_host:
-    return 6;
+    return 101;
   default:
     return 0; // Assume private.
   }
 }
+#endif
+
+// will recurse through the specified class/struct decl and its base classes,
+// returning a vector containing all iterators to all contained fields
+static std::vector<RecordDecl::field_iterator> get_aggregate_fields(const CXXRecordDecl* decl) {
+	if (decl == nullptr) return {};
+	
+	// must have definition
+	if (!decl->hasDefinition()) return {};
+	
+	//
+	std::vector<RecordDecl::field_iterator> ret;
+	
+	// iterate over / recurse into all bases
+	for (const auto& base : decl->bases()) {
+		const auto base_ret = get_aggregate_fields(base.getType()->getAsCXXRecordDecl());
+		if (!base_ret.empty()) {
+			ret.insert(ret.end(), base_ret.begin(), base_ret.end());
+		}
+	}
+	
+	// iterate over all fields/members
+	for (auto iter = decl->field_begin(); iter != decl->field_end(); ++iter) {
+		ret.push_back(iter);
+	}
+	
+	return ret;
+}
+
+// will recurse through the specified class/struct decl and its base classes,
+// returning a vector containing all iterators to all contained image types
+// NOTE: will return an empty vector if not a proper aggregate image
+static std::vector<RecordDecl::field_iterator> get_aggregate_image_fields(const CXXRecordDecl* decl) {
+	// extract all fields, then check if all are image types (if one isn't, fail)
+	const auto ret = get_aggregate_fields(decl);
+	for (const auto& iter : ret) {
+		if (!iter->getType()->isImageType() &&
+			!iter->getType()->isArrayImageType(false)) {
+			return {};
+		}
+	}
+	return ret;
+}
+
+static std::pair<FieldDecl*, uint32_t> get_array_image_info(const CXXRecordDecl* decl, const ASTContext& ASTCtx) {
+	const auto ret = get_aggregate_fields(decl);
+	if (ret.size() != 1) return { nullptr, 0 };
+	
+	FieldDecl* arr_field_decl = *ret[0];
+	const ConstantArrayType *CAT = ASTCtx.getAsConstantArrayType(arr_field_decl->getType());
+	if (!CAT) return { nullptr, 0 };
+	
+	auto img_cxx_rdecl = CAT->getElementType()->getAsCXXRecordDecl();
+	if (!img_cxx_rdecl) return { nullptr, 0 };
+	
+	auto img_fields = get_aggregate_fields(img_cxx_rdecl);
+	if (img_fields.size() != 1) return { nullptr, 0 };
+	
+	return { *img_fields[0], uint32_t(CAT->getSize().getZExtValue()) };
+}
+
+// will recurse through the specified class/struct decl and its base classes,
+// returning the first image access attribute that it encounters (or nullptr if none)
+static const ImageAccessAttr* get_aggregate_access_attr(const CXXRecordDecl* decl) {
+	if (decl == nullptr) return nullptr;
+	
+	// must have definition
+	if (!decl->hasDefinition()) return nullptr;
+	
+	// iterate over / recurse into all bases
+	for (const auto& base : decl->bases()) {
+		const auto base_ret = get_aggregate_access_attr(base.getTypeSourceInfo()->getType()->getAsCXXRecordDecl());
+		if (base_ret != nullptr) {
+			return base_ret;
+		}
+	}
+	
+	// iterate over all fields/members and return the first access attr
+	for (auto iter = decl->field_begin(); iter != decl->field_end(); ++iter) {
+		// try direct attr first
+		const ImageAccessAttr* access_attr = iter->getAttr<ImageAccessAttr>();
+		if (access_attr != nullptr) {
+			return access_attr;
+		}
+		
+		// then check if this is a c++ decl (struct/union/class) and check if it has the attr
+		const auto as_decl = iter->getType()->getAsCXXRecordDecl();
+		if (as_decl != nullptr) {
+			access_attr = as_decl->getAttr<ImageAccessAttr>();
+			if (access_attr != nullptr) {
+				return access_attr;
+			}
+		}
+	}
+	
+	return nullptr;
+}
+
+// Metadata values extractors.
+static std::string getScalarMetadataValue(const clang::Type *Ty,
+										  const PrintingPolicy &Policy) {
+	assert(Ty && "NULL type");
+	
+	if (Ty->isHalfType()) return "half";
+	
+	if (!Ty->isUnsignedIntegerType()) {
+		return QualType(Ty, 0).getAsString(Policy);
+	}
+	
+	std::string TyName = QualType(Ty, 0).getAsString();
+	if (llvm::StringRef(TyName).startswith("unsigned")) {
+		// Replace unsigned <ty> with u<ty>
+		TyName.erase(1, 8);
+	}
+	
+	return TyName;
+}
+
+static std::string getVectorMetadataValue(const clang::ExtVectorType *Ty,
+										  const PrintingPolicy &Policy) {
+	assert(Ty && "NULL type");
+	
+	const clang::VectorType *VTy = llvm::dyn_cast<clang::VectorType>(Ty);
+	assert(VTy && "Cast to vector failed");
+	
+	auto Ret = getScalarMetadataValue(VTy->getElementType().getTypePtr(), Policy);
+	Ret += std::to_string(VTy->getNumElements());
+	
+	return Ret;
+}
+
+// Returns true if the given module has SPIR (32/64) target
+static bool isSpirTarget(const llvm::Module *M) {
+	assert (M && "NULL module given");
+	return llvm::StringRef(M->getTargetTriple()).startswith("spir");
+}
+
+static std::string getPipeMetadataValue(const clang::PipeType *Ty,
+										const PrintingPolicy &Policy) {
+	assert(Ty && "Null type");
+	
+	const clang::QualType ElemTy = Ty->getElementType();
+	if (const clang::ExtVectorType *VTy = ElemTy->getAs<ExtVectorType>()) {
+		return getVectorMetadataValue(VTy, Policy);
+	}
+	
+	return getScalarMetadataValue(ElemTy.getTypePtr(), Policy);
+}
+
+static ImageAccessAttr* getImageAccessAttribute(const NamedDecl* decl_, const QualType* type_, llvm::LLVMContext &Context) {
+	const Decl* decl = decl_;
+	if (type_) {
+		if (const TypedefType *QTT = dyn_cast<const TypedefType>(*type_)) {
+			decl = QTT->getDecl();
+		}
+	}
+	
+	if (decl->hasAttr<ImageAccessAttr>()) {
+		return decl->getAttr<ImageAccessAttr>();
+	}
+	return nullptr;
+}
 
 void CodeGenModule::GenOpenCLArgMetadata(llvm::Function *Fn,
-                                         const FunctionDecl *FD,
-                                         CodeGenFunction *CGF) {
-  assert(((FD && CGF) || (!FD && !CGF)) &&
-         "Incorrect use - FD and CGF should either be both null or not!");
-  // Create MDNodes that represent the kernel arg metadata.
-  // Each MDNode is a list in the form of "key", N number of values which is
-  // the same number of values as their are kernel arguments.
+										 const FunctionDecl *FD,
+										 CodeGenFunction *CGF,
+										 SmallVector<llvm::Metadata *, 5> &kernelMDArgs) {
+	if (!FD || !CGF) {
+		assert(false && "should not be here");
+	}
+	
+	// Create MDNodes that represent the kernel arg metadata.
+	// Each MDNode is a list in the form of "key", N number of values which is
+	// the same number of values as their are kernel arguments.
+	
+	// TODO: proper handling of EmitVerbose + kernel arg names
+	const PrintingPolicy &Policy = Context.getPrintingPolicy();
+	const bool EmitVerbose = getCodeGenOpts().EmitOpenCLArgMetadata;
+	auto& Builder = CGF->Builder;
+	
+	if (!isSpirTarget(Fn->getParent()) && !EmitVerbose) {
+		return;
+	}
+	
+	// MDNode for the kernel argument address space qualifiers.
+	SmallVector<llvm::Metadata *, 8> addressQuals;
+	addressQuals.push_back(llvm::MDString::get(VMContext, "kernel_arg_addr_space"));
+	
+	// MDNode for the kernel argument access qualifiers (images only).
+	SmallVector<llvm::Metadata *, 8> accessQuals;
+	accessQuals.push_back(llvm::MDString::get(VMContext, "kernel_arg_access_qual"));
+	
+	// MDNode for the kernel argument type names.
+	SmallVector<llvm::Metadata *, 8> argTypeNames;
+	argTypeNames.push_back(llvm::MDString::get(VMContext, "kernel_arg_type"));
+	
+	// MDNode for the kernel argument base type names.
+	SmallVector<llvm::Metadata *, 8> argBaseTypeNames;
+	argBaseTypeNames.push_back(llvm::MDString::get(VMContext, "kernel_arg_base_type"));
+	
+	// MDNode for the kernel argument type qualifiers.
+	SmallVector<llvm::Metadata *, 8> argTypeQuals;
+	argTypeQuals.push_back(llvm::MDString::get(VMContext, "kernel_arg_type_qual"));
+	
+	// MDNode for the kernel argument names.
+	SmallVector<llvm::Metadata *, 8> argNames;
+	if (EmitVerbose) {
+		argNames.push_back(llvm::MDString::get(VMContext, "kernel_arg_name"));
+	}
+	
+	// Creates a canonical name for complex types. In case of anonymous types, the
+	// function appends the meta-type name as prefix: e.g., in case the type is
+	// defined as: typedef struct {...} S, the method returns struct S.
+	static const auto canonicalName = [](const std::string &TyName,
+										 const std::string &MetaTyName) {
+		if (StringRef(TyName).startswith(MetaTyName)) {
+			return TyName;
+		}
+		return std::string(MetaTyName) + " __" + TyName;
+	};
+	
+	static const auto getComplexMetadataValue = [](const clang::Type *Ty,
+												   const PrintingPolicy &Policy) {
+		std::string TyName = QualType(Ty, 0).getCanonicalType().getAsString();
+		if (Ty->isStructureOrClassType()) {
+			return canonicalName(TyName, "struct");
+		} else if (Ty->isUnionType()) {
+			return canonicalName(TyName, "union");
+		} else if (Ty->isEnumeralType()) {
+			return canonicalName(TyName, "enum");
+		}
+		return getScalarMetadataValue(Ty, Policy);
+	};
+	
+	static const auto getPointerOrRefMetadataValue = [](const clang::Type *PTy,
+														bool CanTy,
+														const PrintingPolicy &Policy) {
+		assert(PTy && "Null type");
+		std::string Ret;
+		if (const ExtVectorType *VTy = llvm::dyn_cast<ExtVectorType>(PTy)) {
+			Ret = getVectorMetadataValue(VTy, Policy);
+		} else {
+			Ret = CanTy ? getComplexMetadataValue(PTy, Policy) : getScalarMetadataValue(PTy, Policy);
+		}
+		return Ret + "*";
+	};
+	
+	const auto add_image_arg = [&Builder, this, &Policy, &addressQuals, &accessQuals, &argTypeNames, &argBaseTypeNames, &argNames, &argTypeQuals](const clang::QualType& type,
+																																				  const ImageAccessAttr* access_attr,
+																																				  const std::string& name) {
+		// image is always in global address space
+		addressQuals.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(getContext().getTargetAddressSpace(LangAS::opencl_global))));
+		
+		// set access qualifier
+		if (access_attr && access_attr->isWriteOnly()) {
+			accessQuals.push_back(llvm::MDString::get(VMContext, "write_only"));
+		} else if (access_attr && access_attr->isReadWrite()) {
+			accessQuals.push_back(llvm::MDString::get(VMContext, "read_write"));
+		} else {
+			accessQuals.push_back(llvm::MDString::get(VMContext, "read_only"));
+		}
+		
+		// image type / base type
+		// NOTE: always set base type, because types in image aggregates might be "weird", but should be considered normal
+		const QualType baseTy = type.isCanonical() ? type : type.getCanonicalType();
+		const auto type_name = getComplexMetadataValue(baseTy.getTypePtr(), Policy);
+		argTypeNames.push_back(llvm::MDString::get(VMContext, type_name));
+		argBaseTypeNames.push_back(llvm::MDString::get(VMContext, type_name));
+		
+		// set arg name
+		argNames.push_back(llvm::MDString::get(VMContext, name));
+		
+		// type quals is always empty for images
+		argTypeQuals.push_back(llvm::MDString::get(VMContext, ""));
+	};
+	
+	for (const auto& parm : FD->parameters()) {
+		const auto clang_type = parm->getType();
+		const bool IsCanonical = clang_type.isCanonical();
+		
+		// pointer / buffer
+		if (clang_type->isPointerType() || clang_type->isReferenceType()) {
+			// Get argument type name.
+			std::string tyName;
+			if (const PointerType *PTy = dyn_cast<PointerType>(clang_type.getTypePtr())) {
+				tyName = getPointerOrRefMetadataValue(PTy->getPointeeType().getTypePtr(), false, Policy);
+			} else if (const ReferenceType *RTy = dyn_cast<ReferenceType>(clang_type.getTypePtr())) {
+				tyName = getPointerOrRefMetadataValue(RTy->getPointeeType().getTypePtr(), false, Policy);
+			} else if (const DecayedType *DTy = dyn_cast<DecayedType>(clang_type.getTypePtr())) {
+				tyName = getPointerOrRefMetadataValue(DTy->getPointeeType().getTypePtr(), false, Policy);
+			} else {
+				tyName = getScalarMetadataValue(clang_type.getTypePtr(), Policy);
+			}
+			argTypeNames.push_back(llvm::MDString::get(VMContext, tyName));
+			
+			// Acquiring the base type of the parameter.
+			std::string baseTyName;
+			if (IsCanonical) {
+				baseTyName = tyName;
+			} else {
+				QualType can_pointee_type;
+				if (clang_type->isPointerType()) {
+					can_pointee_type = clang_type.getCanonicalType()->getAs<PointerType>()->getPointeeType();
+				} else { // ref
+					can_pointee_type = clang_type.getCanonicalType()->getAs<ReferenceType>()->getPointeeType();
+				}
+				baseTyName = getPointerOrRefMetadataValue(can_pointee_type.getTypePtr(), true, Policy);
+			}
+			argBaseTypeNames.push_back(llvm::MDString::get(VMContext, baseTyName));
+			
+			// Get address qualifier.
+			QualType pointeeTy = clang_type->getPointeeType();
+			addressQuals.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(Context.getTargetAddressSpace(pointeeTy.getAddressSpace()))));
+			
+			// Get argument type qualifiers:
+			std::string typeQuals;
+			if (clang_type.isRestrictQualified()) {
+				typeQuals = "restrict";
+			}
+			if (pointeeTy.isConstQualified() ||
+				(pointeeTy.getAddressSpace() == LangAS::opencl_constant)) {
+				typeQuals += typeQuals.empty() ? "const" : " const";
+			}
+			if (pointeeTy.isVolatileQualified()) {
+				typeQuals += typeQuals.empty() ? "volatile" : " volatile";
+			}
+			argTypeQuals.push_back(llvm::MDString::get(VMContext, typeQuals));
+			
+			accessQuals.push_back(llvm::MDString::get(VMContext, "none"));
+			argNames.push_back(llvm::MDString::get(VMContext, parm->getName()));
+		} else if (clang_type->isImageType()) { // normal image
+			add_image_arg(clang_type, getImageAccessAttribute(parm, &clang_type, VMContext), parm->getName().str());
+		} else if (clang_type->isAggregateImageType()) { // aggregate image
+			const auto decl = clang_type->getAsCXXRecordDecl();
+			const auto agg_images = get_aggregate_image_fields(decl);
+			
+			const std::string base_name = parm->getName().str() + ".";
+			unsigned int img_idx = 0;
+			for (const auto& img : agg_images) {
+				const auto img_type = img->getType();
+				
+				add_image_arg(img_type, getImageAccessAttribute(*img, &img_type, VMContext),
+							  base_name + std::to_string(img_idx));
+				++img_idx;
+			}
+		} else if (clang_type->isPipeType()) { // pipe
+			// Get argument type name.
+			std::string tyName = getPipeMetadataValue(clang_type->getAs<PipeType>(), Policy);
+			
+			// Acquiring the base type of the parameter.
+			std::string baseTyName;
+			if (IsCanonical) {
+				baseTyName = tyName;
+			} else {
+				baseTyName = getPipeMetadataValue(clang_type.getCanonicalType()->getAs<PipeType>(), Policy);
+			}
+			
+			// Get address qualifier.
+			addressQuals.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(Context.getTargetAddressSpace(LangAS::opencl_global))));
+			
+			// Get argument type qualifiers.
+			std::string typeQuals = "pipe";
+			
+			// Adding the type and base type to the metadata.
+			assert(!tyName.empty() && "Empty type name");
+			argTypeNames.push_back(llvm::MDString::get(VMContext, tyName));
+			assert(!baseTyName.empty() && "Empty base type name");
+			argBaseTypeNames.push_back(llvm::MDString::get(VMContext, baseTyName));
+			
+			argTypeQuals.push_back(llvm::MDString::get(VMContext, typeQuals));
+			
+			// TODO: Get image access qualifier: (also for pipe?)
+			//accessQuals.push_back(getAccessAttribute(parm, Context));
+			
+			if (EmitVerbose) {
+				// Get argument name.
+				argNames.push_back(llvm::MDString::get(VMContext, parm->getName()));
+			}
+		} else { // kernel parameter
+			// TODO: merge pipe functionality
+			
+			addressQuals.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(0 /* private address space*/)));
+			
+			// Get argument type name.
+			std::string tyName = getScalarMetadataValue(clang_type.getTypePtr(), Policy);
+			argTypeNames.push_back(llvm::MDString::get(VMContext, tyName));
+			
+			// Acquiring the base type of the parameter.
+			QualType baseTy = IsCanonical ? clang_type : clang_type.getCanonicalType();
+			std::string baseTyName;
+			if (clang_type->isVectorType()) {
+				baseTyName = getVectorMetadataValue(llvm::dyn_cast<clang::ExtVectorType>(baseTy.getTypePtr()), Policy);
+			} else {
+				baseTyName = getComplexMetadataValue(baseTy.getTypePtr(), Policy);
+			}
+			argBaseTypeNames.push_back(llvm::MDString::get(VMContext, baseTyName));
+			
+			// Get argument type qualifiers:
+			std::string typeQuals;
+			if (clang_type.isConstQualified()) {
+				typeQuals = "const";
+			}
+			if (clang_type.isVolatileQualified()) {
+				typeQuals += typeQuals.empty() ? "volatile" : " volatile";
+			}
+			argTypeQuals.push_back(llvm::MDString::get(VMContext, typeQuals));
+			
+			accessQuals.push_back(llvm::MDString::get(VMContext, "none"));
+			argNames.push_back(llvm::MDString::get(VMContext, parm->getName()));
+		}
+	}
+	
+	kernelMDArgs.push_back(llvm::MDNode::get(VMContext, addressQuals));
+	kernelMDArgs.push_back(llvm::MDNode::get(VMContext, accessQuals));
+	kernelMDArgs.push_back(llvm::MDNode::get(VMContext, argTypeNames));
+	kernelMDArgs.push_back(llvm::MDNode::get(VMContext, argBaseTypeNames));
+	kernelMDArgs.push_back(llvm::MDNode::get(VMContext, argTypeQuals));
+	if (EmitVerbose) {
+		kernelMDArgs.push_back(llvm::MDNode::get(VMContext, argNames));
+	}
+}
 
-  const PrintingPolicy &Policy = Context.getPrintingPolicy();
+void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn, CGBuilderTy& Builder) {
+	const bool is_kernel = FD->hasAttr<ComputeKernelAttr>();
+	const bool is_vertex = FD->hasAttr<GraphicsVertexShaderAttr>();
+	const bool is_fragment = FD->hasAttr<GraphicsFragmentShaderAttr>();
+	
+	SmallVector<llvm::Metadata*, 8> stage_infos;
+	stage_infos.push_back(llvm::MDString::get(VMContext, FD->getName()));
+	
+	static const std::string prefix_builtin = "builtin:";
+	static const std::string prefix_stage = "stage:";
+	static const std::string prefix_arg = "arg:";
+	static const std::string prefix_iub = "iub:";
+	
+	//
+	const auto handle_stage_input_output = [this, &stage_infos, &is_vertex, &is_fragment, &Fn](const QualType& clang_type,
+																							   llvm::Type* llvm_type,
+																							   const bool is_return,
+																							   uint32_t* arg_idx) {
+		assert((arg_idx != nullptr && !is_return) || (arg_idx == nullptr && is_return) && "invalid args");
+		
+		const bool is_vertex_io = (is_return && is_vertex) || (!is_return && is_fragment);
+		const bool is_fragment_io = (is_return && is_fragment);
+		
+		const auto add_fbo_output = [this, &stage_infos](const QualType& type, const uint32_t location) {
+			const auto canon_data_type = type.getCanonicalType();
+			std::string output_type_str = "float";
+			if (canon_data_type->isIntegerType()) output_type_str = "int";
+			if (canon_data_type->isUnsignedIntegerType()) output_type_str = "uint";
+			stage_infos.push_back(llvm::MDString::get(VMContext, prefix_stage + "fbo_output:" + output_type_str + ":" + std::to_string(location)));
+		};
+		
+		const auto cxx_rdecl = clang_type->getAsCXXRecordDecl();
+		if (cxx_rdecl) {
+			if (!cxx_rdecl->hasAttr<VectorCompatAttr>()) {
+				// must handle each field individually
+				const auto fields = getTypes().get_aggregate_scalar_fields(cxx_rdecl, cxx_rdecl);
+				
+				// fbo output location resolve/computation needs to happen in two passes:
+				// * gather all fixed/attr locations, make sure none conflict
+				// * used fixed locations + generate automatic location for non-fixed outputs
+				std::unordered_set<uint32_t> fbo_locations;
+				if (is_fragment_io) {
+					for (const auto& field : fields) {
+						if (field.hasAttr<GraphicsFBOColorLocationAttr>()) {
+							const auto loc_attr = field.getAttr<GraphicsFBOColorLocationAttr>();
+							if (!fbo_locations.insert(loc_attr->getEvalLocation()).second) {
+								// TODO: should have been detected earlier ...
+								Error(loc_attr->getLocation(), StringRef("location already in use"));
+								// TODO: add note of prev location?
+								return;
+							}
+						}
+					}
+				}
+				
+				uint32_t struct_arg_idx = 0, fbo_location = 0;
+				for (const auto& field : fields) {
+					llvm::Type* field_llvm_type = nullptr;
+					// get llvm type from function args (if !return), else get it from the struct type itself
+					if (arg_idx) {
+						field_llvm_type = std::next(Fn->arg_begin(), *arg_idx)->getType();
+					} else {
+						field_llvm_type = llvm_type->getStructElementType(struct_arg_idx++);
+					}
+					
+					if (is_vertex_io) {
+						if (field.hasAttr<GraphicsVertexPositionAttr>()) {
+							stage_infos.push_back(llvm::MDString::get(VMContext, prefix_stage + "position"));
+						} else if (field.hasAttr<GraphicsPointSizeAttr>()) {
+							stage_infos.push_back(llvm::MDString::get(VMContext, prefix_stage + "point_size"));
+						} else {
+							stage_infos.push_back(llvm::MDString::get(VMContext, "none"));
+						}
+					} else if (is_fragment_io) {
+						if (field.hasAttr<GraphicsFBOColorLocationAttr>()) {
+							add_fbo_output(field.type, field.getAttr<GraphicsFBOColorLocationAttr>()->getEvalLocation());
+						} else if (field.hasAttr<GraphicsFBODepthTypeAttr>()) {
+							const auto depth_attr = field.getAttr<GraphicsFBODepthTypeAttr>();
+							if (!field.type->isFloatingType()) {
+								// TODO: should have been detected earlier ...
+								Error(depth_attr->getLocation(),
+									  StringRef("depth attribute can only be applied to floating point types"));
+								return;
+							}
+							
+							std::string depth_qual;
+							switch (depth_attr->getDepthQualifier()) {
+								case clang::GraphicsFBODepthTypeAttr::FBODepthTypeAny: depth_qual = "any"; break;
+								case clang::GraphicsFBODepthTypeAttr::FBODepthTypeLess: depth_qual = "less"; break;
+								case clang::GraphicsFBODepthTypeAttr::FBODepthTypeGreater: depth_qual = "greater"; break;
+							}
+							stage_infos.push_back(llvm::MDString::get(VMContext, prefix_stage + "fbo_depth:" + depth_qual));
+						} else {
+							for (;;) {
+								if (fbo_locations.count(fbo_location) > 0) {
+									++fbo_location;
+								} else {
+									break;
+								}
+							}
+							add_fbo_output(field.type, fbo_location);
+							++fbo_location;
+						}
+					}
+					
+					// next
+					if (arg_idx) ++*arg_idx;
+				}
+				if (arg_idx) --*arg_idx; // fixup, b/c of inc later
+			} else {
+				// stage defaults (can only be those)
+				if (is_vertex_io) {
+					stage_infos.push_back(llvm::MDString::get(VMContext, prefix_stage + "position"));
+				} else if (is_fragment_io) {
+					add_fbo_output(clang_type, 0);
+				}
+			}
+		} else if (!clang_type->isVoidType()) {
+			// TODO: anything else?
+			// stage defaults (can only be those)
+			if (is_vertex_io) {
+				stage_infos.push_back(llvm::MDString::get(VMContext, prefix_stage + "position"));
+			} else if (is_fragment_io) {
+				add_fbo_output(clang_type, 0);
+			}
+		} else {
+			return;
+		}
+	};
+	
+	//
+	stage_infos.push_back(llvm::MDString::get(VMContext, "stage_input"));
+	
+	const auto add_image_arg = [this, &stage_infos](const clang::QualType& type,
+													const ImageAccessAttr* access_attr,
+													const FloorImageDataTypeAttr* data_type,
+													const std::string& name,
+													const uint32_t elem_count = 1,
+													const bool is_array = false) {
+		std::string access_str = "read";
+		if (access_attr && access_attr->isWriteOnly()) {
+			access_str = "write";
+		} else if (access_attr && access_attr->isReadWrite()) {
+			assert(false && "read/write is not supported");
+		}
+		
+		std::string sample_type_str = "float";
+		if (data_type) {
+			const auto canon_data_type = data_type->getImageDataType().getCanonicalType();
+			if (canon_data_type->isIntegerType()) sample_type_str = "int";
+			if (canon_data_type->isUnsignedIntegerType()) sample_type_str = "uint";
+			// else: just assume float
+		}
+		
+		stage_infos.push_back(llvm::MDString::get(VMContext, (prefix_arg + access_str +
+															  (is_array ? ":array" : ":scalar") +
+															  ":" + std::to_string(elem_count) +
+															  ":" + sample_type_str)));
+	};
+	
+	uint32_t arg_idx = 0;
+	uint32_t iub_count = 0;
+	for (const auto& parm : FD->parameters()) {
+		const auto clang_type = parm->getType();
+		auto arg_iter = std::next(Fn->arg_begin(), arg_idx);
+		const auto llvm_type = arg_iter->getType();
+		const auto cxx_rdecl = clang_type->getAsCXXRecordDecl();
+		
+		// TODO: put into static func
+		const auto compute_type_size = [this, &parm, &Fn](llvm::Type* type) {
+			if (!type->isSized()) {
+				auto err_diagID = getDiags().getCustomDiagID(DiagnosticsEngine::Fatal, "%0");
+				getDiags().Report(parm->getSourceRange().getBegin(), err_diagID) << "parameter uses a type with an unknown size (NOTE: this can happen when internal vector/array type conversion/replacement has failed)";
+				
+				auto param_note_diagID = getDiags().getCustomDiagID(DiagnosticsEngine::Note, "LLVM type: %0");
+				std::string param_type = "";
+				llvm::raw_string_ostream param_type_stream(param_type);
+				type->print(param_type_stream);
+				getDiags().Report(parm->getSourceRange().getBegin(), param_note_diagID) << param_type_stream.str();
+				
+				auto func_note_diagID = getDiags().getCustomDiagID(DiagnosticsEngine::Note, "LLVM function type: %0");
+				std::string fun_type = "";
+				llvm::raw_string_ostream fun_type_stream(fun_type);
+				Fn->getFunctionType()->print(fun_type_stream);
+				getDiags().Report(parm->getSourceRange().getBegin(), func_note_diagID) << fun_type_stream.str();
+				
+				return uint64_t(0);
+			}
+			return getDataLayout().getTypeStoreSize(type).getFixedValue();
+		};
+		
+		// stage input
+		if (parm->hasAttr<GraphicsStageInputAttr>()) {
+			handle_stage_input_output(clang_type, llvm_type, false, &arg_idx);
+		} else if (clang_type->isArrayImageType(true)) { // image array
+			const auto array_image_info = get_array_image_info(cxx_rdecl, Context);
+			if (array_image_info.first != nullptr &&
+				array_image_info.second > 0) {
+				add_image_arg(array_image_info.first->getType(),
+							  array_image_info.first->getAttr<ImageAccessAttr>(),
+							  array_image_info.first->getAttr<FloorImageDataTypeAttr>(),
+							  parm->getName().str(),
+							  array_image_info.second,
+							  true /* always an array */);
+			}
+		} else if (clang_type->isAggregateImageType()) { // aggregate image
+			const auto agg_images = get_aggregate_image_fields(clang_type->getAsCXXRecordDecl());
+			for (const auto& img : agg_images) {
+				uint32_t elem_count = 1;
+				bool is_array = false;
+				if (img->getType()->isPointerType()) {
+					elem_count = Context.getAsConstantArrayType(img->getType()->getPointeeType())->getSize().getZExtValue();
+					is_array = true;
+				}
+				add_image_arg(img->getType(),
+							  img->getAttr<ImageAccessAttr>(),
+							  img->getAttr<FloorImageDataTypeAttr>(),
+							  parm->getName().str(),
+							  elem_count,
+							  is_array);
+				
+				// next llvm arg
+				++arg_idx;
+			}
+			// fix up llvm arg count (will inc again after this)
+			--arg_idx;
+		}
+		// make parameters a IUB if their size is <= the size limit and we are still below the IUB count limit
+		else if (clang_type->isReferenceType() &&
+				 clang_type->getPointeeType().getAddressSpace() == LangAS::opencl_constant &&
+				 parm->getAttr<FloorArgBufferAttr>() == nullptr /* must not be an argument buffer */ &&
+				 compute_type_size(llvm_type->getPointerElementType()) <= getCodeGenOpts().VulkanIUBSize &&
+				 iub_count < getCodeGenOpts().VulkanIUBCount) {
+			stage_infos.push_back(llvm::MDString::get(VMContext, prefix_iub + std::to_string(iub_count)));
+			++iub_count;
+			
+			// tag as IUB
+			arg_iter->addAttr(llvm::Attribute::get(getLLVMContext(), "vulkan_iub"));
+		} else { // anything else
+			stage_infos.push_back(llvm::MDString::get(VMContext, "none"));
+			
+			if (parm->getAttr<FloorArgBufferAttr>() != nullptr) {
+				// tag as argument buffer
+				arg_iter->addAttr(llvm::Attribute::get(getLLVMContext(), "vulkan_arg_buffer"));
+			}
+		}
+		
+		// next llvm arg
+		++arg_idx;
+	}
+	
+	// add fixed input
+	if (getCodeGenOpts().VulkanSoftPrintf > 0) {
+		// soft-printf buffer metadata (plain parameter/buffer)
+		stage_infos.push_back(llvm::MDString::get(VMContext, "none"));
+	}
+	if (is_kernel) {
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "global_invocation_id"));
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "local_invocation_id"));
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "workgroup_id"));
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "num_workgroups"));
+	} else if (is_vertex) {
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "vertex_index"));
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "view_index"));
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "instance_index"));
+	} else if (is_fragment) {
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "point_coord"));
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "frag_coord"));
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "view_index"));
+	}
+	
+	// handle return value
+	stage_infos.push_back(llvm::MDString::get(VMContext, "stage_output"));
+	if (is_vertex || is_fragment) {
+		handle_stage_input_output(FD->getReturnType(), Fn->getReturnType(), true, nullptr);
+	}
+	
+	// add to global stage_io node
+	auto stage_infos_node = llvm::MDNode::get(VMContext, stage_infos);
+	auto vk_stage_io = getModule().getOrInsertNamedMetadata("vulkan.stage_io");
+	vk_stage_io->addOperand(stage_infos_node);
+}
 
-  // MDNode for the kernel argument address space qualifiers.
-  SmallVector<llvm::Metadata *, 8> addressQuals;
+static bool is_indirect_buffer(const clang::QualType& type, CodeGenModule &CGM,
+							   const bool has_arg_buffer_attr) {
+	if (type.isNull()) {
+		return false;
+	}
+	
+	const auto clang_pointee_type = type->getPointeeType();
+	const auto llvm_type = CGM.getTypes().ConvertTypeForMem(type);
+	const auto llvm_pointee_type = llvm_type->getPointerElementType();
+	
+	// CUDA/Host-Compute: must have had floor arg buffer attribute on the original decl
+	// otherwise: check if in constant address space
+	const auto is_arg_buffer = (!CGM.getLangOpts().CUDA && !CGM.getLangOpts().FloorHostCompute ?
+								(clang_pointee_type.getAddressSpace() == LangAS::opencl_constant) :
+								has_arg_buffer_attr);
+	
+	if (type->isReferenceType() && llvm_pointee_type->isStructTy() && is_arg_buffer) {
+		// initial requirements are fulfilled
+		// -> need to recursively check for any pointers/buffers/images now (if none are found, this is a normal struct/param)
+		const std::function<bool(const clang::QualType&)> indirect_checker = [&indirect_checker](const clang::QualType& type) {
+			if (type->isPointerType() ||
+				type->isReferenceType() ||
+				type->isImageType() ||
+				type->isArrayImageType(true) ||
+				type->isAggregateImageType()) {
+				return true;
+			} else if (const auto type_rdecl = type->getAsCXXRecordDecl()) {
+				// struct -> recursively check fields
+				const auto fields = get_aggregate_fields(type_rdecl);
+				for (const auto& field : fields) {
+					auto field_type = field->getType();
+					if (field_type->isArrayType()) {
+						field_type = field_type->getAsArrayTypeUnsafe()->getElementType();
+					}
+					if (indirect_checker(field_type)) {
+						return true;
+					}
+				}
+			}
+			// normal arg
+			return false;
+		};
+		return indirect_checker(clang_pointee_type);
+	}
+	return false;
+}
 
-  // MDNode for the kernel argument access qualifiers (images only).
-  SmallVector<llvm::Metadata *, 8> accessQuals;
+void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
+								   const CGFunctionInfo &FnInfo,
+								   SmallVector <llvm::Metadata*, 5> &kernelMDArgs,
+								   CGBuilderTy& Builder) {
+	const bool is_kernel = FD->hasAttr<ComputeKernelAttr>();
+	const bool is_vertex = FD->hasAttr<GraphicsVertexShaderAttr>();
+	const bool is_fragment = FD->hasAttr<GraphicsFragmentShaderAttr>();
+	
+	//
+	SmallVector<llvm::Metadata*, 4> stage_infos;
+	SmallVector<llvm::Metadata*, 8> arg_infos;
+	
+	//
+	const PrintingPolicy &Policy = Context.getPrintingPolicy();
+	const auto make_type_name = [&Policy](const clang::QualType& type) {
+		// NOTE: air wants the type w/o qualifiers
+		const auto base_unq_type = type.getTypePtr()->getBaseElementTypeUnsafe();
+		const auto unqualified_type = base_unq_type->getCanonicalTypeInternal();
+		
+		// strips "const", "volatile", "restrict" and "__restrict" from the type name
+		const auto strip_cvr = [](std::string in_str) {
+			if (const auto const_pos = in_str.find("const "); const_pos != std::string::npos) {
+				in_str.erase(const_pos, 6);
+			}
+			if (const auto volatile_pos = in_str.find("volatile "); volatile_pos != std::string::npos) {
+				in_str.erase(volatile_pos, 9);
+			}
+			if (const auto restrict_pos = in_str.find("restrict "); restrict_pos != std::string::npos) {
+				in_str.erase(restrict_pos, 9);
+			}
+			if (const auto restrict2_pos = in_str.find("__restrict "); restrict2_pos != std::string::npos) {
+				in_str.erase(restrict2_pos, 11);
+			}
+			return in_str;
+		};
+		
+		// convert floor "vectorN<type>" to "typeN"
+		if (const auto cxx_rdecl = unqualified_type->getAsCXXRecordDecl();
+			cxx_rdecl && cxx_rdecl->hasAttr<VectorCompatAttr>()) {
+			const auto floor_vec_name = unqualified_type.getAsString(Policy);
+			const auto type_param_start = floor_vec_name.find('<');
+			const auto type_param_end = floor_vec_name.rfind('>');
+			if (type_param_start != std::string::npos && type_param_start > 0 &&
+				type_param_end != std::string::npos && type_param_end > type_param_start) {
+				const auto vec_elem_type = floor_vec_name.substr(type_param_start + 1, type_param_end - type_param_start - 1);
+				const auto vec_size = floor_vec_name.substr(type_param_start - 1, 1);
+				return strip_cvr(vec_elem_type + vec_size);
+			}
+		}
+		
+		std::string type_name = "";
+		if (type->isVectorType()) {
+			type_name = getVectorMetadataValue(llvm::dyn_cast<clang::ExtVectorType>(unqualified_type.getTypePtr()), Policy);
+		} else if (type->isHalfType()) {
+			type_name = "half";
+		} else {
+			type_name = unqualified_type.getAsString(Policy);
+		}
+		// Turn "unsigned type" to "utype"
+		const auto pos = type_name.find("unsigned");
+		if (pos != std::string::npos) type_name.erase(pos + 1, 8);
+		return strip_cvr(type_name);
+	};
+	
+	//
+	auto abi_arg_info_iter = FnInfo.arg_begin();
+	unsigned int arg_idx = 0, buffer_idx = 0, tex_idx = 0;
+	for (const auto& parm : FD->parameters()) {
+		const auto clang_type = parm->getType();
+		const auto cxx_rdecl = clang_type->getAsCXXRecordDecl();
+		
+		//
+		const auto add_image_arg = [this, &Builder, &tex_idx, &arg_infos, &arg_idx, &parm](const clang::QualType& type,
+																						   const ImageAccessAttr* access_attr,
+																						   const FloorImageDataTypeAttr* data_type,
+																						   const std::string& name,
+																						   const uint32_t elem_count = 1) {
+			SmallVector<llvm::Metadata*, 16> arg_info;
+			
+			// #0: param index
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+			// #1: storage type
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.texture"));
+			// #2/#3: location_index (note: separate for buffers and textures)
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.location_index"));
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(tex_idx)));
+			tex_idx += elem_count;
+			// #4: index count/range
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(elem_count)));
+			// #5: access type (sample = 0, read = 1 or write = 2)
+			// note that "read" is essentially a subset of "sample" -> use "sample" for r/o
+			if (access_attr && access_attr->isWriteOnly()) {
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.write"));
+			} else if (access_attr && access_attr->isReadWrite()) {
+				// TODO: this isn't really supported
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.write"));
+			} else {
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.sample"));
+			}
+			
+			// #6/#7: texture type
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			// proper type is necessary for metal debugging purposes
+			std::string tex_type_name = "";
+			if (elem_count > 1) {
+				tex_type_name += "array<";
+			}
+			const auto builtin_type = type->getAs<BuiltinType>();
+			if (!builtin_type) {
+				Error(parm->getSourceRange().getBegin(), StringRef("invalid image type (not a builtin type)!"));
+				return;
+			}
+			switch (builtin_type->getKind()) {
+				case BuiltinType::OCLImage1d:
+					tex_type_name += "texture1d";
+					break;
+				case BuiltinType::OCLImage1dArray:
+					tex_type_name += "texture1d_array";
+					break;
+				case BuiltinType::OCLImage2d:
+					tex_type_name += "texture2d";
+					break;
+				case BuiltinType::OCLImage2dArray:
+					tex_type_name += "texture2d_array";
+					break;
+				case BuiltinType::OCLImage2dDepth:
+					tex_type_name += "depth2d";
+					break;
+				case BuiltinType::OCLImage2dArrayDepth:
+					tex_type_name += "depth2d_array";
+					break;
+				case BuiltinType::OCLImage2dMSAA:
+					tex_type_name += "texture2d_ms";
+					break;
+				case BuiltinType::OCLImage2dMSAADepth:
+					tex_type_name += "depth2d_ms";
+					break;
+				case BuiltinType::OCLImage3d:
+					tex_type_name += "texture3d";
+					break;
+				case BuiltinType::OCLImageCube:
+					tex_type_name += "texturecube";
+					break;
+				case BuiltinType::OCLImageCubeArray:
+					tex_type_name += "texturecube_array";
+					break;
+				case BuiltinType::OCLImageCubeDepth:
+					tex_type_name += "depthcube";
+					break;
+				case BuiltinType::OCLImageCubeArrayDepth:
+					tex_type_name += "depthcube_array";
+					break;
+				default:
+					Error(parm->getSourceRange().getBegin(), StringRef("invalid image type!"));
+					return;
+			}
+			
+			tex_type_name += "<";
+			std::string sample_type_str = "float";
+			if (data_type) {
+				const auto canon_data_type = data_type->getImageDataType().getCanonicalType();
+				if (canon_data_type->isIntegerType()) sample_type_str = "int";
+				if (canon_data_type->isUnsignedIntegerType()) sample_type_str = "uint";
+				// else: just assume float
+			}
+			tex_type_name += sample_type_str;
+			tex_type_name += ", ";
+			if (access_attr && access_attr->isReadOnly()) {
+				tex_type_name += "sample";
+			} else {
+				tex_type_name += "write";
+			}
+			tex_type_name += ">";
+			
+			if (elem_count > 1) {
+				tex_type_name += ", " + std::to_string(elem_count) + ">";
+			}
+			
+			arg_info.push_back(llvm::MDString::get(VMContext, tex_type_name));
+			
+			// #8/#9: arg name
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, StringRef(name)));
+			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+		};
+		
+		//
+		const auto add_indirect_constant = [this, &Builder, &make_type_name](const clang::QualType& type,
+																			 const NamedDecl& decl,
+																			 const bool is_top_level,
+																			 uint32_t& arg_idx_at_level,
+																			 uint32_t& buffer_idx_at_level,
+																			 const uint32_t buffer_array_size) -> SmallVector<llvm::Metadata*, 16> {
+			const auto clang_pointee_type = type->getPointeeType();
+			
+			SmallVector<llvm::Metadata*, 16> arg_info;
+			
+			// #0: param index
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx_at_level)));
+			if (!is_top_level) {
+				++arg_idx_at_level;
+			}
+			// #1: storage type
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.indirect_constant"));
+			// #2/#3: location_index (note: even though this is a constant, it uses the same idx as buffers)
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.location_index"));
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(buffer_idx_at_level)));
+			buffer_idx_at_level += std::max(buffer_array_size, 1u);
+			// #4: index count/range
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(1)));
+			// #5/#6: type name
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			// NOTE: air wants the pointed-to/pointee type here
+			arg_info.push_back(llvm::MDString::get(VMContext, make_type_name(!clang_pointee_type.isNull() ? clang_pointee_type : type)));
+			// #7/#8: arg name
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, decl.getName()));
+			
+			return arg_info;
+		};
+		
+		// "forward decl"
+		std::function<SmallVector<llvm::Metadata*, 16>(const clang::QualType&, const NamedDecl&, const bool, const bool, uint32_t&, uint32_t&, const uint32_t)> add_buffer_arg;
+		
+		// handle "air.struct_type_info" metadata
+		const std::function<SmallVector<llvm::Metadata*, 16>(const CXXRecordDecl&, const Decl&, const bool, const bool, uint32_t&, uint32_t&)> add_struct_type_info =
+		[this, &add_struct_type_info, &add_buffer_arg, &make_type_name, &add_indirect_constant, &Builder](const CXXRecordDecl& struct_rdecl,
+																										  const Decl& parent_decl,
+																										  const bool is_indirect, // specifies if we're within an indirect buffer
+																										  const bool indirect_buffer,
+																										  uint32_t& arg_idx_child,
+																										  uint32_t& buffer_idx_child) -> SmallVector<llvm::Metadata*, 16> {
+			// TODO: this is not ideal and doesn't properly handle unions
+			const auto fields = get_aggregate_fields(&struct_rdecl);
+			bool ignore = false;
+			for (const auto& field : fields) {
+				if (field->isAnonymousStructOrUnion() ||
+					field->isBitField()) {
+					ignore = true;
+					break;
+				}
+			}
+			// TODO/NOTE: ignore anonymous structs/unions and bitfields for now
+			if (ignore) {
+				return {};
+			}
+			
+			SmallVector<llvm::Metadata*, 16> struct_info;
+			uint32_t offset = 0;
+			for (const auto& field : fields) {
+				auto field_type = field->getType();
+				auto llvm_field_type = getTypes().ConvertTypeForMem(field_type); // TODO: should use this _everywhere_ instead of llvm type tracking/matching!
+				uint32_t array_size = 0;
+				if (field_type->isArrayType()) {
+					field_type = field_type->getAsArrayTypeUnsafe()->getElementType();
+					array_size = (uint32_t)llvm_field_type->getArrayNumElements();
+					llvm_field_type = getTypes().ConvertTypeForMem(field_type);
+				}
+				auto field_pointee_type = field_type->getPointeeType();
+				
+				bool is_inline_struct = false;
+				const auto buffer_idx_offset = buffer_idx_child;
+				if (indirect_buffer || is_indirect) {
+					if (!field_type->isPointerType() &&
+						!field_type->isReferenceType() &&
+						!field_type->isImageType() &&
+						!field_type->isArrayImageType(true) &&
+						!field_type->isAggregateImageType() &&
+						!parent_decl.hasAttr<GraphicsStageInputAttr>() &&
+						field_type->isStructureOrClassType()) {
+						if (const auto inline_struct_rdecl = field_type->getAsCXXRecordDecl();
+							inline_struct_rdecl && !inline_struct_rdecl->hasAttr<VectorCompatAttr>()) {
+							is_inline_struct = true;
+							// #-2: inline struct type
+							struct_info.push_back(llvm::MDString::get(VMContext, "air.struct_type_info"));
+							// #-1: metadata of struct type
+							uint32_t struct_arg_idx_child = 0, struct_buf_idx_child = 0;
+							auto struct_type_info = add_struct_type_info(*inline_struct_rdecl, struct_rdecl, is_indirect, indirect_buffer, struct_arg_idx_child, struct_buf_idx_child);
+							assert(!struct_type_info.empty());
+							struct_info.push_back(llvm::MDNode::get(VMContext, struct_type_info));
+							
+							// next param
+							++arg_idx_child;
+							// adjust buffer index at this level
+							buffer_idx_child += std::max(array_size, 1u) * struct_buf_idx_child;
+						}
+					}
+				}
+				
+				// #0: offset
+				struct_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(offset)));
+				// #1: sizeof
+				const auto size = (uint32_t)getDataLayout().getTypeStoreSize(llvm_field_type);
+				offset += size * uint32_t(std::max(array_size, 1u));
+				struct_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(size)));
+				// #2: array size (0 signals "no array")
+				struct_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(array_size)));
+				// #3: type name
+				struct_info.push_back(llvm::MDString::get(VMContext, make_type_name(!field_pointee_type.isNull() ? field_pointee_type : field_type)));
+				// #4: name/identifier
+				struct_info.push_back(llvm::MDString::get(VMContext, field->getName()));
+				// #5/#6: indirect argument (aka "argument buffer")
+				if (indirect_buffer || is_indirect) {
+					struct_info.push_back(llvm::MDString::get(VMContext, "air.indirect_argument"));
+					if (is_inline_struct) {
+						// idx offset to this struct (struct itself is encoded above)
+						struct_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(buffer_idx_offset)));
+					} else if (field_type->isPointerType() || field_type->isReferenceType()) {
+						// buffer field
+						auto field_arg_info = add_buffer_arg(field_type, **field, false, true, arg_idx_child, buffer_idx_child, array_size);
+						if (field_arg_info.empty()) {
+							return {};
+						}
+						struct_info.push_back(llvm::MDNode::get(VMContext, field_arg_info));
+					} else if (field_type->isImageType()) {
+						// TODO: support this
+						Error(struct_rdecl.getSourceRange().getBegin(), StringRef("images are not yet supported in indirect/argument buffers"));
+						return {};
+					} else if (field_type->isArrayImageType(true)) {
+						// TODO: support this
+						Error(struct_rdecl.getSourceRange().getBegin(), StringRef("image arrays are not yet supported in indirect/argument buffers"));
+						return {};
+					} else if (field_type->isAggregateImageType()) {
+						// TODO: support this
+						Error(struct_rdecl.getSourceRange().getBegin(), StringRef("aggregate images are not yet supported in indirect/argument buffers"));
+						return {};
+					} else if (parent_decl.hasAttr<GraphicsStageInputAttr>()) {
+						// hard error
+						Error(struct_rdecl.getSourceRange().getBegin(), StringRef("stage input is not supported in indirect/argument buffers"));
+						return {};
+					} else {
+						// value / "indirect constant"
+						auto field_arg_info = add_indirect_constant(field_type, **field, false, arg_idx_child, buffer_idx_child, array_size);
+						if (field_arg_info.empty()) {
+							return {};
+						}
+						struct_info.push_back(llvm::MDNode::get(VMContext, field_arg_info));
+					}
+				}
+			}
+			return struct_info;
+		};
+		
+		// handle general buffer metadata
+		add_buffer_arg = [this, &Builder, &make_type_name, &add_struct_type_info](const clang::QualType& type,
+																				  const NamedDecl& decl,
+																				  const bool is_top_level,
+																				  const bool is_indirect, // specifies if we're within an indirect buffer
+																				  uint32_t& arg_idx_at_level,
+																				  uint32_t& buffer_idx_at_level,
+																				  const uint32_t buffer_array_size) -> SmallVector<llvm::Metadata*, 16> {
+			const auto clang_pointee_type = type->getPointeeType();
+			const auto llvm_type = getTypes().ConvertTypeForMem(type);
+			const auto llvm_pointee_type = llvm_type->getPointerElementType();
+			
+			// check if this is an indirect buffer
+			const auto indirect_buffer = is_indirect_buffer(type, *this, false);
+			
+			SmallVector<llvm::Metadata*, 16> arg_info;
+			
+			// #0: param index
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx_at_level)));
+			if (!is_top_level) {
+				++arg_idx_at_level;
+			}
+			// #1: storage type
+			arg_info.push_back(llvm::MDString::get(VMContext, (!indirect_buffer ? "air.buffer" : "air.indirect_buffer")));
+			
+			// references / single-object parameters also store/require the buffer_size
+			if (type->isReferenceType()) {
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.buffer_size"));
+				arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(getDataLayout().getTypeStoreSize(llvm_pointee_type))));
+			}
+			
+			// #2/#3: location_index (note: separate for buffers and textures)
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.location_index"));
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(buffer_idx_at_level)));
+			buffer_idx_at_level += std::max(buffer_array_size, 1u);
+			// #4: index count/range
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(1)));
+			// #5: access (read/read_write, TODO: write?)
+			if (clang_pointee_type.isConstQualified() ||
+				(clang_pointee_type.getAddressSpace() == LangAS::opencl_constant)) {
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.read"));
+			} else {
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.read_write"));
+			}
+			
+			// #6/#7: struct info
+			if (const auto pointee_rdecl = clang_pointee_type->getAsCXXRecordDecl()) {
+				uint32_t arg_idx_child = 0, buffer_idx_child = 0; // for indirect/arg buffers
+				auto struct_type_info = add_struct_type_info(*pointee_rdecl, decl, is_indirect, indirect_buffer, arg_idx_child, buffer_idx_child);
+				if (!struct_type_info.empty()) {
+					arg_info.push_back(llvm::MDString::get(VMContext, "air.struct_type_info"));
+					arg_info.push_back(llvm::MDNode::get(VMContext, struct_type_info));
+				}
+			}
+			
+			// #8/#9: type size
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_size"));
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(getDataLayout().getTypeStoreSize(llvm_pointee_type))));
+			// #10/#11: type alignment
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_align_size"));
+			// max out at 16, anything higher is unreasonable
+			// TODO: make sure this is POT
+			const auto align_size = std::min(getDataLayout().getTypeAllocSize(llvm_pointee_type).getFixedValue(), uint64_t(16));
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(align_size)));
+			//getPrimitiveSizeInBits
+			// #12/#13: type name
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			// NOTE: air wants the pointed-to/pointee type here
+			arg_info.push_back(llvm::MDString::get(VMContext, make_type_name(clang_pointee_type)));
+			// #14/#15: arg name
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, decl.getName()));
+			return arg_info;
+		};
+		
+		if (clang_type->isPointerType() || clang_type->isReferenceType()) { // pointer / buffer
+			auto arg_info = add_buffer_arg(clang_type, *parm, true, false, arg_idx, buffer_idx, 0);
+			if (arg_info.empty()) {
+				return;
+			}
+			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+		} else if (clang_type->isImageType()) { // image
+			add_image_arg(clang_type, parm->getAttr<ImageAccessAttr>(),
+						  parm->getAttr<FloorImageDataTypeAttr>(), parm->getName().str());
+		} else if (clang_type->isArrayImageType(true)) { // image array
+			const auto array_image_info = get_array_image_info(cxx_rdecl, Context);
+			if (array_image_info.first != nullptr &&
+				array_image_info.second > 0) {
+				add_image_arg(array_image_info.first->getType(),
+							  array_image_info.first->getAttr<ImageAccessAttr>(),
+							  array_image_info.first->getAttr<FloorImageDataTypeAttr>(),
+							  parm->getName().str(),
+							  array_image_info.second);
+			} else {
+				Error(parm->getSourceRange().getBegin(), StringRef("invalid image array!"));
+				return;
+			}
+		} else if (clang_type->isAggregateImageType()) { // aggregate image
+			const auto agg_images = get_aggregate_image_fields(cxx_rdecl);
+			
+			const std::string base_name = parm->getName().str() + ".";
+			unsigned int img_idx = 0;
+			for (const auto& img : agg_images) {
+				add_image_arg(img->getType(),
+							  img->getAttr<ImageAccessAttr>(),
+							  img->getAttr<FloorImageDataTypeAttr>(),
+							  base_name + std::to_string(img_idx));
+				++img_idx;
+				
+				// next llvm arg
+				++arg_idx;
+			}
+			// fix up llvm arg count (will inc again after this)
+			--arg_idx;
+		} else if (parm->hasAttr<GraphicsStageInputAttr>()) { // stage input
+			if (cxx_rdecl) {
+				// must handle each field individually
+				const auto fields = getTypes().get_aggregate_scalar_fields(cxx_rdecl, cxx_rdecl);
+				for (const auto& field : fields) {
+					SmallVector<llvm::Metadata*, 16> arg_info;
+					
+					// #0: param index
+					arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+					
+					// #1: type
+					// TODO: handle perspective/center correctly
+					const auto type_name = make_type_name(field.type);
+					if (field.hasAttr<GraphicsVertexPositionAttr>()) {
+						arg_info.push_back(llvm::MDString::get(VMContext, "air.position"));
+						arg_info.push_back(llvm::MDString::get(VMContext, "air.center"));
+						arg_info.push_back(llvm::MDString::get(VMContext, "air.no_perspective"));
+					} else {
+						arg_info.push_back(llvm::MDString::get(VMContext, "air.fragment_input"));
+						arg_info.push_back(llvm::MDString::get(VMContext, StringRef(field.mangled_name)));
+						// TODO/NOTE: rather primitive/unreliable way of doing this, but better than nothing for now
+						if (type_name.find("uint") == 0 || type_name.find("int") == 0) {
+							// use flat "interpolation" for uint* and int* types
+							arg_info.push_back(llvm::MDString::get(VMContext, "air.flat"));
+						} else {
+							arg_info.push_back(llvm::MDString::get(VMContext, "air.center"));
+							arg_info.push_back(llvm::MDString::get(VMContext, "air.perspective"));
+						}
+					}
+					
+					// type name
+					arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+					arg_info.push_back(llvm::MDString::get(VMContext, type_name));
+					
+					// arg name
+					arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+					arg_info.push_back(llvm::MDString::get(VMContext, field.name));
+					arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+					
+					// next
+					++arg_idx;
+				}
+				--arg_idx; // fixup, b/c of inc later
+			} else {
+				// TODO: add as-is
+			}
+		} else { // unsupported simple kernel parameter
+			Error(parm->getSourceRange().getBegin(),
+				  StringRef("metal kernel parameter must be a pointer or an image type!"));
+			return;
+		}
+		
+		// next llvm arg
+		++abi_arg_info_iter;
+		++arg_idx;
+	}
+	
+	// soft-printf buffer metadata
+	if (getCodeGenOpts().MetalSoftPrintf > 0) {
+		SmallVector<llvm::Metadata*, 16> arg_info;
+		
+		// #0: param index
+		arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+		// #1: storage type
+		arg_info.push_back(llvm::MDString::get(VMContext, "air.buffer"));
+		// #2/#3: location_index (note: separate for buffers and textures)
+		arg_info.push_back(llvm::MDString::get(VMContext, "air.location_index"));
+		arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(buffer_idx)));
+		++buffer_idx;
+		// #4: index count/range
+		arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(1)));
+		// #5: access
+		arg_info.push_back(llvm::MDString::get(VMContext, "air.read_write"));
+		// #8/#9: type size
+		arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_size"));
+		arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(4)));
+		// #10/#11: type alignment
+		arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_align_size"));
+		arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(4)));
+		// #12/#13: type name
+		arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+		arg_info.push_back(llvm::MDString::get(VMContext, "uint"));
+		// #14/#15: arg name
+		arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+		arg_info.push_back(llvm::MDString::get(VMContext, "__metal__printf_buffer__"));
+		arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+		
+		++arg_idx;
+	}
+	
+	// limits check
+	// https://developer.apple.com/metal/limits/
+	const bool is_osx = (getModule().getTargetTriple().find("macosx") != std::string::npos);
+	const uint32_t buf_limit = 31;
+	const uint32_t tex_limit = (is_osx ? 128 : 31);
+	if (buffer_idx > buf_limit) {
+		Error(FD->getSourceRange().getBegin(),
+			  StringRef("can't use more than " + std::to_string(buf_limit) + " buffers per function"));
+		return;
+	}
+	if (tex_idx > tex_limit) {
+		Error(FD->getSourceRange().getBegin(),
+			  StringRef("can't use more than " + std::to_string(tex_limit) + " images per function"));
+		return;
+	}
+	
+	//
+	if (is_kernel) {
+		// add id handling arg metadata
+		// NOTE: the actual args are added by handleMetalVulkanEntryFunction + the order in here must match the order in there
+		const auto add_id_arg = [this, &arg_idx, &arg_infos, &Builder](const char* name, const char* air_name, const char* air_type) {
+			SmallVector<llvm::Metadata*, 6> arg_info;
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+			arg_info.push_back(llvm::MDString::get(VMContext, air_name));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, air_type));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, name));
+			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+			
+			// next llvm arg
+			++arg_idx;
+		};
+		
+		add_id_arg("__metal__global_id__", "air.thread_position_in_grid", "uint3");
+		add_id_arg("__metal__global_size__", "air.threads_per_grid", "uint3");
+		add_id_arg("__metal__local_id__", "air.thread_position_in_threadgroup", "uint3");
+		add_id_arg("__metal__local_size__", "air.threads_per_threadgroup", "uint3");
+		add_id_arg("__metal__group_id__", "air.threadgroup_position_in_grid", "uint3");
+		add_id_arg("__metal__group_size__", "air.threadgroups_per_grid", "uint3");
+		
+		if (getTriple().getOS() == llvm::Triple::OSType::MacOSX) {
+			add_id_arg("__metal__sub_group_id__", "air.simdgroup_index_in_threadgroup", "uint");
+			add_id_arg("__metal__sub_group_local_id__", "air.thread_index_in_simdgroup", "uint");
+			add_id_arg("__metal__sub_group_size__", "air.threads_per_simdgroup", "uint");
+			add_id_arg("__metal__num_sub_groups__", "air.simdgroups_per_threadgroup", "uint");
+		}
+	} else if (is_vertex) {
+		{
+			SmallVector<llvm::Metadata*, 6> arg_info;
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.vertex_id"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "uint"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "__metal__vertex_id__"));
+			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+			++arg_idx; // next llvm arg
+		}
+		
+		{
+			SmallVector<llvm::Metadata*, 6> arg_info;
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.instance_id"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "uint"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "__metal__instance_id__"));
+			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+			++arg_idx; // next llvm arg
+		}
+		
+		const auto add_vs_output = [this, &stage_infos, &make_type_name](const CodeGenTypes::aggregate_scalar_entry& entry,
+																		 const bool force_position = false) {
+			SmallVector<llvm::Metadata*, 6> ret_info;
+			
+			if (entry.hasAttr<GraphicsVertexPositionAttr>() || force_position) {
+				ret_info.push_back(llvm::MDString::get(VMContext, "air.position"));
+			} else if (entry.hasAttr<GraphicsPointSizeAttr>()) {
+				ret_info.push_back(llvm::MDString::get(VMContext, "air.point_size"));
+			} else {
+				ret_info.push_back(llvm::MDString::get(VMContext, "air.vertex_output"));
+				ret_info.push_back(llvm::MDString::get(VMContext, StringRef(entry.mangled_name)));
+			}
+			
+			ret_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			ret_info.push_back(llvm::MDString::get(VMContext, make_type_name(entry.type)));
+			
+			ret_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			ret_info.push_back(llvm::MDString::get(VMContext, entry.name));
+			
+			stage_infos.push_back(llvm::MDNode::get(VMContext, ret_info));
+		};
+		
+		// vertex output
+		const auto ret_type = FD->getReturnType();
+		const auto cxx_rdecl = ret_type->getAsCXXRecordDecl();
+		if (cxx_rdecl && !cxx_rdecl->hasAttr<VectorCompatAttr>()) {
+			const auto fields = getTypes().get_aggregate_scalar_fields(cxx_rdecl, cxx_rdecl);
+			for (const auto& field : fields) {
+				add_vs_output(field);
+			}
+		} else if (!ret_type->isVoidType()) {
+			// direct output: always vertex position, no mangled name
+			add_vs_output(CodeGenTypes::aggregate_scalar_entry {
+				(cxx_rdecl && cxx_rdecl->hasAttr<VectorCompatAttr>() ?
+				 getTypes().get_compat_vector_type(cxx_rdecl) : ret_type),
+				FD->getName().str(), // func name if direct
+				"",
+				nullptr,
+				nullptr,
+				{},
+				(cxx_rdecl && cxx_rdecl->hasAttr<VectorCompatAttr>()),
+				false
+			}, true);
+		}
+	} else if (is_fragment) {
+		// TODO: other stuff
+		
+		SmallVector<llvm::Metadata*, 6> arg_info;
+		arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+		arg_info.push_back(llvm::MDString::get(VMContext, "air.point_coord"));
+		arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+		arg_info.push_back(llvm::MDString::get(VMContext, "float2"));
+		arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+		arg_info.push_back(llvm::MDString::get(VMContext, "__metal__point_coord__"));
+		arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+		++arg_idx; // next llvm arg
+		
+		const auto add_fs_output = [this, &Builder, &stage_infos, &make_type_name](const CodeGenTypes::aggregate_scalar_entry& entry,
+																				   const unsigned int& location) {
+			SmallVector<llvm::Metadata*, 6> rtt_info;
+			
+			// #0/1: render target location index
+			rtt_info.push_back(llvm::MDString::get(VMContext, "air.render_target"));
+			rtt_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(location)));
+			// NOTE: this isn't handled yet, so just always set it to 0
+			rtt_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(0)));
+			
+			// #2/3: type name
+			rtt_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			rtt_info.push_back(llvm::MDString::get(VMContext, make_type_name(entry.type)));
+			
+			// #4/#5: name/identifier
+			rtt_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			rtt_info.push_back(llvm::MDString::get(VMContext, entry.name));
+			
+			stage_infos.push_back(llvm::MDNode::get(VMContext, rtt_info));
+		};
+		
+		// render targets / return types
+		const auto ret_type = FD->getReturnType();
+		const auto cxx_rdecl = ret_type->getAsCXXRecordDecl();
+		if (cxx_rdecl && !cxx_rdecl->hasAttr<VectorCompatAttr>()) {
+			const auto fields = getTypes().get_aggregate_scalar_fields(cxx_rdecl, cxx_rdecl);
+			
+			// fbo output location resolve/computation needs to happen in two passes:
+			// * gather all fixed/attr locations, make sure none conflict
+			// * used fixed locations + generate automatic location for non-fixed outputs
+			std::unordered_set<unsigned int> fbo_locations;
+			for (const auto& field : fields) {
+				if (field.hasAttr<GraphicsFBOColorLocationAttr>()) {
+					const auto loc_attr = field.getAttr<GraphicsFBOColorLocationAttr>();
+					if (!fbo_locations.insert(loc_attr->getEvalLocation()).second) {
+						// TODO: should have been detected earlier ...
+						Error(loc_attr->getLocation(), StringRef("location already in use"));
+						// TODO: add note of prev location?
+						return;
+					}
+				}
+			}
+			
+			unsigned int location = 0;
+			for (const auto& field : fields) {
+				if (field.hasAttr<GraphicsFBOColorLocationAttr>()) {
+					add_fs_output(field, field.getAttr<GraphicsFBOColorLocationAttr>()->getEvalLocation());
+				} else if (field.hasAttr<GraphicsFBODepthTypeAttr>()) {
+					const auto depth_attr = field.getAttr<GraphicsFBODepthTypeAttr>();
+					if (!field.type->isFloatingType()) {
+						// TODO: should have been detected earlier ...
+						Error(depth_attr->getLocation(),
+							  StringRef("depth attribute can only be applied to floating point types"));
+						return;
+					}
+					
+					SmallVector<llvm::Metadata*, 7> depth_info;
+					
+					depth_info.push_back(llvm::MDString::get(VMContext, "air.depth"));
+					
+					// #1/2: depth qualifier
+					depth_info.push_back(llvm::MDString::get(VMContext, "air.depth_qualifier"));
+					std::string depth_qual = "air.";
+					switch (depth_attr->getDepthQualifier()) {
+						case clang::GraphicsFBODepthTypeAttr::FBODepthTypeAny: depth_qual += "any"; break;
+						case clang::GraphicsFBODepthTypeAttr::FBODepthTypeLess: depth_qual += "less"; break;
+						case clang::GraphicsFBODepthTypeAttr::FBODepthTypeGreater: depth_qual += "greater"; break;
+					}
+					depth_info.push_back(llvm::MDString::get(VMContext, depth_qual));
+					
+					// #3/4: type name
+					depth_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+					depth_info.push_back(llvm::MDString::get(VMContext, make_type_name(field.type)));
+					
+					// #5/#6: name/identifier
+					depth_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+					depth_info.push_back(llvm::MDString::get(VMContext, field.name));
+					
+					stage_infos.push_back(llvm::MDNode::get(VMContext, depth_info));
+				} else {
+					for (;;) {
+						if (fbo_locations.count(location) > 0) {
+							++location;
+						} else {
+							break;
+						}
+					}
+					add_fs_output(field, location);
+					++location;
+				}
+			}
+		} else if (!ret_type->isVoidType()) {
+			add_fs_output(CodeGenTypes::aggregate_scalar_entry {
+				(cxx_rdecl && cxx_rdecl->hasAttr<VectorCompatAttr>() ?
+				 getTypes().get_compat_vector_type(cxx_rdecl) : ret_type),
+				FD->getName().str(), // func name if direct
+				"",
+				nullptr,
+				nullptr,
+				{},
+				(cxx_rdecl && cxx_rdecl->hasAttr<VectorCompatAttr>()),
+				false
+			}, 0);
+		}
+	}
+	
+	// insert into kernel metadata
+	kernelMDArgs.push_back(llvm::MDNode::get(VMContext, stage_infos));
+	kernelMDArgs.push_back(llvm::MDNode::get(VMContext, arg_infos));
+	
+	// Metal 2.1+ supports defining a max work-group size via max_total_threads_per_threadgroup/air.max_work_group_size
+	if (const ReqdWorkGroupSizeAttr *reg_local_size = FD->getAttr<ReqdWorkGroupSizeAttr>()) {
+		if (getLangOpts().MetalVersion >= 210) {
+			// NOTE: this is a 1D extent, not a 3D size
+			const uint32_t max_work_group_size {
+				std::max(1u, reg_local_size->getXDim()) *
+				std::max(1u, reg_local_size->getYDim()) *
+				std::max(1u, reg_local_size->getZDim())
+			};
+			
+			SmallVector<llvm::Metadata*, 7> max_work_group_size_info;
+			max_work_group_size_info.push_back(llvm::MDString::get(VMContext, "air.max_work_group_size"));
+			max_work_group_size_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(max_work_group_size)));
+			
+			kernelMDArgs.push_back(llvm::MDNode::get(VMContext, max_work_group_size_info));
+		}
+	}
+}
 
-  // MDNode for the kernel argument type names.
-  SmallVector<llvm::Metadata *, 8> argTypeNames;
-
-  // MDNode for the kernel argument base type names.
-  SmallVector<llvm::Metadata *, 8> argBaseTypeNames;
-
-  // MDNode for the kernel argument type qualifiers.
-  SmallVector<llvm::Metadata *, 8> argTypeQuals;
-
-  // MDNode for the kernel argument names.
-  SmallVector<llvm::Metadata *, 8> argNames;
-
-  if (FD && CGF)
-    for (unsigned i = 0, e = FD->getNumParams(); i != e; ++i) {
-      const ParmVarDecl *parm = FD->getParamDecl(i);
-      QualType ty = parm->getType();
-      std::string typeQuals;
-
-      // Get image and pipe access qualifier:
-      if (ty->isImageType() || ty->isPipeType()) {
-        const Decl *PDecl = parm;
-        if (auto *TD = dyn_cast<TypedefType>(ty))
-          PDecl = TD->getDecl();
-        const OpenCLAccessAttr *A = PDecl->getAttr<OpenCLAccessAttr>();
-        if (A && A->isWriteOnly())
-          accessQuals.push_back(llvm::MDString::get(VMContext, "write_only"));
-        else if (A && A->isReadWrite())
-          accessQuals.push_back(llvm::MDString::get(VMContext, "read_write"));
-        else
-          accessQuals.push_back(llvm::MDString::get(VMContext, "read_only"));
-      } else
-        accessQuals.push_back(llvm::MDString::get(VMContext, "none"));
-
-      // Get argument name.
-      argNames.push_back(llvm::MDString::get(VMContext, parm->getName()));
-
-      auto getTypeSpelling = [&](QualType Ty) {
-        auto typeName = Ty.getUnqualifiedType().getAsString(Policy);
-
-        if (Ty.isCanonical()) {
-          StringRef typeNameRef = typeName;
-          // Turn "unsigned type" to "utype"
-          if (typeNameRef.consume_front("unsigned "))
-            return std::string("u") + typeNameRef.str();
-          if (typeNameRef.consume_front("signed "))
-            return typeNameRef.str();
-        }
-
-        return typeName;
-      };
-
-      if (ty->isPointerType()) {
-        QualType pointeeTy = ty->getPointeeType();
-
-        // Get address qualifier.
-        addressQuals.push_back(
-            llvm::ConstantAsMetadata::get(CGF->Builder.getInt32(
-                ArgInfoAddressSpace(pointeeTy.getAddressSpace()))));
-
-        // Get argument type name.
-        std::string typeName = getTypeSpelling(pointeeTy) + "*";
-        std::string baseTypeName =
-            getTypeSpelling(pointeeTy.getCanonicalType()) + "*";
-        argTypeNames.push_back(llvm::MDString::get(VMContext, typeName));
-        argBaseTypeNames.push_back(
-            llvm::MDString::get(VMContext, baseTypeName));
-
-        // Get argument type qualifiers:
-        if (ty.isRestrictQualified())
-          typeQuals = "restrict";
-        if (pointeeTy.isConstQualified() ||
-            (pointeeTy.getAddressSpace() == LangAS::opencl_constant))
-          typeQuals += typeQuals.empty() ? "const" : " const";
-        if (pointeeTy.isVolatileQualified())
-          typeQuals += typeQuals.empty() ? "volatile" : " volatile";
-      } else {
-        uint32_t AddrSpc = 0;
-        bool isPipe = ty->isPipeType();
-        if (ty->isImageType() || isPipe)
-          AddrSpc = ArgInfoAddressSpace(LangAS::opencl_global);
-
-        addressQuals.push_back(
-            llvm::ConstantAsMetadata::get(CGF->Builder.getInt32(AddrSpc)));
-
-        // Get argument type name.
-        ty = isPipe ? ty->castAs<PipeType>()->getElementType() : ty;
-        std::string typeName = getTypeSpelling(ty);
-        std::string baseTypeName = getTypeSpelling(ty.getCanonicalType());
-
-        // Remove access qualifiers on images
-        // (as they are inseparable from type in clang implementation,
-        // but OpenCL spec provides a special query to get access qualifier
-        // via clGetKernelArgInfo with CL_KERNEL_ARG_ACCESS_QUALIFIER):
-        if (ty->isImageType()) {
-          removeImageAccessQualifier(typeName);
-          removeImageAccessQualifier(baseTypeName);
-        }
-
-        argTypeNames.push_back(llvm::MDString::get(VMContext, typeName));
-        argBaseTypeNames.push_back(
-            llvm::MDString::get(VMContext, baseTypeName));
-
-        if (isPipe)
-          typeQuals = "pipe";
-      }
-      argTypeQuals.push_back(llvm::MDString::get(VMContext, typeQuals));
-    }
-
-  Fn->setMetadata("kernel_arg_addr_space",
-                  llvm::MDNode::get(VMContext, addressQuals));
-  Fn->setMetadata("kernel_arg_access_qual",
-                  llvm::MDNode::get(VMContext, accessQuals));
-  Fn->setMetadata("kernel_arg_type",
-                  llvm::MDNode::get(VMContext, argTypeNames));
-  Fn->setMetadata("kernel_arg_base_type",
-                  llvm::MDNode::get(VMContext, argBaseTypeNames));
-  Fn->setMetadata("kernel_arg_type_qual",
-                  llvm::MDNode::get(VMContext, argTypeQuals));
-  if (getCodeGenOpts().EmitOpenCLArgMetadata)
-    Fn->setMetadata("kernel_arg_name",
-                    llvm::MDNode::get(VMContext, argNames));
+void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
+											  llvm::Function *Fn,
+											  const FunctionArgList &Args,
+											  const CGFunctionInfo &FnInfo,
+											  CodeGenModule &CGM) {
+	const bool is_kernel = FD->hasAttr<ComputeKernelAttr>();
+	const bool is_vertex = FD->hasAttr<GraphicsVertexShaderAttr>();
+	const bool is_fragment = FD->hasAttr<GraphicsFragmentShaderAttr>();
+	if (!is_kernel && !is_vertex && !is_fragment) {
+		return;
+	}
+	
+	if (getLangOpts().floor_function_info == nullptr) {
+		return;
+	}
+	std::fstream& file = *getLangOpts().floor_function_info;
+	std::stringstream info;
+	std::stringstream arg_buf_info;
+	
+	const PrintingPolicy &Policy = getContext().getPrintingPolicy();
+	
+	// #0: info version
+	constexpr const uint32_t floor_info_version { 4u };
+	info << floor_info_version << ",";
+	// #1: function name
+	info << Fn->getName().str() << ",";
+	// #2: function type
+	info << (is_kernel ? "1" : (is_vertex ? "2" : "3")) << ",";
+	// #3: function flags
+	if ((getLangOpts().Metal && CGM.getCodeGenOpts().MetalSoftPrintf > 0) ||
+		(getLangOpts().Vulkan && CGM.getCodeGenOpts().VulkanSoftPrintf > 0)) {
+		info << "1,";
+	} else {
+		info << "0,";
+	}
+	// #4,5,6: local size/dim
+	if (const ReqdWorkGroupSizeAttr *reg_local_size = FD->getAttr<ReqdWorkGroupSizeAttr>()) {
+		info << reg_local_size->getXDim() << ",";
+		info << reg_local_size->getYDim() << ",";
+		info << reg_local_size->getZDim() << ",";
+	} else {
+		info << "0,0,0,";
+	}
+	
+	// iterate over clang function decl parameters
+	// NOTE: in case of struct expansion, this doesn't match the llvm parameters
+	// (which is why it iterates over the original clang list!)
+	unsigned int arg_idx = 0;
+	auto abi_arg_info_iter = FnInfo.arg_begin();
+	uint32_t vulkan_iub_count = 0;
+	for (const auto& parm : FD->parameters()) {
+		const auto clang_type = parm->getType();
+		const auto llvm_type = std::next(Fn->arg_begin(), arg_idx)->getType();
+		const auto cxx_rdecl = clang_type->getAsCXXRecordDecl();
+		
+		enum class FLOOR_ARG_INFO : uint64_t {
+			// 0 == invalid!
+			NONE						= (0ull),
+			
+			// sets: -------- 000000-- -------- 00000xxx 00000000 00000000 00000000 00000000
+			__AS_SHIFT					= (32ull),
+			__AS_MASK					= (0x0000000700000000ull),
+			AS_NONE						= NONE,
+			AS_GLOBAL					= (1ull << __AS_SHIFT),
+			AS_LOCAL					= (2ull << __AS_SHIFT),
+			AS_CONSTANT					= (3ull << __AS_SHIFT),
+			AS_IMAGE					= (4ull << __AS_SHIFT),
+			
+			// sets: -------- 000000-- xxxxxxxx 00000--- 00000000 00000000 00000000 00000000
+			__IMG_TYPE_SHIFT			= (40ull),
+			__IMG_TYPE_MASK				= (0x0000FF0000000000ull),
+			IMG_1D						= (1ull << __IMG_TYPE_SHIFT),
+			IMG_1D_ARRAY				= (2ull << __IMG_TYPE_SHIFT),
+			IMG_1D_BUFFER				= (3ull << __IMG_TYPE_SHIFT),
+			IMG_2D						= (4ull << __IMG_TYPE_SHIFT),
+			IMG_2D_ARRAY				= (5ull << __IMG_TYPE_SHIFT),
+			IMG_2D_DEPTH				= (6ull << __IMG_TYPE_SHIFT),
+			IMG_2D_ARRAY_DEPTH			= (7ull << __IMG_TYPE_SHIFT),
+			IMG_2D_MSAA					= (8ull << __IMG_TYPE_SHIFT),
+			IMG_2D_ARRAY_MSAA			= (9ull << __IMG_TYPE_SHIFT),
+			IMG_2D_MSAA_DEPTH			= (10ull << __IMG_TYPE_SHIFT),
+			IMG_2D_ARRAY_MSAA_DEPTH		= (11ull << __IMG_TYPE_SHIFT),
+			IMG_3D						= (12ull << __IMG_TYPE_SHIFT),
+			IMG_CUBE					= (13ull << __IMG_TYPE_SHIFT),
+			IMG_CUBE_ARRAY				= (14ull << __IMG_TYPE_SHIFT),
+			IMG_CUBE_DEPTH				= (15ull << __IMG_TYPE_SHIFT),
+			IMG_CUBE_ARRAY_DEPTH		= (16ull << __IMG_TYPE_SHIFT),
+			
+			// sets: -------- 000000xx -------- 00000--- 00000000 00000000 00000000 00000000
+			__IMG_ACCESS_SHIFT			= (48ull),
+			__IMG_ACCESS_MASK			= (0x0003000000000000ull),
+			IMG_ACCESS_READ				= (1ull << __IMG_ACCESS_SHIFT),
+			IMG_ACCESS_WRITE			= (2ull << __IMG_ACCESS_SHIFT),
+			IMG_ACCESS_READ_WRITE		= (IMG_ACCESS_READ | IMG_ACCESS_WRITE),
+			
+			// sets: xxxxxxxx 000000-- -------- 00000--- 00000000 00000000 00000000 00000000
+			__SPECIAL_TYPE_SHIFT		= (56ull),
+			__SPECIAL_TYPE_MASK			= (0xFF00000000000000ull),
+			STAGE_INPUT					= (1ull << __SPECIAL_TYPE_SHIFT),
+			PUSH_CONSTANT				= (2ull << __SPECIAL_TYPE_SHIFT),
+			SSBO						= (3ull << __SPECIAL_TYPE_SHIFT),
+			IMAGE_ARRAY					= (4ull << __SPECIAL_TYPE_SHIFT),
+			IUB							= (5ull << __SPECIAL_TYPE_SHIFT),
+			ARGUMENT_BUFFER				= (6ull << __SPECIAL_TYPE_SHIFT),
+		};
+		static const auto to_fas = [](const LangAS& addr_space) {
+			if (addr_space == LangAS::opencl_global) {
+				return FLOOR_ARG_INFO::AS_GLOBAL;
+			} else if (addr_space == LangAS::opencl_local) {
+				return FLOOR_ARG_INFO::AS_LOCAL;
+			} else if (addr_space == LangAS::opencl_constant) {
+				return FLOOR_ARG_INFO::AS_CONSTANT;
+			}
+			return FLOOR_ARG_INFO::AS_NONE;
+		};
+		
+		const auto compute_type_size = [&CGM, &parm, &Fn](llvm::Type* type) {
+			if (!type->isSized()) {
+				auto err_diagID = CGM.getDiags().getCustomDiagID(DiagnosticsEngine::Fatal, "%0");
+				CGM.getDiags().Report(parm->getSourceRange().getBegin(), err_diagID) << "parameter uses a type with an unknown size (NOTE: this can happen when internal vector/array type conversion/replacement has failed)";
+				
+				auto param_note_diagID = CGM.getDiags().getCustomDiagID(DiagnosticsEngine::Note, "LLVM type: %0");
+				std::string param_type = "";
+				llvm::raw_string_ostream param_type_stream(param_type);
+				type->print(param_type_stream);
+				CGM.getDiags().Report(parm->getSourceRange().getBegin(), param_note_diagID) << param_type_stream.str();
+				
+				auto func_note_diagID = CGM.getDiags().getCustomDiagID(DiagnosticsEngine::Note, "LLVM function type: %0");
+				std::string fun_type = "";
+				llvm::raw_string_ostream fun_type_stream(fun_type);
+				Fn->getFunctionType()->print(fun_type_stream);
+				CGM.getDiags().Report(parm->getSourceRange().getBegin(), func_note_diagID) << fun_type_stream.str();
+				
+				return uint64_t(0);
+			}
+			return CGM.getDataLayout().getTypeStoreSize(type).getFixedValue();
+		};
+		
+		static const auto get_image_access = [](const ImageAccessAttr* access_attr) {
+			if (access_attr != nullptr) {
+				if (access_attr->isWriteOnly()) {
+					return FLOOR_ARG_INFO::IMG_ACCESS_WRITE;
+				} else if (access_attr->isReadWrite()) {
+					return FLOOR_ARG_INFO::IMG_ACCESS_READ_WRITE;
+				}
+			}
+			return FLOOR_ARG_INFO::IMG_ACCESS_READ;
+		};
+		static const auto img_type_to_floor_type = [](const clang::Type* type) {
+			const auto builtin_type = type->getAs<BuiltinType>();
+			if (!builtin_type) {
+				return (FLOOR_ARG_INFO)~0ull;
+			}
+			switch (builtin_type->getKind()) {
+				case BuiltinType::OCLImage1d:
+					return FLOOR_ARG_INFO::IMG_1D;
+				case BuiltinType::OCLImage1dArray:
+					return FLOOR_ARG_INFO::IMG_1D_ARRAY;
+				case BuiltinType::OCLImage1dBuffer:
+					return FLOOR_ARG_INFO::IMG_1D_BUFFER;
+				case BuiltinType::OCLImage2d:
+					return FLOOR_ARG_INFO::IMG_2D;
+				case BuiltinType::OCLImage2dArray:
+					return FLOOR_ARG_INFO::IMG_2D_ARRAY;
+				case BuiltinType::OCLImage2dDepth:
+					return FLOOR_ARG_INFO::IMG_2D_DEPTH;
+				case BuiltinType::OCLImage2dArrayDepth:
+					return FLOOR_ARG_INFO::IMG_2D_ARRAY_DEPTH;
+				case BuiltinType::OCLImage2dMSAA:
+					return FLOOR_ARG_INFO::IMG_2D_MSAA;
+				case BuiltinType::OCLImage2dArrayMSAA:
+					return FLOOR_ARG_INFO::IMG_2D_ARRAY_MSAA;
+				case BuiltinType::OCLImage2dMSAADepth:
+					return FLOOR_ARG_INFO::IMG_2D_MSAA_DEPTH;
+				case BuiltinType::OCLImage2dArrayMSAADepth:
+					return FLOOR_ARG_INFO::IMG_2D_ARRAY_MSAA_DEPTH;
+				case BuiltinType::OCLImage3d:
+					return FLOOR_ARG_INFO::IMG_3D;
+				case BuiltinType::OCLImageCube:
+					return FLOOR_ARG_INFO::IMG_CUBE;
+				case BuiltinType::OCLImageCubeArray:
+					return FLOOR_ARG_INFO::IMG_CUBE_ARRAY;
+				case BuiltinType::OCLImageCubeDepth:
+					return FLOOR_ARG_INFO::IMG_CUBE_DEPTH;
+				case BuiltinType::OCLImageCubeArrayDepth:
+					return FLOOR_ARG_INFO::IMG_CUBE_ARRAY_DEPTH;
+				default: break;
+			}
+			return (FLOOR_ARG_INFO)~0ull;
+		};
+		const auto add_image_arg = [](const FLOOR_ARG_INFO& floor_img_type,
+									  const FLOOR_ARG_INFO& access,
+									  const uint32_t elem_count = 1) -> uint64_t /* arg info */ {
+			uint64_t arg_info = uint64_t(FLOOR_ARG_INFO::AS_IMAGE);
+			arg_info |= uint64_t(floor_img_type);
+			arg_info |= uint64_t(access);
+			if (elem_count > 1) {
+				arg_info |= elem_count;
+				arg_info |= uint64_t(FLOOR_ARG_INFO::IMAGE_ARRAY);
+			}
+			return arg_info;
+		};
+		// anything that isn't a pointer or special type
+		const auto add_normal_arg = [&compute_type_size](llvm::Type* llvm_type,
+														 const clang::QualType& clang_type,
+														 const FLOOR_ARG_INFO init_info = FLOOR_ARG_INFO::NONE) -> uint64_t /* arg info */ {
+			// for now: just use the direct type size + no address space
+			uint64_t arg_info = (uint64_t)init_info;
+			// handle some llvm weirdness? why can this be a pointer still?
+			if (llvm_type->isPointerTy()) {
+				arg_info |= compute_type_size(llvm_type->getPointerElementType());
+			} else {
+				arg_info |= compute_type_size(llvm_type);
+			}
+			arg_info |= (uint64_t)to_fas(clang_type.getAddressSpace());
+			return arg_info;
+		};
+		//
+		const std::function<uint64_t(const clang::QualType&, const NamedDecl&, const bool, const bool, const bool, const uint32_t)>
+		add_buffer_arg = [&CGM, &vulkan_iub_count, &compute_type_size, &arg_buf_info, &Fn, &add_buffer_arg, &add_normal_arg](const clang::QualType& type,
+																															 const NamedDecl& decl,
+																															 const bool is_top_level,
+																															 const bool is_indirect, // specifies if we're within an indirect buffer
+																															 const bool has_arg_buffer_attr,
+																															 const uint32_t arg_idx) -> uint64_t /* arg info */ {
+			const auto clang_pointee_type = type->getPointeeType();
+			const auto llvm_type = CGM.getTypes().ConvertTypeForMem(type);
+			const auto llvm_pointee_type = llvm_type->getPointerElementType();
+			
+			const auto indirect_buffer = is_indirect_buffer(type, CGM, has_arg_buffer_attr);
+			
+			const uint64_t arg_size = compute_type_size(llvm_pointee_type);
+			uint64_t arg_info = arg_size;
+			if (CGM.getLangOpts().OpenCL) {
+				arg_info |= (uint64_t)to_fas(clang_pointee_type.getAddressSpace());
+			} else if (CGM.getLangOpts().CUDA || CGM.getLangOpts().FloorHostCompute) {
+				// always pretend this is global
+				arg_info |= (uint64_t)FLOOR_ARG_INFO::AS_GLOBAL;
+			}
+			if (indirect_buffer) {
+				arg_info |= (uint64_t)FLOOR_ARG_INFO::ARGUMENT_BUFFER;
+			} else if (CGM.getLangOpts().Vulkan) {
+				// NOTE: only using global& for const parameters (aka uniforms) right now,
+				//       if this should change, this must also be modified
+				//       -> global pointer must always be a SSBO
+				if (!type->isReferenceType() &&
+					clang_pointee_type.getAddressSpace() == LangAS::opencl_global) {
+					arg_info |= (uint64_t)FLOOR_ARG_INFO::SSBO;
+				}
+				
+				// make parameters a IUB if their size is <= the size limit and we are still below the IUB count limit
+				if (is_top_level) {
+					if (type->isReferenceType() &&
+						clang_pointee_type.getAddressSpace() == LangAS::opencl_constant &&
+						decl.getAttr<FloorArgBufferAttr>() == nullptr /* must not be an argument buffer */ &&
+						arg_size <= CGM.getCodeGenOpts().VulkanIUBSize &&
+						vulkan_iub_count < CGM.getCodeGenOpts().VulkanIUBCount) {
+						arg_info |= (uint64_t)FLOOR_ARG_INFO::IUB;
+						++vulkan_iub_count;
+					}
+				}
+			}
+			
+			//
+			if (indirect_buffer || is_indirect) {
+				if (const auto pointee_rdecl = clang_pointee_type->getAsCXXRecordDecl()) {
+					// TODO: this is not ideal and doesn't handle properly handle unions
+					const auto fields = get_aggregate_fields(pointee_rdecl);
+					bool ignore = false;
+					for (const auto& field : fields) {
+						if (field->isAnonymousStructOrUnion() ||
+							field->isBitField()) {
+							ignore = true;
+							break;
+						}
+					}
+					
+					if (!ignore && indirect_buffer && is_indirect) {
+						// TODO/NOTE: for now, recursive argument buffers are not supported -> implement support for this
+						CGM.Error(decl.getSourceRange().getBegin(), StringRef("recursive argument buffers are currently not supported"));
+						return {};
+					}
+					
+					if (!ignore) {
+						std::stringstream this_arg_buf_info;
+						// #0: info version
+						this_arg_buf_info << floor_info_version << ",";
+						// #1: function name
+						this_arg_buf_info << Fn->getName().str() << ",";
+						// #2: function type
+						this_arg_buf_info << "100,";
+						// #3: function flags
+						this_arg_buf_info << "0,"; // none for argument buffers
+						// #4: argument index in function
+						this_arg_buf_info << arg_idx << ",";
+						// #5/6: 0 / unused for argument buffers
+						this_arg_buf_info << "0,0,";
+						
+						uint32_t field_arg_idx = 0;
+						for (const auto& field : fields) {
+							auto field_type = field->getType();
+							auto llvm_field_type = CGM.getTypes().ConvertTypeForMem(field_type);
+							
+							// TODO: do we need array size handling?
+							if (indirect_buffer || is_indirect) {
+								if (field_type->isPointerType() || field_type->isReferenceType()) {
+									// buffer field
+									// TODO: handle recursive arg buffers
+									const auto field_arg_info = add_buffer_arg(field_type, **field, false, true, false, field_arg_idx);
+									this_arg_buf_info << field_arg_info << ",";
+								} else if (field_type->isImageType()) {
+									// TODO: support this
+									CGM.Error(decl.getSourceRange().getBegin(), StringRef("images are not yet supported in indirect/argument buffers"));
+									return {};
+								} else if (field_type->isArrayImageType(true)) {
+									// TODO: support this
+									CGM.Error(decl.getSourceRange().getBegin(), StringRef("image arrays are not yet supported in indirect/argument buffers"));
+									return {};
+								} else if (field_type->isAggregateImageType()) {
+									// TODO: support this
+									CGM.Error(decl.getSourceRange().getBegin(), StringRef("aggregate images are not yet supported in indirect/argument buffers"));
+									return {};
+								} else if (decl.hasAttr<GraphicsStageInputAttr>()) {
+									// hard error
+									CGM.Error(decl.getSourceRange().getBegin(), StringRef("stage input is not supported in indirect/argument buffers"));
+									return {};
+								} else {
+									// value / "indirect constant"
+									const auto field_arg_info = add_normal_arg(llvm_field_type, field_type);
+									this_arg_buf_info << field_arg_info << ",";
+								}
+							}
+							++field_arg_idx;
+						}
+						arg_buf_info << this_arg_buf_info.str() << "\n";
+					}
+				}
+			}
+			
+			return arg_info;
+		};
+		
+		// #2+: argument sizes + types
+		if (clang_type->isPointerType() || clang_type->isReferenceType()) {
+			const auto arg_info = add_buffer_arg(clang_type, *parm, true, false, (parm->getAttr<FloorArgBufferAttr>() != nullptr), arg_idx);
+			info << arg_info << ",";
+		} else if (clang_type->isImageType()) { // handle image types
+			const auto arg_info = add_image_arg(img_type_to_floor_type(clang_type.getTypePtr()),
+												get_image_access(parm->getAttr<ImageAccessAttr>()));
+			info << arg_info << ",";
+		}
+		// image array (std::array<*image_*<type>, extent>)
+		// NOTE: check before "isAggregateImageType()", because this is essentially a sub-type of it
+		else if (clang_type->isArrayImageType(true)) {
+			const auto array_image_info = get_array_image_info(cxx_rdecl, getContext());
+			if (array_image_info.first != nullptr &&
+				array_image_info.second > 0) {
+				const auto arg_info = add_image_arg(img_type_to_floor_type(array_image_info.first->getType().getTypePtr()),
+													get_image_access(array_image_info.first->getAttr<ImageAccessAttr>()),
+													array_image_info.second);
+				info << arg_info << ",";
+			} else {
+				CGM.Error(parm->getSourceRange().getBegin(), StringRef("invalid image array!"));
+				return;
+			}
+		} else if (!getLangOpts().CUDA && clang_type->isArrayImageType(false)) { // image array (image*_t[N])
+			CGM.Error(parm->getSourceRange().getBegin(), StringRef("C array of images not supported yet"));
+			return;
+		} else if (clang_type->isAggregateImageType()) { // aggregate of image types (used with OpenCL/Metal/Vulkan)
+			const auto agg_images = get_aggregate_image_fields(cxx_rdecl);
+			
+			// image count must either be 1 (for single read or write images) or 2 (one read, one write image)
+			const auto field_count = agg_images.size();
+			if (field_count == 0) {
+				CGM.Error(cxx_rdecl->getSourceRange().getBegin(),
+						  StringRef("no images in aggregate-image (min: 1)"));
+				return;
+			} else if (field_count > 2) {
+				CGM.Error(cxx_rdecl->getSourceRange().getBegin(),
+						  StringRef("too many images in aggregate-image (max: 2)"));
+				return;
+			}
+			
+			// sanity check that all field types are actually images, have proper access attributes and image types match
+			// (should probably put this somewhere else, since it is sema-checking, but then I'd need to duplicate code)
+			FLOOR_ARG_INFO floor_img_type = FLOOR_ARG_INFO::NONE;
+			uint64_t floor_img_access = 0;
+			for (const auto& img : agg_images) {
+				const auto access_attr = img->getAttr<ImageAccessAttr>();
+				if (access_attr == nullptr) {
+					CGM.Error(img->getSourceRange().getBegin(),
+							  StringRef("image type in an aggregate-image must have an access qualifier"));
+					return;
+				}
+				floor_img_access |= uint64_t(get_image_access(access_attr));
+				
+				// first field initializes this
+				auto img_type = img->getType();
+				if (img_type->isArrayImageType(false)) {
+					// get element image type if this is an array
+					if (img_type->isPointerType()) {
+						img_type = img_type->getPointeeType();
+					}
+					img_type = img_type->getAsArrayTypeUnsafe()->getElementType();
+				}
+				if (floor_img_type == FLOOR_ARG_INFO::NONE) {
+					floor_img_type = img_type_to_floor_type(img_type.getTypePtr());
+				} else {
+					// second field must have the same type!
+					if (floor_img_type != img_type_to_floor_type(img_type.getTypePtr())) {
+						CGM.Error(img->getSourceRange().getBegin(),
+								  StringRef("second image in aggregate-image does not have the same type as the first"));
+						return;
+					}
+				}
+			}
+			
+			// if the aggregate has two image objects, one must be read, one must be write -> read/write
+			if (field_count == 2 && floor_img_access != uint64_t(FLOOR_ARG_INFO::IMG_ACCESS_READ_WRITE)) {
+				CGM.Error(cxx_rdecl->getSourceRange().getBegin(),
+						  StringRef("aggregate-image has 2 image fields, but joint access is not read-write"));
+				return;
+			}
+			
+			// everything works out, add this as a single kernel argument (floor backends will handle r/w images as necessary)
+			// NOTE: for aggregate images that contain an array of images we still only count this as one image,
+			//       since this is behind-the-scenes stuff and not part of the user interface!
+			const auto arg_info = add_image_arg(floor_img_type, (FLOOR_ARG_INFO)floor_img_access);
+			info << arg_info << ",";
+			
+			// 1 clang aggregate-image == 2 llvm image types -> inc index once more
+			if (field_count == 2) {
+				++arg_idx;
+			}
+		} else if (getLangOpts().CUDA || getLangOpts().FloorHostCompute) { // handle non-pointer parameters
+			// is this an aggregate that is expanded into multiple llvm arguments?
+			if (cxx_rdecl &&
+				(abi_arg_info_iter->info.isDirect() || abi_arg_info_iter->info.isIndirect()) &&
+				TargetCodeGenInfo::TCGIisAggregateTypeForABI(abi_arg_info_iter->type)) {
+				// check if this is an aggregate image (must have image access qualifiers)
+				const ImageAccessAttr* access_attr = get_aggregate_access_attr(cxx_rdecl);
+				if (access_attr != nullptr) {
+					uint64_t arg_info = 0; // size is irrelevant for cuda images
+					arg_info |= uint64_t(get_image_access(access_attr));
+					arg_info |= (uint64_t)FLOOR_ARG_INFO::AS_IMAGE;
+					info << arg_info << ",";
+				} else if (abi_arg_info_iter->info.isDirect()) {
+					// simple aggregate, all constant -> must handle each field individually
+					// note that we're only interested in the first expanded layer, not multiple expansion
+					// (i.e. fully scalarized), as this is identical to what cuda / nvptx / the abi do
+					uint64_t arg_info = 0; // sizes will be accumulated
+					const auto fields = get_aggregate_fields(cxx_rdecl);
+					for (size_t i = 0; i < fields.size(); ++i) {
+						const auto field_llvm_type = std::next(Fn->arg_begin(), arg_idx)->getType();
+						arg_info += compute_type_size(field_llvm_type);
+						++arg_idx;
+					}
+					arg_info |= (uint64_t)FLOOR_ARG_INFO::AS_CONSTANT;
+					info << arg_info << ",";
+					--arg_idx; // fixup, b/c of inc later
+				} else { // -> indirect
+					// simple aggregate, all constant -> single pointer on either side of clang/llvm
+					uint64_t arg_info = 0;
+					arg_info |= compute_type_size(llvm_type->getPointerElementType());
+					arg_info |= (uint64_t)FLOOR_ARG_INFO::AS_CONSTANT;
+					info << arg_info << ",";
+				}
+			} else {
+				// -> this is a simple constant (scalar or aggregate with scalar eval)
+				// store the parameter size
+				uint64_t arg_info = compute_type_size(llvm_type);
+				arg_info |= (uint64_t)FLOOR_ARG_INFO::AS_CONSTANT;
+				info << arg_info << ",";
+			}
+		} else if (parm->hasAttr<GraphicsStageInputAttr>()) { // stage input
+			if (!is_vertex && !is_fragment) {
+				// TODO: should check this in sema
+				// TODO: should also make sure that only 1 exists
+				CGM.Error(FD->getSourceRange().getBegin(), "[[stage_input]] only allowed on vertex and fragment functions");
+			}
+			
+			if (cxx_rdecl) {
+				// must handle each field individually
+				const auto fields = CGM.getTypes().get_aggregate_scalar_fields(cxx_rdecl, cxx_rdecl);
+				for (const auto& field : fields) {
+					// TODO: check if field type is int or float!
+					const auto field_llvm_type = std::next(Fn->arg_begin(), arg_idx)->getType();
+					const auto arg_info = add_normal_arg(field_llvm_type, field.type, FLOOR_ARG_INFO::STAGE_INPUT);
+					info << arg_info << ",";
+					++arg_idx;
+				}
+				--arg_idx; // fixup, b/c of inc later
+			} else {
+				// add as-is
+				// TODO: check if type is int or float!
+				const auto arg_info = add_normal_arg(llvm_type, clang_type, FLOOR_ARG_INFO::STAGE_INPUT);
+				info << arg_info << ",";
+			}
+		} else {
+			const auto arg_info = add_normal_arg(llvm_type, clang_type);
+			info << arg_info << ",";
+		}
+		
+		// next arg
+		++arg_idx;
+		++abi_arg_info_iter;
+	}
+	
+	info << "\n";
+	file << info.str();
+	file << arg_buf_info.str();
+	
+#if 0 // for debugging purposes
+	printf("floor function info: %s", info.str().c_str()); fflush(stdout);
+#endif
+	
+	// if this is wrong, the kernel will almost certainly not be usable
+	arg_idx += CGM.getTypes().getMetalVulkanImplicitArgCount(FD); // account for implicit args
+	if (arg_idx != Fn->arg_size()) {
+		// signal that this is _very_ bad
+		auto err_diagID = CGM.getDiags().getCustomDiagID(DiagnosticsEngine::Fatal, "kernel function parameter count mismatch: %0 (clang), %1 (llvm)");
+		CGM.getDiags().Report(FD->getSourceRange().getBegin(), err_diagID) << std::to_string(arg_idx) << std::to_string(Fn->arg_size());
+		
+		auto llvm_note_diagID = CGM.getDiags().getCustomDiagID(DiagnosticsEngine::Note, "LLVM function type: %0");
+		std::string llvm_fun_type = "";
+		llvm::raw_string_ostream llvm_fun_type_stream(llvm_fun_type);
+		Fn->getFunctionType()->print(llvm_fun_type_stream);
+		CGM.getDiags().Report(FD->getSourceRange().getBegin(), llvm_note_diagID) << llvm_fun_type_stream.str();
+		
+		auto clang_note_diagID = CGM.getDiags().getCustomDiagID(DiagnosticsEngine::Note, "clang function type: %0");
+		std::string clang_fun_type = "";
+		llvm::raw_string_ostream clang_fun_type_stream(clang_fun_type);
+		FD->getType().print(clang_fun_type_stream, Policy);
+		CGM.getDiags().Report(FD->getSourceRange().getBegin(), clang_note_diagID) << clang_fun_type_stream.str();
+		return;
+	}
 }
 
 /// Determines whether the language options require us to model
@@ -2508,6 +4508,113 @@ void CodeGenModule::EmitGlobalAnnotations() {
   gv->setSection(AnnotationSection);
 }
 
+void CodeGenModule::EmitOCLAnnotations() {
+  // For SPIR, we generate this metadata in a seperate pass
+  if (getTarget().getTriple().getArch() != llvm::Triple::spir &&
+      getTarget().getTriple().getArch() != llvm::Triple::spir64)
+    EmitOCLBuildOptions();
+
+  if (!Context.isFPContractDisabled() && getLangOpts().getDefaultFPContractMode() != LangOptions::FPModeKind::FPM_Off) {
+    TheModule.getOrInsertNamedMetadata("opencl.enable.FP_CONTRACT");
+  }
+}
+
+llvm::SmallVector<llvm::Metadata *, 5> CodeGenModule::getBuildOptions() {
+  llvm::SmallVector<llvm::Metadata *, 5> BuildOption;
+
+  if(!getLangOpts().OpenCL)
+    return BuildOption;
+
+  // get language level fp options
+  const FPOptions fp_opts(getLangOpts());
+
+  // Math Intrinsics Options
+  if(getLangOpts().SinglePrecisionConstants)
+    BuildOption.push_back(llvm::MDString::get(
+    VMContext, llvm::StringRef("-cl-single-precision-constant")));
+
+  if(getCodeGenOpts().FPDenormalMode == llvm::DenormalMode::getPositiveZero() ||
+     getCodeGenOpts().FP32DenormalMode == llvm::DenormalMode::getPositiveZero())
+    BuildOption.push_back(llvm::MDString::get(
+    VMContext, llvm::StringRef("-cl-denorms-are-zero")));
+
+  if(getCodeGenOpts().OpenCLCorrectlyRoundedDivSqrt)
+    BuildOption.push_back(llvm::MDString::get(
+    VMContext, llvm::StringRef("-cl-fp32-correctly-rounded-divide-sqrt")));
+
+  //Optimization Options
+#if 0 // we don't have that
+  if(getCodeGenOpts().OptDisable)
+    BuildOption.push_back(llvm::MDString::get(
+    VMContext, llvm::StringRef("-cl-opt-disable")));
+#endif
+
+  if(getCodeGenOpts().LessPreciseFPMAD)
+    BuildOption.push_back(llvm::MDString::get(
+    VMContext, llvm::StringRef("-cl-mad-enable")));
+
+  if(fp_opts.getNoSignedZero() || getLangOpts().CLNoSignedZero)
+    BuildOption.push_back(llvm::MDString::get(
+    VMContext, llvm::StringRef("-cl-no-signed-zeros")));
+
+  if(getLangOpts().CLUnsafeMath)
+    BuildOption.push_back(llvm::MDString::get(
+    VMContext, llvm::StringRef("-cl-unsafe-math-optimizations")));
+
+  if(getLangOpts().CLFiniteMathOnly)
+    BuildOption.push_back(llvm::MDString::get(
+    VMContext, llvm::StringRef("-cl-finite-math-only")));
+
+  if(getLangOpts().FastRelaxedMath)
+    BuildOption.push_back(llvm::MDString::get(
+    VMContext, llvm::StringRef("-cl-fast-relaxed-math")));
+
+  if(getCodeGenOpts().getDebugInfo() != codegenoptions::NoDebugInfo)
+    BuildOption.push_back(llvm::MDString::get(
+    VMContext, llvm::StringRef("-g")));
+
+  //Options Controlling the OpenCL C version
+  if(110 == getLangOpts().OpenCLVersion)
+    BuildOption.push_back(llvm::MDString::get(
+    VMContext, llvm::StringRef("-cl-std=CL1.1")));
+
+  if(120 == getLangOpts().OpenCLVersion)
+    BuildOption.push_back(llvm::MDString::get(
+    VMContext, llvm::StringRef("-cl-std=CL1.2")));
+
+  if(200 == getLangOpts().OpenCLVersion)
+    BuildOption.push_back(llvm::MDString::get(
+    VMContext, llvm::StringRef("-cl-std=CL2.0")));
+
+  if(210 == getLangOpts().OpenCLVersion)
+    BuildOption.push_back(llvm::MDString::get(
+    VMContext, llvm::StringRef("-cl-std=CL2.1")));
+
+  if(220 == getLangOpts().OpenCLVersion)
+    BuildOption.push_back(llvm::MDString::get(
+    VMContext, llvm::StringRef("-cl-std=CL2.2")));
+
+  // Options for Querying Kernel Argument Information
+  if(getCodeGenOpts().EmitOpenCLArgMetadata)
+    BuildOption.push_back(llvm::MDString::get(
+    VMContext, llvm::StringRef("-cl-kernel-arg-info")));
+
+  return BuildOption;
+}
+
+void CodeGenModule::EmitOCLBuildOptions()
+{
+  llvm::SmallVector<llvm::Metadata *, 5> BuildOptions = getBuildOptions();
+
+  if (BuildOptions.empty())
+    return;
+
+  llvm::NamedMDNode *OpenCLMetadata =
+    TheModule.getOrInsertNamedMetadata("opencl.compiler.options");
+
+  OpenCLMetadata->addOperand(llvm::MDNode::get(VMContext, BuildOptions));
+}
+
 llvm::Constant *CodeGenModule::EmitAnnotationString(StringRef Str) {
   llvm::Constant *&AStr = AnnotationStrings[Str];
   if (AStr)
@@ -2897,11 +5004,12 @@ void CodeGenModule::EmitGlobal(GlobalDecl GD) {
   if (Global->hasAttr<CPUDispatchAttr>())
     return emitCPUDispatchDefinition(GD);
 
+#if 0 // we need to emit everything (whatever is not actually needed will be removed in LLVM)
   // If this is CUDA, be selective about which declarations we emit.
   if (LangOpts.CUDA) {
     if (LangOpts.CUDAIsDevice) {
       if (!Global->hasAttr<CUDADeviceAttr>() &&
-          !Global->hasAttr<CUDAGlobalAttr>() &&
+          !Global->hasAttr<ComputeKernelAttr>() &&
           !Global->hasAttr<CUDAConstantAttr>() &&
           !Global->hasAttr<CUDASharedAttr>() &&
           !Global->getType()->isCUDADeviceBuiltinSurfaceType() &&
@@ -2922,6 +5030,7 @@ void CodeGenModule::EmitGlobal(GlobalDecl GD) {
              "Expected Variable or Function");
     }
   }
+#endif
 
   if (LangOpts.OpenMP) {
     // If this is OpenMP, check if it is legal to emit this global normally.
@@ -3738,7 +5847,7 @@ llvm::Constant *CodeGenModule::GetAddrOfFunction(GlobalDecl GD,
                                     IsForDefinition);
   // Returns kernel handle for HIP kernel stub function.
   if (LangOpts.CUDA && !LangOpts.CUDAIsDevice &&
-      cast<FunctionDecl>(GD.getDecl())->hasAttr<CUDAGlobalAttr>()) {
+      cast<FunctionDecl>(GD.getDecl())->hasAttr<ComputeKernelAttr>()) {
     auto *Handle = getCUDARuntime().getKernelHandle(
         cast<llvm::Function>(F->stripPointerCasts()), GD);
     if (IsForDefinition)
@@ -4291,7 +6400,7 @@ static bool shouldBeInCOMDAT(CodeGenModule &CGM, const Decl &D) {
 
   // Do not set COMDAT attribute for CUDA/HIP stub functions to prevent
   // them being "merged" by the COMDAT Folding linker optimization.
-  if (D.hasAttr<CUDAGlobalAttr>())
+  if (D.hasAttr<ComputeKernelAttr>())
     return false;
 
   if (D.hasAttr<SelectAnyAttr>())
@@ -4693,7 +6802,7 @@ llvm::GlobalValue::LinkageTypes CodeGenModule::getLLVMLinkageForDeclarator(
       return llvm::Function::ExternalLinkage;
     if (getLangOpts().CUDA && getLangOpts().CUDAIsDevice &&
         !getLangOpts().GPURelocatableDeviceCode)
-      return D->hasAttr<CUDAGlobalAttr>() ? llvm::Function::ExternalLinkage
+      return D->hasAttr<ComputeKernelAttr>() ? llvm::Function::ExternalLinkage
                                           : llvm::Function::InternalLinkage;
     return llvm::Function::WeakODRLinkage;
   }
@@ -4853,12 +6962,66 @@ void CodeGenModule::HandleCXXStaticMemberVarInstantiation(VarDecl *VD) {
   EmitTopLevelDecl(VD);
 }
 
+static llvm::Type* GraphicsExpandReturnType(const CanQualType& type,
+                                            llvm::Type* llvm_type,
+                                            CodeGenTypes& CGT,
+											const bool is_metal_2_3) {
+	const llvm::StructType* ST = dyn_cast<llvm::StructType>(llvm_type);
+	if(!ST) return llvm_type;
+	
+	const auto cxx_rdecl = type->getAsCXXRecordDecl();
+	
+	// if the top decl already is a compat vector, return it directly
+	if(cxx_rdecl->hasAttr<VectorCompatAttr>()) {
+		return CGT.ConvertType(CGT.get_compat_vector_type(cxx_rdecl));
+	}
+	
+	// check if we already handled this
+	const auto existing_flattened_type = CGT.getFlattenedRecordType(cxx_rdecl);
+	if (existing_flattened_type) {
+		return existing_flattened_type;
+	}
+	
+	// else: extract all fields and create a flat llvm struct from them
+	const auto fields = CGT.get_aggregate_scalar_fields(cxx_rdecl, cxx_rdecl);
+	std::vector<llvm::Type*> llvm_fields;
+	for(const auto& field : fields) {
+		llvm_fields.push_back(CGT.ConvertType(field.type));
+	}
+	
+	llvm::StructType* ret = nullptr;
+	if (!is_metal_2_3) {
+		const std::string name = "struct.floor.flat." + cxx_rdecl->getName().str() + ".packed";
+		ret = llvm::StructType::create(llvm_fields, name, true); // always make this packed
+	} else {
+		// TODO/NOTE: this is disabled for now, since it can't handle complex types (but note that this isn't required anyways)
+		// Metal 2.3+: make this an unnamed struct
+		ret = llvm::StructType::get(CGT.getLLVMContext(), llvm_fields, true); // always make this packed
+	}
+	ret->setGraphicsReturnType(); // fix up alignment/sizes/offsets
+	CGT.create_flattened_cg_layout(cxx_rdecl, ret, fields); // create corresponding flattend CGRecordLayout
+	return ret;
+}
+
 void CodeGenModule::EmitGlobalFunctionDefinition(GlobalDecl GD,
                                                  llvm::GlobalValue *GV) {
   const auto *D = cast<FunctionDecl>(GD.getDecl());
 
   // Compute the function info and LLVM type.
   const CGFunctionInfo &FI = getTypes().arrangeGlobalDeclaration(GD);
+  if (D && (getLangOpts().Metal || getLangOpts().Vulkan)) {
+    // TODO: do this properly in CGCall
+    // if this is a vertex/fragment shader function and the return type is a struct/aggregate,
+    // fully expand/flatten all types within (i.e. structs and arrays to scalars, keep existing scalars)
+    if ((D->hasAttr<GraphicsVertexShaderAttr>() ||
+         D->hasAttr<GraphicsFragmentShaderAttr>()) &&
+        FI.getReturnType()->isStructureOrClassType()) {
+      auto& retInfo = const_cast<ABIArgInfo&>(FI.getReturnInfo());
+      //const bool is_metal_2_3 = (getLangOpts().MetalVersion >= 230); // TODO/NOTE: disabled for now, see above
+      const bool is_metal_2_3 = false;
+      retInfo.setCoerceToType(GraphicsExpandReturnType(FI.getReturnType(), retInfo.getCoerceToType(), getTypes(), is_metal_2_3));
+    }
+  }
   llvm::FunctionType *Ty = getTypes().GetFunctionType(FI);
 
   // Get or create the prototype for the function.
@@ -4962,8 +7125,7 @@ void CodeGenModule::EmitAliasDefinition(GlobalDecl GD) {
     // Remove it and replace uses of it with the alias.
     GA->takeName(Entry);
 
-    Entry->replaceAllUsesWith(llvm::ConstantExpr::getBitCast(GA,
-                                                          Entry->getType()));
+    Entry->replaceAllUsesWith(llvm::ConstantExpr::getPointerBitCastOrAddrSpaceCast(GA, Entry->getType()));
     Entry->eraseFromParent();
   } else {
     GA->setName(MangledName);
@@ -6261,6 +8423,71 @@ void CodeGenModule::EmitOMPThreadPrivateDecl(const OMPThreadPrivateDecl *D) {
   }
 }
 
+llvm::Constant*
+CodeGenModule::createIntToSamplerConversion(const Expr *E,
+                                            CodeGenFunction *CGF,
+                                            llvm::GlobalVariable *InsertBefore,
+                                            StringRef Name) {
+  ConstantEmitter emitter(*this, CGF);
+  llvm::Constant *C = emitter.tryEmitForInitializer(E, E->getType().getAddressSpace(),
+                                                    E->getType());
+  assert(C && "Sampler must be initialized by constant");
+  assert(isa<llvm::ConstantInt>(C) && "Sampler must be initialized by integer");
+  if (!getLangOpts().CLSamplerOpaque)
+    return C;
+
+  llvm::StructType* ConstSamplerTy = llvm::StructType::getTypeByName(TheModule.getContext(), "spirv.ConstantSampler");
+  if (!ConstSamplerTy ) {
+    llvm::Type* Elements[] = {Int32Ty, Int32Ty, Int32Ty};
+    ConstSamplerTy = llvm::StructType::create(VMContext, Elements,
+                                              "spirv.ConstantSampler");
+  }
+  const llvm::ConstantInt *CI = static_cast<llvm::ConstantInt*>(C);
+  const uint64_t SamplerValue = CI->getValue().getZExtValue();
+  // 32-bit value of sampler's initializer is interpreted as
+  // bit-field with the following structure:
+  // |unspecified|Filter|Addressing Mode| Normalized Coords|
+  // |31        6|5    4|3             1|                 0|
+  // This structure corresponds to values of sampler properties from opencl.h
+  // Mapping these bits to values defined by SPIR-V specification.
+  unsigned NormalizedCoords = 0x01 & SamplerValue;
+  unsigned AddressingMode  = (0x0E & SamplerValue) >> 1;
+  unsigned FilterMode      = (0x30 & SamplerValue) >> 4;
+  // In SPIR sampler's filter bits are defined as the following
+  // #define CLK_FILTER_NEAREST 0x10
+  // #define CLK_FILTER_LINEAR 0x20
+  // corresponding to 1 and 2 in bits 4-5.
+  // SPIR-V defines sampler filter mode enum as: nearest=0, linear=1,
+  // Therefore, to convert FilterMode from SPIR to SPIR-V,
+  // FilterMode value must be decremented
+  if (FilterMode == 1 || FilterMode == 2)
+    --FilterMode;
+   else
+    getDiags().Report(Context.getFullLoc(E->getBeginLoc()),
+      diag::warn_sampler_initializer_invalid_bits) << "Filter Mode";
+  if (AddressingMode > 4)
+    getDiags().Report(Context.getFullLoc(E->getBeginLoc()),
+      diag::warn_sampler_initializer_invalid_bits) << "Addressing Mode";
+
+  llvm::Constant *Initializer = llvm::ConstantStruct::get(ConstSamplerTy,
+    llvm::ConstantInt::get(Int32Ty, AddressingMode),
+    llvm::ConstantInt::get(Int32Ty, NormalizedCoords),
+    llvm::ConstantInt::get(Int32Ty, FilterMode));
+  llvm::StructType* SamplerTy = llvm::StructType::getTypeByName(TheModule.getContext(), "spirv.Sampler");
+  if(!SamplerTy)
+    SamplerTy = llvm::StructType::create(VMContext, "spirv.Sampler");
+
+  unsigned AS = Context.getTargetAddressSpace(LangAS::opencl_constant);
+  llvm::GlobalVariable *GV =
+    new llvm::GlobalVariable(TheModule, ConstSamplerTy, true,
+                             llvm::GlobalVariable::InternalLinkage,
+                             Initializer, Name + ".sampler.init", InsertBefore,
+                             llvm::GlobalVariable::NotThreadLocal, AS);
+
+  return llvm::ConstantExpr::getBitCast(GV,
+                                        llvm::PointerType::get(SamplerTy, AS));
+}
+
 llvm::Metadata *
 CodeGenModule::CreateMetadataIdentifierImpl(QualType T, MetadataTypeMap &Map,
                                             StringRef Suffix) {
@@ -6366,17 +8593,6 @@ llvm::SanitizerStatReport &CodeGenModule::getSanStats() {
     SanStats = std::make_unique<llvm::SanitizerStatReport>(&getModule());
 
   return *SanStats;
-}
-
-llvm::Value *
-CodeGenModule::createOpenCLIntToSamplerConversion(const Expr *E,
-                                                  CodeGenFunction &CGF) {
-  llvm::Constant *C = ConstantEmitter(CGF).emitAbstract(E, E->getType());
-  auto *SamplerT = getOpenCLRuntime().getSamplerType(E->getType().getTypePtr());
-  auto *FTy = llvm::FunctionType::get(SamplerT, {C->getType()}, false);
-  auto *Call = CGF.EmitRuntimeCall(
-      CreateRuntimeFunction(FTy, "__translate_sampler_initializer"), {C});
-  return Call;
 }
 
 CharUnits CodeGenModule::getNaturalPointeeTypeAlignment(

@@ -937,8 +937,9 @@ static const LangASMap *getAddressSpaceMap(const TargetInfo &T,
         2,  // opencl_constant
         0,  // opencl_private
         4,  // opencl_generic
-        5,  // opencl_global_device
-        6,  // opencl_global_host
+        100,  // opencl_global_device
+        101,  // opencl_global_host
+        0,  // vulkan_input
         7,  // cuda_device
         8,  // cuda_constant
         9,  // cuda_shared
@@ -2176,7 +2177,18 @@ TypeInfo ASTContext::getTypeInfoImpl(const Type *T) const {
       Width = Target->getPointerWidth(0);
       Align = Target->getPointerAlign(0);
       break;
-    case BuiltinType::OCLSampler:
+    case BuiltinType::OCLSampler: {
+      // NOTE: samplers are modeled as integers for now.
+      Width = Target->getIntWidth();
+      Align = Target->getIntAlign();
+#if 0 // -> use this when treating samplers as pointers
+      AS = getTargetAddressSpace(
+          Target->getOpenCLTypeAddrSpace(getOpenCLTypeKind(T)));
+      Width = Target->getPointerWidth(AS);
+      Align = Target->getPointerAlign(AS);
+#endif
+      break;
+    }
     case BuiltinType::OCLEvent:
     case BuiltinType::OCLClkEvent:
     case BuiltinType::OCLQueue:
@@ -3012,8 +3024,14 @@ QualType ASTContext::getAddrSpaceQualType(QualType T,
 
   // If this type already has an address space specified, it cannot get
   // another one.
-  assert(!Quals.hasAddressSpace() &&
-         "Type cannot be in multiple addr spaces!");
+  if (Quals.hasAddressSpace()) {
+    if (Quals.getAddressSpace() == LangAS::opencl_private) {
+      Quals.removeAddressSpace(); // private can be replaced
+    } else {
+      assert(!Quals.hasAddressSpace() &&
+             "Type cannot be in multiple addr spaces!");
+    }
+  }
   Quals.addAddressSpace(AddressSpace);
 
   return getExtQualType(TypeNode, Quals);
@@ -9612,13 +9630,30 @@ QualType ASTContext::mergeFunctionTypes(QualType lhs, QualType rhs,
     assert((AllowCXX ||
             (!lproto->hasExceptionSpec() && !rproto->hasExceptionSpec())) &&
            "C++ shouldn't be here");
-    // Compatible functions must have the same number of parameters
-    if (lproto->getNumParams() != rproto->getNumParams())
-      return {};
 
-    // Variadic and non-variadic functions aren't compatible
-    if (lproto->isVariadic() != rproto->isVariadic())
-      return {};
+    auto lproto_nargs = lproto->getNumParams();
+    auto rproto_nargs = rproto->getNumParams();
+
+    if (LangOpts.OpenCLVersion < 200 || !lproto->isVariadic()) {
+      // Compatible functions must have the same number of parameters
+      if (lproto_nargs != rproto_nargs)
+        return {};
+
+      // Variadic and non-variadic functions aren't compatible
+      if (lproto->isVariadic() != rproto->isVariadic())
+        return {};
+    } else {
+      if (!lproto->isVariadic() && !lproto->isVariadic()) {
+        if (lproto_nargs != rproto_nargs)
+          return QualType();
+      } else if (lproto->isVariadic()) {
+        if (lproto_nargs > rproto_nargs)
+          return QualType();
+      } else if (rproto->isVariadic()) {
+        if (lproto_nargs < rproto_nargs)
+          return QualType();
+      }
+    }
 
     if (lproto->getMethodQuals() != rproto->getMethodQuals())
       return {};
@@ -10826,7 +10861,7 @@ static GVALinkage basicGVALinkageForFunction(const ASTContext &Context,
   if (!FD->isInlined())
     return External;
 
-  if ((!Context.getLangOpts().CPlusPlus &&
+  if ((!Context.getLangOpts().CPlusPlus && !Context.getLangOpts().OpenCL &&
        !Context.getTargetInfo().getCXXABI().isMicrosoft() &&
        !FD->hasAttr<DLLExportAttr>()) ||
       FD->hasAttr<GNUInlineAttr>()) {
@@ -10863,7 +10898,7 @@ static GVALinkage adjustGVALinkageForAttributes(const ASTContext &Context,
   } else if (Context.getLangOpts().CUDA && Context.getLangOpts().CUDAIsDevice) {
     // Device-side functions with __global__ attribute must always be
     // visible externally so they can be launched from host.
-    if (D->hasAttr<CUDAGlobalAttr>() &&
+    if (D->hasAttr<ComputeKernelAttr>() &&
         (L == GVA_DiscardableODR || L == GVA_Internal))
       return GVA_StrongODR;
     // Single source offloading languages like CUDA/HIP need to be able to

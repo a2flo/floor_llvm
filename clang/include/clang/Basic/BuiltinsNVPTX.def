@@ -19,13 +19,17 @@
 
 #pragma push_macro("SM_70")
 #pragma push_macro("SM_72")
+#pragma push_macro("SM_73")
 #pragma push_macro("SM_75")
 #pragma push_macro("SM_80")
+#pragma push_macro("SM_82")
 #pragma push_macro("SM_86")
 #define SM_86 "sm_86"
-#define SM_80 "sm_80|" SM_86
+#define SM_82 "sm_82|" SM_86
+#define SM_80 "sm_80|" SM_82
 #define SM_75 "sm_75|" SM_80
-#define SM_72 "sm_72|" SM_75
+#define SM_73 "sm_73|" SM_75
+#define SM_72 "sm_72|" SM_73
 #define SM_70 "sm_70|" SM_72
 
 #pragma push_macro("SM_60")
@@ -33,6 +37,7 @@
 
 #pragma push_macro("PTX60")
 #pragma push_macro("PTX61")
+#pragma push_macro("PTX62")
 #pragma push_macro("PTX63")
 #pragma push_macro("PTX64")
 #pragma push_macro("PTX65")
@@ -49,7 +54,8 @@
 #define PTX65 "ptx65|" PTX70
 #define PTX64 "ptx64|" PTX65
 #define PTX63 "ptx63|" PTX64
-#define PTX61 "ptx61|" PTX63
+#define PTX62 "ptx62|" PTX63
+#define PTX61 "ptx61|" PTX62
 #define PTX60 "ptx60|" PTX61
 
 #pragma push_macro("AND")
@@ -814,11 +820,14 @@ TARGET_BUILTIN(__nvvm_cp_async_wait_all, "v", "", AND(SM_80,PTX70))
 #pragma pop_macro("SM_60")
 #pragma pop_macro("SM_70")
 #pragma pop_macro("SM_72")
+#pragma pop_macro("SM_73")
 #pragma pop_macro("SM_75")
 #pragma pop_macro("SM_80")
+#pragma pop_macro("SM_82")
 #pragma pop_macro("SM_86")
 #pragma pop_macro("PTX60")
 #pragma pop_macro("PTX61")
+#pragma pop_macro("PTX62")
 #pragma pop_macro("PTX63")
 #pragma pop_macro("PTX64")
 #pragma pop_macro("PTX65")

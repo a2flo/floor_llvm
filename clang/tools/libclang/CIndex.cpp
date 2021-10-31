@@ -5490,7 +5490,7 @@ CXString clang_getCursorKindSpelling(enum CXCursorKind Kind) {
     return cxstring::createRef("attribute(constant)");
   case CXCursor_CUDADeviceAttr:
     return cxstring::createRef("attribute(device)");
-  case CXCursor_CUDAGlobalAttr:
+  case CXCursor_ComputeKernelAttr:
     return cxstring::createRef("attribute(global)");
   case CXCursor_CUDAHostAttr:
     return cxstring::createRef("attribute(host)");

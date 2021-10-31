@@ -1699,6 +1699,7 @@ llvm::Value *CodeGenFunction::EmitLoadOfScalar(Address Addr, bool Volatile,
                                                LValueBaseInfo BaseInfo,
                                                TBAAAccessInfo TBAAInfo,
                                                bool isNontemporal) {
+#if 0 // incorrect and not at all beneficial for compute backends
   if (!CGM.getCodeGenOpts().PreserveVec3Type) {
     // For better performance, handle vector loads differently.
     if (Ty->isVectorType()) {
@@ -1722,6 +1723,7 @@ llvm::Value *CodeGenFunction::EmitLoadOfScalar(Address Addr, bool Volatile,
       }
     }
   }
+#endif
 
   // Atomic operations have to be done on integral types.
   LValue AtomicLValue =
@@ -1820,6 +1822,7 @@ void CodeGenFunction::EmitStoreOfScalar(llvm::Value *Value, Address Addr,
     // Handle vectors differently to get better performance.
     if (Ty->isVectorType()) {
       llvm::Type *SrcTy = Value->getType();
+#if 0 // incorrect and not at all beneficial for compute backends
       auto *VecTy = dyn_cast<llvm::VectorType>(SrcTy);
       // Handle vec3 special.
       if (VecTy && cast<llvm::FixedVectorType>(VecTy)->getNumElements() == 3) {
@@ -1828,6 +1831,7 @@ void CodeGenFunction::EmitStoreOfScalar(llvm::Value *Value, Address Addr,
                                             "extractVec");
         SrcTy = llvm::FixedVectorType::get(VecTy->getElementType(), 4);
       }
+#endif
       if (Addr.getElementType() != SrcTy) {
         Addr = Builder.CreateElementBitCast(Addr, SrcTy, "storetmp");
       }
@@ -4228,14 +4232,29 @@ static Address emitAddrOfZeroSizeField(CodeGenFunction &CGF, Address Base,
 ///
 /// The resulting address doesn't necessarily have the right type.
 static Address emitAddrOfFieldStorage(CodeGenFunction &CGF, Address base,
-                                      const FieldDecl *field) {
+                                      const FieldDecl *field, llvm::Type* elem_type) {
   if (field->isZeroSize(CGF.getContext()))
     return emitAddrOfZeroSizeField(CGF, base, field);
 
   const RecordDecl *rec = field->getParent();
 
   unsigned idx =
-    CGF.CGM.getTypes().getCGRecordLayout(rec).getLLVMFieldNo(field);
+    CGF.CGM.getTypes().getCGRecordLayout(rec, elem_type).getLLVMFieldNo(field);
+
+  // deal with internal libfloor vector class -> vector type conversion which
+  // can lead to a struct element load / GEP like this
+  // -> simply return the vector itself here (we can't drill down further)
+  if (elem_type->isVectorTy()) {
+    return base;
+  }
+
+  // deal with array of opaque (struct) types (e.g. used for array of images)
+  if (elem_type->isArrayTy() &&
+      elem_type->getArrayElementType()->isPointerTy() &&
+      elem_type->getArrayElementType()->getPointerElementType()->isStructTy() &&
+      !elem_type->getArrayElementType()->getPointerElementType()->isSized()) {
+    return CGF.Builder.CreateConstArrayGEP(base, idx, field->getName());
+  }
 
   return CGF.Builder.CreateStructGEP(base, idx, field->getName());
 }
@@ -4275,10 +4294,12 @@ static bool hasAnyVptr(const QualType Type, const ASTContext &Context) {
 LValue CodeGenFunction::EmitLValueForField(LValue base,
                                            const FieldDecl *field) {
   LValueBaseInfo BaseInfo = base.getBaseInfo();
+  Address Addr = base.getAddress(*this);
+  llvm::Type* elem_type = Addr.getType()->getPointerElementType();
+  const RecordDecl *rec = field->getParent();
+  const CGRecordLayout &RL = CGM.getTypes().getCGRecordLayout(rec, elem_type);
 
   if (field->isBitField()) {
-    const CGRecordLayout &RL =
-        CGM.getTypes().getCGRecordLayout(field->getParent());
     const CGBitFieldInfo &Info = RL.getBitFieldInfo(field);
     const bool UseVolatile = isAAPCS(CGM.getTarget()) &&
                              CGM.getCodeGenOpts().AAPCSBitfieldWidth &&
@@ -4286,7 +4307,6 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
                              field->getType()
                                  .withCVRQualifiers(base.getVRQualifiers())
                                  .isVolatileQualified();
-    Address Addr = base.getAddress(*this);
     unsigned Idx = RL.getLLVMFieldNo(field);
     const RecordDecl *rec = field->getParent();
     if (!UseVolatile) {
@@ -4309,6 +4329,7 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
     llvm::Type *FieldIntTy = llvm::Type::getIntNTy(getLLVMContext(), SS);
     if (Addr.getElementType() != FieldIntTy)
       Addr = Builder.CreateElementBitCast(Addr, FieldIntTy);
+    // TODO: check if address space is correct
     if (UseVolatile) {
       const unsigned VolatileOffset = Info.VolatileStorageOffset.getQuantity();
       if (VolatileOffset)
@@ -4327,7 +4348,6 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
   // FIXME: this should get propagated down through anonymous structs
   // and unions.
   QualType FieldType = field->getType();
-  const RecordDecl *rec = field->getParent();
   AlignmentSource BaseAlignSource = BaseInfo.getAlignmentSource();
   LValueBaseInfo FieldBaseInfo(getFieldAlignmentSource(BaseAlignSource));
   TBAAAccessInfo FieldTBAAInfo;
@@ -4361,7 +4381,7 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
         getContext().getTypeSizeInChars(FieldType).getQuantity();
   }
 
-  Address addr = base.getAddress(*this);
+  auto& addr = Addr;
   if (auto *ClassDef = dyn_cast<CXXRecordDecl>(rec)) {
     if (CGM.getCodeGenOpts().StrictVTablePointers &&
         ClassDef->isDynamicClass()) {
@@ -4402,7 +4422,7 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
     if (!IsInPreservedAIRegion &&
         (!getDebugInfo() || !rec->hasAttr<BPFPreserveAccessIndexAttr>()))
       // For structs, we GEP to the field that the record layout suggests.
-      addr = emitAddrOfFieldStorage(*this, addr, field);
+      addr = emitAddrOfFieldStorage(*this, addr, field, elem_type);
     else
       // Remember the original struct field index
       addr = emitPreserveStructAccess(*this, base, addr, field);
@@ -4449,7 +4469,8 @@ CodeGenFunction::EmitLValueForFieldInitialization(LValue Base,
   if (!FieldType->isReferenceType())
     return EmitLValueForField(Base, Field);
 
-  Address V = emitAddrOfFieldStorage(*this, Base.getAddress(*this), Field);
+  llvm::Type* elem_type = Base.getAddress(*this).getType()->getPointerElementType();
+  Address V = emitAddrOfFieldStorage(*this, Base.getAddress(*this), Field, elem_type);
 
   // Make sure that the address is pointing to the right type.
   llvm::Type *llvmType = ConvertTypeForMem(FieldType);
@@ -4651,7 +4672,6 @@ LValue CodeGenFunction::EmitCastLValue(const CastExpr *E) {
   case CK_ARCReclaimReturnedObject:
   case CK_ARCExtendBlockObject:
   case CK_CopyAndAutoreleaseBlockObject:
-  case CK_IntToOCLSampler:
   case CK_FloatingToFixedPoint:
   case CK_FixedPointToFloating:
   case CK_FixedPointCast:
@@ -4788,6 +4808,12 @@ LValue CodeGenFunction::EmitCastLValue(const CastExpr *E) {
   }
   case CK_ZeroToOCLOpaqueType:
     llvm_unreachable("NULL to OpenCL opaque type lvalue cast is not valid");
+  case CK_ZeroToOCLEvent:
+    llvm_unreachable("NULL to OpenCL event lvalue cast is not valid");
+  case CK_ZeroToOCLQueue:
+    llvm_unreachable("NULL to OpenCL queue lvalue cast is not valid");
+  case CK_IntToOCLSampler:
+    llvm_unreachable("int to OpenCL sampler lvalue cast is not valid");
   }
 
   llvm_unreachable("Unhandled lvalue cast kind?");
@@ -4923,7 +4949,7 @@ static CGCallee EmitDirectCallee(CodeGenFunction &CGF, GlobalDecl GD) {
 
   llvm::Constant *CalleePtr = EmitFunctionDeclPointer(CGF.CGM, GD);
   if (CGF.CGM.getLangOpts().CUDA && !CGF.CGM.getLangOpts().CUDAIsDevice &&
-      FD->hasAttr<CUDAGlobalAttr>())
+      FD->hasAttr<ComputeKernelAttr>())
     CalleePtr = CGF.CGM.getCUDARuntime().getKernelStub(
         cast<llvm::GlobalValue>(CalleePtr->stripPointerCasts()));
 
