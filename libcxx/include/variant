@@ -226,7 +226,7 @@ namespace std { // explicitly not using versioning namespace
 
 class _LIBCPP_EXCEPTION_ABI _LIBCPP_AVAILABILITY_BAD_VARIANT_ACCESS bad_variant_access : public exception {
 public:
-  virtual const char* what() const _NOEXCEPT;
+  virtual constant const char* what() const _NOEXCEPT;
 };
 
 } // namespace std
@@ -255,7 +255,7 @@ void __throw_bad_variant_access() {
 #ifndef _LIBCPP_NO_EXCEPTIONS
         throw bad_variant_access();
 #else
-        _VSTD::abort();
+        __builtin_unreachable();
 #endif
 }
 

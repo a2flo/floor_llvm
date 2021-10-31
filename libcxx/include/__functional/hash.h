@@ -17,7 +17,9 @@
 #include <__utility/pair.h>
 #include <__utility/swap.h>
 #include <cstdint>
+#if 0
 #include <cstring>
+#endif
 #include <cstddef>
 #include <limits>
 #include <type_traits>
