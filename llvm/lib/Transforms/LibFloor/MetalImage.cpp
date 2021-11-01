@@ -386,6 +386,12 @@ namespace {
 					func_args.push_back(dpdx_arg);
 					func_arg_types.push_back(dpdy_arg->getType());
 					func_args.push_back(dpdy_arg);
+					
+					if (is_metal_2_4) {
+						// Metal 2.4 has an additional "min LOD clamp" f32 argument -> set to 0.0 for now
+						func_arg_types.push_back(llvm::Type::getFloatTy(*ctx));
+						func_args.push_back(ConstantFP::get(llvm::Type::getFloatTy(*ctx), 0.0f));
+					}
 				}
 				
 				// -> offset
@@ -417,9 +423,12 @@ namespace {
 				}
 				
 				if (is_metal_2_3) {
-					// Metal 2.3+ has an additional (unknown) f32 0.0 argument
-					func_arg_types.push_back(llvm::Type::getFloatTy(*ctx));
-					func_args.push_back(ConstantFP::get(llvm::Type::getFloatTy(*ctx), 0.0f));
+					// Metal 2.3 has an additional (unknown) f32 0.0 argument
+					// NOTE: do not emit this for Metal 2.4+ when a gradient is used
+					if (!is_metal_2_4 || (is_metal_2_4 && !is_gradient)) {
+						func_arg_types.push_back(llvm::Type::getFloatTy(*ctx));
+						func_args.push_back(ConstantFP::get(llvm::Type::getFloatTy(*ctx), 0.0f));
+					}
 				}
 				
 				// Metal 2.0+ has an additional (unknown) i32 0 argument

@@ -434,6 +434,7 @@ namespace llvm {
 		bool was_modified { false };
 		bool is_fragment_shader { false };
 		bool is_metal_2_3 { false };
+		bool is_metal_2_4 { false };
 		IMAGE_CAPABILITY image_capabilities { IMAGE_CAPABILITY::NONE };
 		
 		llvm::AttributeList nounwind_readnone_attr;

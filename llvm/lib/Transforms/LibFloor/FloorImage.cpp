@@ -91,10 +91,16 @@ bool FloorImageBasePass::runOnFunction(Function &F) {
 			if (major_version >= 14) {
 				is_metal_2_3 = true;
 			}
+			if (major_version >= 15) {
+				is_metal_2_4 = true;
+			}
 		} else if (triple.getOS() == Triple::OSType::MacOSX) {
 			if (triple.getMacOSXVersion(major_version, minor_version, micro_version)) {
 				if (major_version >= 11) {
 					is_metal_2_3 = true;
+				}
+				if (major_version >= 12) {
+					is_metal_2_4 = true;
 				}
 			}
 		}
