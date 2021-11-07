@@ -433,6 +433,7 @@ namespace llvm {
 		std::shared_ptr<IRBuilder<>> builder;
 		bool was_modified { false };
 		bool is_fragment_shader { false };
+		bool is_metal { false };
 		bool is_metal_2_3 { false };
 		bool is_metal_2_4 { false };
 		IMAGE_CAPABILITY image_capabilities { IMAGE_CAPABILITY::NONE };

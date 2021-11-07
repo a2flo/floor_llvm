@@ -85,6 +85,7 @@ bool FloorImageBasePass::runOnFunction(Function &F) {
 	// check triple
 	const auto triple = llvm::Triple(M->getTargetTriple());
 	if (triple.getArch() == Triple::ArchType::air64) {
+		is_metal = true;
 		uint32_t major_version = 0, minor_version = 0, micro_version = 0;
 		if (triple.getOS() == Triple::OSType::IOS) {
 			triple.getiOSVersion(major_version, minor_version, micro_version);
@@ -257,6 +258,7 @@ void FloorImageBasePass::handle_image(CallBase& CB, const StringRef& func_name) 
 	const COMPUTE_IMAGE_TYPE format_type = full_image_type & COMPUTE_IMAGE_TYPE::__FORMAT_MASK;
 	const COMPUTE_IMAGE_TYPE image_data_type = full_image_type & COMPUTE_IMAGE_TYPE::__DATA_TYPE_MASK;
 	const bool is_normalized = has_flag<COMPUTE_IMAGE_TYPE::FLAG_NORMALIZED>(full_image_type);
+	const bool is_depth = has_flag<COMPUTE_IMAGE_TYPE::FLAG_DEPTH>(full_image_type);
 	
 	// -> coord
 	const auto coord_arg = CB.getOperand(2 + args_offset);
@@ -442,15 +444,23 @@ void FloorImageBasePass::handle_image(CallBase& CB, const StringRef& func_name) 
 	else {
 		// -> data
 		const auto data_arg = CB.getOperand(6 + args_offset);
-		const auto data_vec_type = dyn_cast<FixedVectorType>(data_arg->getType());
-		if(!data_vec_type || data_vec_type->getNumElements() != 4) {
-			ctx->emitError(&CB, "invalid image data type (must be 4-component vector)");
-			return;
-		}
-		if(!data_vec_type->getElementType()->isFloatTy() &&
-		   !data_vec_type->getElementType()->isIntegerTy()) {
-			ctx->emitError(&CB, "invalid image data type (must be a float or integer vector)");
-			return;
+		if (!is_depth || !is_metal) {
+			const auto data_vec_type = dyn_cast<FixedVectorType>(data_arg->getType());
+			if(!data_vec_type || data_vec_type->getNumElements() != 4) {
+				ctx->emitError(&CB, "invalid image data type (must be 4-component vector)");
+				return;
+			}
+			if(!data_vec_type->getElementType()->isFloatTy() &&
+			   !data_vec_type->getElementType()->isIntegerTy()) {
+				ctx->emitError(&CB, "invalid image data type (must be a float or integer vector)");
+				return;
+			}
+		} else {
+			const auto data_type = data_arg->getType();
+			if (!data_type->isFloatTy()) {
+				ctx->emitError(&CB, "invalid image data type (must be a single float when writing depth)");
+				return;
+			}
 		}
 		
 		// only writes with integer coordinates are allowed

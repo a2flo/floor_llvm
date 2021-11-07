@@ -523,22 +523,19 @@ namespace {
 			}
 			
 			std::string dtype;
-			if(func_name.endswith(".float")) {
+			if (func_name.endswith(".float.depth")) {
+				dtype = "f32";
+			} else if (func_name.endswith(".float")) {
 				dtype = "v4f32";
-			}
-			else if(func_name.endswith(".int")) {
+			} else if (func_name.endswith(".int")) {
 				dtype = "s.v4i32";
-			}
-			else if(func_name.endswith(".uint")) {
+			} else if (func_name.endswith(".uint")) {
 				dtype = "u.v4i32";
-			}
-			else if(func_name.endswith(".half")) {
+			} else if (func_name.endswith(".half")) {
 				dtype = "v4f16";
-			}
-			else if(func_name.endswith(".short")) {
+			} else if (func_name.endswith(".short")) {
 				dtype = "s.v4i16";
-			}
-			else if(func_name.endswith(".ushort")) {
+			} else if (func_name.endswith(".ushort")) {
 				dtype = "u.v4i16";
 			}
 			// unknown -> ignore
@@ -557,13 +554,11 @@ namespace {
 			std::string geom = geom_cstr;
 			const auto is_array = has_flag<COMPUTE_IMAGE_TYPE::FLAG_ARRAY>(image_type);
 			const auto is_cube = has_flag<COMPUTE_IMAGE_TYPE::FLAG_CUBE>(image_type);
+			const auto is_depth = has_flag<COMPUTE_IMAGE_TYPE::FLAG_DEPTH>(image_type);
 			
 			// filter types that are not allowed, b/c they can't be directly written to
 			switch (image_type) {
 				case COMPUTE_IMAGE_TYPE::IMAGE_2D_MSAA:
-				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH:
-				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_STENCIL:
-				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_ARRAY:
 				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_MSAA:
 				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_CUBE:
 				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_CUBE_ARRAY:
@@ -571,6 +566,11 @@ namespace {
 				case COMPUTE_IMAGE_TYPE::IMAGE_2D_MSAA_ARRAY:
 					ctx->emitError(&I, "invalid image type - type is not writable");
 					return;
+				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH:
+				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_STENCIL:
+				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_ARRAY:
+					// TODO/NOTE: not officially exposed by Metal headers, but exists in metalfe -> figure out what the min version is
+					break;
 				default:
 					break;
 			}
@@ -610,7 +610,7 @@ namespace {
 				func_args.push_back(layer_arg);
 			}
 			
-			// -> data (also a 4-component vector)
+			// -> data (a 4-component vector or a single float if depth)
 			func_arg_types.push_back(data_arg->getType());
 			func_args.push_back(data_arg);
 			
@@ -623,9 +623,9 @@ namespace {
 			}
 			
 			if (is_metal_2_3) {
-				// Metal 2.3+ has an additional rounding mode argument (always set to 0 for now)
+				// Metal 2.3+ has an additional rounding mode argument (always set to 0 for now, or 2 if depth)
 				func_arg_types.push_back(llvm::Type::getInt32Ty(*ctx));
-				func_args.push_back(builder->getInt32(0));
+				func_args.push_back(builder->getInt32(!is_depth ? 0 : 2));
 			}
 			
 			// -> build write func name
