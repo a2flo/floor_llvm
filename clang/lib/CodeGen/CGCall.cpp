@@ -527,9 +527,9 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
   // add implicit internal args
   // NOTE: Metal and Vulkan handle these differently: Metal uses direct params, Vulkan uses pointers in input AS
   if (CGM.getLangOpts().Metal) {
-	if (CGM.getCodeGenOpts().MetalSoftPrintf > 0) {
-	  add_arg(Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.IntTy, LangAS::opencl_global)), "__metal__printf_buffer__");
-	}
+    if (CGM.getCodeGenOpts().MetalSoftPrintf > 0) {
+      add_arg(Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.IntTy, LangAS::opencl_global)), "__metal__printf_buffer__");
+    }
 
     if (FD->hasAttr<ComputeKernelAttr>()) {
       // id types, all int3:
@@ -557,9 +557,9 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       add_arg(float2_type, "__metal__point_coord__");
     }
   } else if(CGM.getLangOpts().Vulkan) {
-	if (CGM.getCodeGenOpts().VulkanSoftPrintf > 0) {
-	  add_arg(Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.IntTy, LangAS::opencl_global)), "vulkan.printf_buffer");
-	}
+    if (CGM.getCodeGenOpts().VulkanSoftPrintf > 0) {
+      add_arg(Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.IntTy, LangAS::opencl_global)), "vulkan.printf_buffer");
+    }
 
     if (FD->hasAttr<ComputeKernelAttr>()) {
       // id types, all int3*:
@@ -1307,34 +1307,61 @@ void CodeGenFunction::ExpandTypeFromArgs(QualType Ty, LValue LV,
   } else if (auto FAExp = dyn_cast<FloorAggregateExpansion>(Exp.get())) {
     // TODO: should this recurse into bases with ExpandTypeFromArgs or do this manually?
     Address This = LV.getAddress(*this);
-    for (const CXXBaseSpecifier *BS : FAExp->bases) {
-      // Perform a single step derived-to-base conversion.
-      Address Base =
-          GetAddressOfBaseClass(This, Ty->getAsCXXRecordDecl(), &BS, &BS + 1,
-                                /*NullCheckValue=*/false, SourceLocation());
-      LValue SubLV = MakeAddrLValue(Base, BS->getType());
-
-      // Recurse onto bases.
-      ExpandTypeFromArgs(BS->getType(), SubLV, AI, CC);
+    const auto cxx_rdecl = Ty->getAsCXXRecordDecl();
+    llvm::Type* flattened_rdecl = nullptr;
+    if (cxx_rdecl) {
+      flattened_rdecl = getTypes().getFlattenedRecordType(cxx_rdecl);
     }
-
-    for(const auto& field : FAExp->fields) {
-      if(field.is_in_base) continue; // already handled
-      // TODO: non-image arrays -> these have no FD
-      if (field.field_decl) {
-        // array of images
-        if (field.type->isArrayImageType(false)) {
-          LValue SubLV = EmitLValueForField(LV, field.field_decl);
-          Builder.CreateStore(&*AI++, SubLV.getAddress(*this));
+    if (flattened_rdecl) {
+      // -> handle as flat struct/rdecl
+      for (const auto& field : FAExp->fields) {
+        // TODO: non-image arrays -> these have no FD
+        if (field.field_decl) {
+          // array of images
+          if (field.type->isArrayImageType(false)) {
+            LValue SubLV = EmitLValueForField(LV, field.field_decl);
+            Builder.CreateStore(&*AI++, SubLV.getAddress(*this));
+          }
+          // all else
+          else {
+            LValue SubLV = EmitLValueForFieldInitialization(LV, field.field_decl);
+            ExpandTypeFromArgs(SubLV.getType(), SubLV, AI, CC);
+          }
+        } else {
+          // will probably fail, but still try -> TODO above
+          EmitStoreThroughLValue(RValue::get(&*AI++), LV);
         }
-        // all else
-        else {
-      LValue SubLV = EmitLValueForFieldInitialization(LV, field.field_decl);
-      ExpandTypeFromArgs(SubLV.getType(), SubLV, AI, CC);
-    }
-      } else {
-        // will probably fail, but still try -> TODO above
-        EmitStoreThroughLValue(RValue::get(&*AI++), LV);
+      }
+    } else {
+      for (const CXXBaseSpecifier *BS : FAExp->bases) {
+        // Perform a single step derived-to-base conversion.
+        Address Base =
+        GetAddressOfBaseClass(This, Ty->getAsCXXRecordDecl(), &BS, &BS + 1,
+                  /*NullCheckValue=*/false, SourceLocation());
+        LValue SubLV = MakeAddrLValue(Base, BS->getType());
+        
+        // Recurse onto bases.
+        ExpandTypeFromArgs(BS->getType(), SubLV, AI, CC);
+      }
+      
+      for(const auto& field : FAExp->fields) {
+        if(field.is_in_base) continue; // already handled
+        // TODO: non-image arrays -> these have no FD
+        if (field.field_decl) {
+          // array of images
+          if (field.type->isArrayImageType(false)) {
+            LValue SubLV = EmitLValueForField(LV, field.field_decl);
+            Builder.CreateStore(&*AI++, SubLV.getAddress(*this));
+          }
+          // all else
+          else {
+            LValue SubLV = EmitLValueForFieldInitialization(LV, field.field_decl);
+            ExpandTypeFromArgs(SubLV.getType(), SubLV, AI, CC);
+          }
+        } else {
+          // will probably fail, but still try -> TODO above
+          EmitStoreThroughLValue(RValue::get(&*AI++), LV);
+        }
       }
     }
   } else if (auto RExp = dyn_cast<RecordExpansion>(Exp.get())) {
@@ -1648,7 +1675,7 @@ static llvm::Value *CreateCoercedLoad(Address Src, llvm::Type *Ty,
 static void CreateCoercedStore(llvm::Value *Src,
                                Address Dst,
                                bool DstIsVolatile,
-							   CodeGenFunction &CGF);
+                               CodeGenFunction &CGF);
 
 // Function to store a first-class aggregate into memory.  We prefer to
 // store the elements rather than the aggregate to be more friendly to

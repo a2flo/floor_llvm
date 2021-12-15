@@ -2844,8 +2844,14 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 					} else {
 						arg_info.push_back(llvm::MDString::get(VMContext, "air.fragment_input"));
 						arg_info.push_back(llvm::MDString::get(VMContext, StringRef(field.mangled_name)));
-						// TODO/NOTE: rather primitive/unreliable way of doing this, but better than nothing for now
-						if (type_name.find("uint") == 0 || type_name.find("int") == 0) {
+						bool is_int_type = field.type->isIntegerType();
+						if (!is_int_type && field.type->isVectorType()) {
+							auto vec_type = llvm::dyn_cast<clang::ExtVectorType>(field.type.getTypePtr()->getBaseElementTypeUnsafe()->getCanonicalTypeInternal().getTypePtr());
+							if (vec_type != nullptr) {
+								is_int_type = vec_type->getElementType()->isIntegerType();
+							}
+						}
+						if (is_int_type) {
 							// use flat "interpolation" for uint* and int* types
 							arg_info.push_back(llvm::MDString::get(VMContext, "air.flat"));
 						} else {

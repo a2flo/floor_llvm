@@ -343,6 +343,11 @@ public:
   // returns the amount of implicit internal args that are added for the specified FunctionDecl
   uint32_t getMetalVulkanImplicitArgCount(const FunctionDecl* FD) const;
 
+  // returns true if the specified LLVM type is a flattened type
+  bool is_flattened_struct_type(llvm::Type* Ty) const {
+    return FlattenedCGRecordLayouts.count(Ty) > 0;
+  }
+
 private:
   // helper function for get_aggregate_scalar_fields
   void aggregate_scalar_fields_add_array(const CXXRecordDecl* root_decl,

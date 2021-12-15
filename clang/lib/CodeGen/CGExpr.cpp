@@ -140,7 +140,15 @@ Address CodeGenFunction::CreateMemTemp(QualType Ty, const Twine &Name,
 
 Address CodeGenFunction::CreateMemTemp(QualType Ty, CharUnits Align,
                                        const Twine &Name, Address *Alloca) {
-  Address Result = CreateTempAlloca(ConvertTypeForMem(Ty), Align, Name,
+  // if "Ty" has a flattened struct record, use that instead of the default LLVM type
+  llvm::Type* llvm_type = nullptr;
+  if (const auto cxx_rdecl = Ty->getAsCXXRecordDecl(); cxx_rdecl) {
+    llvm_type = getTypes().getFlattenedRecordType(cxx_rdecl);
+  }
+  if (!llvm_type) {
+    llvm_type = ConvertTypeForMem(Ty);
+  }
+  Address Result = CreateTempAlloca(llvm_type, Align, Name,
                                     /*ArraySize=*/nullptr, Alloca);
 
   if (Ty->isConstantMatrixType()) {
@@ -4298,6 +4306,7 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
   llvm::Type* elem_type = Addr.getType()->getPointerElementType();
   const RecordDecl *rec = field->getParent();
   const CGRecordLayout &RL = CGM.getTypes().getCGRecordLayout(rec, elem_type);
+  const auto is_flattened_struct = CGM.getTypes().is_flattened_struct_type(elem_type);
 
   if (field->isBitField()) {
     const CGBitFieldInfo &Info = RL.getBitFieldInfo(field);
@@ -4361,7 +4370,7 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
     // If no base type been assigned for the base access, then try to generate
     // one for this base lvalue.
     FieldTBAAInfo = base.getTBAAInfo();
-    if (!FieldTBAAInfo.BaseType) {
+    if (!FieldTBAAInfo.BaseType && !is_flattened_struct /* do not use invalid TBAA info when this is flattened */) {
         FieldTBAAInfo.BaseType = CGM.getTBAABaseTypeInfo(base.getType());
         assert(!FieldTBAAInfo.Offset &&
                "Nonzero offset for an access with no base type!");
