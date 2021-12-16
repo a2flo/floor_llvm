@@ -441,6 +441,9 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       return false;
     });
 
+    // metallib uses the function name as the source file name
+    cloned_mod->setSourceFileName(func->getName());
+
     // update data layout
     if (target_air_version >= 230) {
       cloned_mod->setDataLayout(
@@ -541,7 +544,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
         if (MDNode *ident_op = llvm_ident->getOperand(0)) {
           static const std::unordered_map<uint32_t, std::string> ident_versions {
             { 230, "Apple LLVM version 31001.143 (metalfe-31001.143)" },
-            { 240, "Apple metal version 31001.322 (metalfe-31001.322.1)" },
+            { 240, "Apple metal version 31001.363 (metalfe-31001.363)" },
           };
           ident_op->replaceOperandWith(
               0, llvm::MDString::get(

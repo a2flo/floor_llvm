@@ -219,7 +219,7 @@ class StructType : public Type {
     SCDB_Packed = 2,
     SCDB_IsLiteral = 4,
     SCDB_IsSized = 8,
-    SCDB_IsGraphicsReturnType = 16
+    SCDB_IsGraphicsIOType = 16
   };
 
   /// For a named struct that actually has a name, this is a pointer to the
@@ -281,13 +281,13 @@ public:
   /// yet. These prints as 'opaque' in .ll files.
   bool isOpaque() const { return (getSubclassData() & SCDB_HasBody) == 0; }
 
-  /// isGraphicsReturnType - Return true if this type is used as a Metal vertex/fragment
-  /// shader return type.
-  bool isGraphicsReturnType() const { return (getSubclassData() & SCDB_IsGraphicsReturnType) != 0; }
+  /// isGraphicsIOType - Return true if this type is used as a graphics vertex/fragment
+  /// shader input/output type.
+  bool isGraphicsIOType() const { return (getSubclassData() & SCDB_IsGraphicsIOType) != 0; }
 
-  /// setGraphicsReturnType - Flags this type as a Metal return type.
-  void setGraphicsReturnType() {
-    setSubclassData(getSubclassData() | SCDB_IsGraphicsReturnType);
+  /// setGraphicsIOType - Flags this type as a graphics input/output type.
+  void setGraphicsIOType() {
+    setSubclassData(getSubclassData() | SCDB_IsGraphicsIOType);
   }
 
   /// isSized - Return true if this is a sized type.

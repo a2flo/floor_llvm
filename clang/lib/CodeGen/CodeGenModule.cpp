@@ -6968,10 +6968,10 @@ void CodeGenModule::HandleCXXStaticMemberVarInstantiation(VarDecl *VD) {
   EmitTopLevelDecl(VD);
 }
 
-static llvm::Type* GraphicsExpandReturnType(const CanQualType& type,
-                                            llvm::Type* llvm_type,
-                                            CodeGenTypes& CGT,
-											const bool is_metal_2_3) {
+static llvm::Type* GraphicsExpandIOType(const QualType& type,
+										llvm::Type* llvm_type,
+										CodeGenTypes& CGT,
+										const bool is_metal_2_3) {
 	const llvm::StructType* ST = dyn_cast<llvm::StructType>(llvm_type);
 	if(!ST) return llvm_type;
 	
@@ -7004,7 +7004,7 @@ static llvm::Type* GraphicsExpandReturnType(const CanQualType& type,
 		// Metal 2.3+: make this an unnamed struct
 		ret = llvm::StructType::get(CGT.getLLVMContext(), llvm_fields, true); // always make this packed
 	}
-	ret->setGraphicsReturnType(); // fix up alignment/sizes/offsets
+	ret->setGraphicsIOType(); // fix up alignment/sizes/offsets
 	CGT.create_flattened_cg_layout(cxx_rdecl, ret, fields); // create corresponding flattend CGRecordLayout
 	return ret;
 }
@@ -7017,15 +7017,22 @@ void CodeGenModule::EmitGlobalFunctionDefinition(GlobalDecl GD,
   const CGFunctionInfo &FI = getTypes().arrangeGlobalDeclaration(GD);
   if (D && (getLangOpts().Metal || getLangOpts().Vulkan)) {
     // TODO: do this properly in CGCall
-    // if this is a vertex/fragment shader function and the return type is a struct/aggregate,
+    // if this is a vertex/fragment shader function and we have an I/O type that is a struct/aggregate,
     // fully expand/flatten all types within (i.e. structs and arrays to scalars, keep existing scalars)
-    if ((D->hasAttr<GraphicsVertexShaderAttr>() ||
-         D->hasAttr<GraphicsFragmentShaderAttr>()) &&
-        FI.getReturnType()->isStructureOrClassType()) {
-      auto& retInfo = const_cast<ABIArgInfo&>(FI.getReturnInfo());
-      //const bool is_metal_2_3 = (getLangOpts().MetalVersion >= 230); // TODO/NOTE: disabled for now, see above
-      const bool is_metal_2_3 = false;
-      retInfo.setCoerceToType(GraphicsExpandReturnType(FI.getReturnType(), retInfo.getCoerceToType(), getTypes(), is_metal_2_3));
+    if (D->hasAttr<GraphicsVertexShaderAttr>() || D->hasAttr<GraphicsFragmentShaderAttr>()) {
+		//const bool is_metal_2_3 = (getLangOpts().MetalVersion >= 230); // TODO/NOTE: disabled for now, see above
+		const bool is_metal_2_3 = false;
+		if (FI.getReturnType()->isStructureOrClassType()) {
+			auto& retInfo = const_cast<ABIArgInfo&>(FI.getReturnInfo());
+			retInfo.setCoerceToType(GraphicsExpandIOType(FI.getReturnType(), retInfo.getCoerceToType(), getTypes(), is_metal_2_3));
+		}
+		for (const auto& param : D->parameters()) {
+			const auto param_type = param->getType();
+			if (param_type->isStructureOrClassType() && param->hasAttr<GraphicsStageInputAttr>()) {
+				auto llvm_param_type = getTypes().ConvertType(param_type);
+				(void)GraphicsExpandIOType(param_type, llvm_param_type, getTypes(), is_metal_2_3);
+			}
+		}
     }
   }
   llvm::FunctionType *Ty = getTypes().GetFunctionType(FI);

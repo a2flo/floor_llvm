@@ -59,6 +59,7 @@
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/LibFloor.h"
 #include "llvm/Transforms/LibFloor/FloorImage.h"
+#include <unordered_map>
 using namespace llvm;
 
 #define DEBUG_TYPE "MetalImage"
@@ -241,16 +242,35 @@ namespace {
 				}
 				
 				// create global sampler state
-				auto sampler_state = new GlobalVariable(*M,
-														sampler_constant_value->getType(),
-														true,
-														GlobalVariable::InternalLinkage,
-														sampler_constant_value,
-														"__air_sampler_state",
-														nullptr,
-														GlobalValue::NotThreadLocal,
-														Metal_ConstantAS);
-				sampler_state->setAlignment(MaybeAlign { 8u }); // always 8-byte aligned
+				// NOTE: since we're often using the same sampler -> cache them
+				static std::unordered_map<uint64_t, GlobalVariable*> sample_state_cache;
+				auto sampler_constant_value_u64 = sampler_constant_value->getZExtValue();
+				auto cache_iter = sample_state_cache.find(sampler_constant_value_u64);
+				GlobalVariable* sampler_state = nullptr;
+				if (cache_iter != sample_state_cache.end()) {
+					sampler_state = cache_iter->second;
+				} else {
+					sampler_state = new GlobalVariable(*M,
+													   sampler_constant_value->getType(),
+													   true,
+													   GlobalVariable::InternalLinkage,
+													   sampler_constant_value,
+													   "__air_sampler_state",
+													   nullptr,
+													   GlobalValue::NotThreadLocal,
+													   Metal_ConstantAS);
+					sampler_state->setAlignment(MaybeAlign { 8u }); // always 8-byte aligned
+					sample_state_cache.emplace(sampler_constant_value_u64, sampler_state);
+					
+					// insert metadata
+					auto ctx = &M->getContext();
+					SmallVector<llvm::Metadata*, 2> sampler_md_info;
+					sampler_md_info.push_back(llvm::MDString::get(*ctx, "air.sampler_state"));
+					sampler_md_info.push_back(llvm::ConstantAsMetadata::get(sampler_state));
+					
+					auto samplers_md = M->getOrInsertNamedMetadata("air.sampler_states");
+					samplers_md->addOperand(llvm::MDNode::get(*ctx, sampler_md_info));
+				}
 				
 				// still need to bitcast to %struct._sampler_t*
 				auto sampler_type = dyn_cast<PointerType>(dyn_sampler_arg->getType());
@@ -261,15 +281,6 @@ namespace {
 				
 				set_sampler_attrs = true;
 				sampler_param_idx = func_args.size() - 1;
-				
-				// insert metadata
-				auto ctx = &M->getContext();
-				SmallVector<llvm::Metadata*, 2> sampler_md_info;
-				sampler_md_info.push_back(llvm::MDString::get(*ctx, "air.sampler_state"));
-				sampler_md_info.push_back(llvm::ConstantAsMetadata::get(sampler_state));
-				
-				auto samplers_md = M->getOrInsertNamedMetadata("air.sampler_states");
-				samplers_md->addOperand(llvm::MDNode::get(*ctx, sampler_md_info));
 			}
 			
 			if(is_depth) {

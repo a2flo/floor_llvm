@@ -69,48 +69,54 @@ llvm::Type *CGOpenCLRuntime::convertOpenCLSpecificType(const Type *T) {
 #include "clang/Basic/OpenCLExtensionTypes.def"
     }
   } else if (CGM.getLangOpts().Metal) { // Metal/AIR
+    const auto get_or_create_opaque_ptr_type = [&Ctx](const char* name, uint32_t address_space) {
+      auto opaque_type = llvm::StructType::getTypeByName(Ctx, name);
+      if (!opaque_type) {
+        opaque_type = llvm::StructType::create(Ctx, name);
+      }
+      return llvm::PointerType::get(opaque_type, address_space);
+    };
     switch (cast<BuiltinType>(T)->getKind()) {
       default:
         llvm_unreachable("Unexpected metal builtin type!");
         return nullptr;
       case BuiltinType::OCLImage1d:
-        return llvm::PointerType::get(llvm::StructType::create(Ctx, "struct._texture_1d_t"), AddrSpc);
+        return get_or_create_opaque_ptr_type("struct._texture_1d_t", AddrSpc);
       case BuiltinType::OCLImage1dArray:
-        return llvm::PointerType::get(llvm::StructType::create(Ctx, "struct._texture_1d_array_t"), AddrSpc);
+                return get_or_create_opaque_ptr_type("struct._texture_1d_array_t", AddrSpc);
       case BuiltinType::OCLImage1dBuffer:
         llvm_unreachable("Unsupported image type (1D-buffer is not supported by metal)!");
         return nullptr;
       case BuiltinType::OCLImage2d:
-        return llvm::PointerType::get(llvm::StructType::create(Ctx, "struct._texture_2d_t"), AddrSpc);
+        return get_or_create_opaque_ptr_type("struct._texture_2d_t", AddrSpc);
       case BuiltinType::OCLImage2dArray:
-        return llvm::PointerType::get(llvm::StructType::create(Ctx, "struct._texture_2d_array_t"), AddrSpc);
+        return get_or_create_opaque_ptr_type("struct._texture_2d_array_t", AddrSpc);
       case BuiltinType::OCLImage2dDepth:
-        return llvm::PointerType::get(llvm::StructType::create(Ctx, "struct._depth_2d_t"), AddrSpc);
+        return get_or_create_opaque_ptr_type("struct._depth_2d_t", AddrSpc);
       case BuiltinType::OCLImage2dArrayDepth:
-        return llvm::PointerType::get(llvm::StructType::create(Ctx, "struct._depth_2d_array_t"), AddrSpc);
+        return get_or_create_opaque_ptr_type("struct._depth_2d_array_t", AddrSpc);
       case BuiltinType::OCLImage2dMSAA:
-        return llvm::PointerType::get(llvm::StructType::create(Ctx, "struct._texture_2d_ms_t"), AddrSpc);
+        return get_or_create_opaque_ptr_type("struct._texture_2d_ms_t", AddrSpc);
       case BuiltinType::OCLImage2dArrayMSAA:
-        return llvm::PointerType::get(llvm::StructType::create(Ctx, "struct._texture_2d_ms_array_t"), AddrSpc);
+        return get_or_create_opaque_ptr_type("struct._texture_2d_ms_array_t", AddrSpc);
       case BuiltinType::OCLImage2dMSAADepth:
-        return llvm::PointerType::get(llvm::StructType::create(Ctx, "struct._depth_2d_ms_t"), AddrSpc);
+        return get_or_create_opaque_ptr_type("struct._depth_2d_ms_t", AddrSpc);
       case BuiltinType::OCLImage2dArrayMSAADepth:
-        return llvm::PointerType::get(llvm::StructType::create(Ctx, "struct._depth_2d_ms_array_t"), AddrSpc);
+        return get_or_create_opaque_ptr_type("struct._depth_2d_ms_array_t", AddrSpc);
       case BuiltinType::OCLImageCube:
-        return llvm::PointerType::get(llvm::StructType::create(Ctx, "struct._texture_cube_t"), AddrSpc);
+        return get_or_create_opaque_ptr_type("struct._texture_cube_t", AddrSpc);
       case BuiltinType::OCLImageCubeArray:
-        return llvm::PointerType::get(llvm::StructType::create(Ctx, "struct._texture_cube_array_t"), AddrSpc);
+        return get_or_create_opaque_ptr_type("struct._texture_cube_array_t", AddrSpc);
       case BuiltinType::OCLImageCubeDepth:
-        return llvm::PointerType::get(llvm::StructType::create(Ctx, "struct._depth_cube_t"), AddrSpc);
+        return get_or_create_opaque_ptr_type("struct._depth_cube_t", AddrSpc);
       case BuiltinType::OCLImageCubeArrayDepth:
-        return llvm::PointerType::get(llvm::StructType::create(Ctx, "struct._depth_cube_array_t"), AddrSpc);
+        return get_or_create_opaque_ptr_type("struct._depth_cube_array_t", AddrSpc);
       case BuiltinType::OCLImage3d:
-        return llvm::PointerType::get(llvm::StructType::create(Ctx, "struct._texture_3d_t"), AddrSpc);
+        return get_or_create_opaque_ptr_type("struct._texture_3d_t", AddrSpc);
       case BuiltinType::OCLSampler:
-        return llvm::PointerType::get(llvm::StructType::create(Ctx, "struct._sampler_t"),
-                                      CGM.getContext().getTargetAddressSpace(LangAS::opencl_constant));
+        return get_or_create_opaque_ptr_type("struct._sampler_t", CGM.getContext().getTargetAddressSpace(LangAS::opencl_constant));
       case BuiltinType::OCLEvent:
-        return llvm::PointerType::get(llvm::StructType::create(Ctx, "struct._event_t"), 0);
+        return get_or_create_opaque_ptr_type("struct._event_t", 0);
     }
   }
   llvm_unreachable("Unexpected builtin type!");

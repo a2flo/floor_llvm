@@ -30,6 +30,8 @@
 #include "clang/AST/StmtObjC.h"
 #include "clang/Basic/Builtins.h"
 #include "clang/Basic/CodeGenOptions.h"
+#include "clang/Basic/FileManager.h"
+#include "clang/Basic/SourceManager.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/CodeGen/CGFunctionInfo.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
@@ -718,7 +720,11 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
 	  if (CGM.getLangOpts().MetalVersion >= 220) {
 	    llvm::NamedMDNode *AIRSourceFile = CGM.getModule().getOrInsertNamedMetadata("air.source_file_name");
 	    SmallVector <llvm::Metadata*, 1> air_source_file;
-	    air_source_file.push_back(llvm::MDString::get(Context, CGM.getModule().getSourceFileName()));
+	    const auto& src_file_name_str = CGM.getModule().getSourceFileName();
+	    SmallVector<char> src_file_name(src_file_name_str.size());
+	    src_file_name.assign(src_file_name_str.begin(), src_file_name_str.end());
+	    CGM.getContext().getSourceManager().getFileManager().makeAbsolutePath(src_file_name);
+	    air_source_file.push_back(llvm::MDString::get(Context, src_file_name.data()));
 	    AIRSourceFile->addOperand(llvm::MDNode::get(Context, air_source_file));
 	  }
 	  

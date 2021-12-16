@@ -76,8 +76,8 @@ StructLayout::StructLayout(StructType *ST, const DataLayout &DL) {
     StructSize = alignTo(StructSize, StructAlignment);
   }
 
-  // fix up graphics return types (densely pack vector types)
-  if (ST->isGraphicsReturnType()) {
+  // fix up graphics I/O types (densely pack vector types)
+  if (ST->isGraphicsIOType()) {
     uint64_t offset_fix = 0;
     for (uint32_t i = 0; i < NumElements; ++i) {
       getMemberOffsets()[i] -= offset_fix;

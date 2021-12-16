@@ -632,7 +632,7 @@ void ModuleBitcodeWriter50::writeAttributeGroupTable() {
 
   SmallVector<uint64_t, 64> Record;
   for (ValueEnumerator50::IndexAndAttrSet Pair : AttrGrps) {
-    if (Pair.first == ~0u) {
+    if (Pair.first == ValueEnumerator50::invalid_attribute_group_id) {
       // this complete set/group can't be encoded for 5.0
       continue;
     }
@@ -654,7 +654,7 @@ void ModuleBitcodeWriter50::writeAttributeGroupTable() {
             Record.push_back(enc_attr);
             Record.push_back(Attr.getValueAsInt());
           }
-		}
+        }
       } else if (Attr.isStringAttribute()) {
         StringRef Kind = Attr.getKindAsString();
         StringRef Val = Attr.getValueAsString();
@@ -668,7 +668,13 @@ void ModuleBitcodeWriter50::writeAttributeGroupTable() {
         }
       } else {
         assert(Attr.isTypeAttribute());
-        // ignore this
+        // NOTE: we do want to encode the "byval" attribute (in the 5.0 format -> no type)
+        if (Attr.getKindAsEnum() == Attribute::ByVal) {
+          const auto enc_attr = getAttrKindEncodingBC50(Attr.getKindAsEnum());
+          Record.push_back(0);
+          Record.push_back(enc_attr);
+        }
+        // else: ignore this
       }
     }
 
@@ -2471,7 +2477,7 @@ void ModuleBitcodeWriter50::writeInstruction(const Instruction &I,
     break;
 
   case Instruction::FNeg: {
-	// emit as "fsub -0, value"
+    // emit as "fsub -0, value"
     Code = bitc::FUNC_CODE_INST_BINOP;
     pushValue(ConstantFP::get(I.getOperand(0)->getType(), -0.0), InstID, Vals);
     if (!pushValueAndType(I.getOperand(0), InstID, Vals))
@@ -2839,7 +2845,7 @@ void ModuleBitcodeWriter50::writeInstruction(const Instruction &I,
     // freeze instruction is not supported by LLVM 5.0,
     // but we can more or less emulate it as an identity function
     // -> encode as a bitcast to the same type
-	auto Operand = I.getOperand(0);
+    auto Operand = I.getOperand(0);
     Code = bitc::FUNC_CODE_INST_CAST;
     if (!pushValueAndType(Operand, InstID, Vals))
       AbbrevToUse = FUNCTION_INST_CAST_ABBREV;
