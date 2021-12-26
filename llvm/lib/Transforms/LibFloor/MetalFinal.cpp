@@ -222,35 +222,6 @@ namespace {
 //////////////////////////////////////////
 
 namespace {
-	static bool metal_load_splitter(LoadInst& LI,
-									const bool is_vs, const bool is_kernel,
-									const bool nvidia_workarounds) {
-		if(!is_vs && !is_kernel) return false;
-		if(is_kernel && !(nvidia_workarounds && LI.getType()->isArrayTy())) return false;
-		if(is_vs && !LI.getType()->isAggregateType()) return false;
-		
-		LoadOpSplitter Splitter(&LI, LI.getPointerOperand());
-		Value *V = UndefValue::get(LI.getType());
-		Splitter.emitSplitOps(LI.getType(), V, LI.getName() + ".mtlld");
-		LI.replaceAllUsesWith(V);
-		LI.eraseFromParent();
-		return true;
-	}
-	
-	static bool metal_store_splitter(StoreInst& SI,
-									 const bool is_vs, const bool is_kernel,
-									 const bool nvidia_workarounds) {
-		if(!is_vs && !is_kernel) return false;
-		if(is_kernel && !(nvidia_workarounds && SI.getType()->isArrayTy())) return false;
-		if(is_vs && !SI.getType()->isAggregateType()) return false;
-		
-		Value *V = SI.getValueOperand();
-		StoreOpSplitter Splitter(&SI, SI.getPointerOperand());
-		Splitter.emitSplitOps(V->getType(), V, V->getName() + ".mtlst");
-		SI.eraseFromParent();
-		return true;
-	}
-	
 	// MetalFirst
 	struct MetalFirst : public FunctionPass, InstVisitor<MetalFirst> {
 		friend class InstVisitor<MetalFirst>;
@@ -286,25 +257,17 @@ namespace {
 			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
 			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
 			
-			//
+			// NOTE: for now, this is no longer needed
 			was_modified = false;
-			//visit(F); // NOTE/TODO: disabled for now
+			//visit(F);
 			
 			return was_modified;
 		}
 		
 		// InstVisitor overrides...
 		using InstVisitor<MetalFirst>::visit;
-		void visit(Instruction& I) {
-			InstVisitor<MetalFirst>::visit(I);
-		}
-		
-		void visitLoadInst(LoadInst &LI) {
-			was_modified = metal_load_splitter(LI, is_vertex_func, is_kernel_func, enable_nvidia_workarounds);
-		}
-		
-		void visitStoreInst(StoreInst &SI) {
-			was_modified = metal_store_splitter(SI, is_vertex_func, is_kernel_func, enable_nvidia_workarounds);
+		void visit(Instruction& /* I */) {
+			//InstVisitor<MetalFirst>::visit(I);
 		}
 	};
 	
@@ -646,6 +609,10 @@ namespace {
 				case Intrinsic::memcpy:
 				case Intrinsic::memset:
 				case Intrinsic::memmove:
+				case Intrinsic::dbg_addr:
+				case Intrinsic::dbg_label:
+				case Intrinsic::dbg_value:
+				case Intrinsic::dbg_declare:
 					// pass
 					break;
 					
@@ -1072,14 +1039,6 @@ namespace {
 			}
 		}
 		
-		void visitLoadInst(LoadInst &LI) {
-			was_modified = metal_load_splitter(LI, is_vertex_func, is_kernel_func, enable_nvidia_workarounds);
-		}
-		
-		void visitStoreInst(StoreInst &SI) {
-			was_modified = metal_store_splitter(SI, is_vertex_func, is_kernel_func, enable_nvidia_workarounds);
-		}
-		
 		void visitAllocaInst(AllocaInst &AI) {
 			if(!enable_intel_workarounds) return;
 			DBG(errs() << "alloca: " << AI << ", " << *AI.getType() << "\n";)
@@ -1218,6 +1177,7 @@ namespace {
 	// MetalFinalModuleCleanup:
 	// * calling convention cleanup
 	// * strip unused functions/prototypes/externs
+	// * debug info cleanup
 	struct MetalFinalModuleCleanup : public ModulePass {
 		static char ID; // Pass identification, replacement for typeid
 		
@@ -1235,11 +1195,12 @@ namespace {
 			
 			// * strip floor_* calling convention from all functions and their users (replace it with C CC)
 			// * kill all functions named floor.*
+			// * strip debug info from declarations
 			bool module_modified = false;
-			for(auto func_iter = Mod.begin(); func_iter != Mod.end();) {
+			for (auto func_iter = Mod.begin(); func_iter != Mod.end();) {
 				auto& func = *func_iter;
-				if(func.getName().startswith("floor.")) {
-					if(func.getNumUses() != 0) {
+				if (func.getName().startswith("floor.")) {
+					if (func.getNumUses() != 0) {
 						errs() << func.getName() << " should not have any uses at this point!\n";
 					}
 					++func_iter; // inc before erase
@@ -1248,15 +1209,23 @@ namespace {
 					continue;
 				}
 				
-				if(func.getCallingConv() != CallingConv::C) {
+				if (func.getCallingConv() != CallingConv::C) {
 					func.setCallingConv(CallingConv::C);
-					for(auto user : func.users()) {
-						if(auto CB = dyn_cast<CallBase>(user)) {
+					for (auto user : func.users()) {
+						if (auto CB = dyn_cast<CallBase>(user)) {
 							CB->setCallingConv(CallingConv::C);
 						}
 					}
 					module_modified = true;
 				}
+				
+				if (func.isDeclaration()) {
+					if (DISubprogram* sub_prog_dbg = func.getSubprogram(); sub_prog_dbg) {
+						func.setSubprogram(nullptr);
+						module_modified = true;
+					}
+				}
+				
 				++func_iter;
 			}
 			return module_modified;

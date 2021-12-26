@@ -716,16 +716,31 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
 	    AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.framebuffer_fetch_enable")));
 	  }
 
-	  // TODO/NOTE: unsure when this was added (but at least Metal 2.2)
-	  if (CGM.getLangOpts().MetalVersion >= 220) {
+	  // emit debug info
+	  if (CGM.getLangOpts().MetalVersion >= 240 &&
+	      CGM.getCodeGenOpts().getDebugInfo() != codegenoptions::NoDebugInfo) {
+	    // emit "air.source_file_name"
 	    llvm::NamedMDNode *AIRSourceFile = CGM.getModule().getOrInsertNamedMetadata("air.source_file_name");
 	    SmallVector <llvm::Metadata*, 1> air_source_file;
-	    const auto& src_file_name_str = CGM.getModule().getSourceFileName();
+	    std::string src_file_name_str = CGM.getModule().getSourceFileName();
 	    SmallVector<char> src_file_name(src_file_name_str.size());
 	    src_file_name.assign(src_file_name_str.begin(), src_file_name_str.end());
 	    CGM.getContext().getSourceManager().getFileManager().makeAbsolutePath(src_file_name);
-	    air_source_file.push_back(llvm::MDString::get(Context, src_file_name.data()));
+	    src_file_name_str.resize(src_file_name.size(), '\0');
+	    src_file_name_str.assign(src_file_name.begin(), src_file_name.end());
+	    air_source_file.push_back(llvm::MDString::get(Context, src_file_name_str.data()));
 	    AIRSourceFile->addOperand(llvm::MDNode::get(Context, air_source_file));
+
+	    // emit "llvm_utils.workingdir"
+	    std::string_view src_file_name_view(src_file_name.data(), src_file_name.size());
+	    const auto last_slash_pos = src_file_name_view.rfind('/');
+	    if (last_slash_pos != std::string::npos) {
+	      llvm::NamedMDNode *workingdir_md = CGM.getModule().getOrInsertNamedMetadata("llvm_utils.workingdir");
+	      SmallVector <llvm::Metadata*, 1> workingdir;
+	      const std::string working_dir_str(src_file_name.data(), last_slash_pos);
+	      workingdir.push_back(llvm::MDString::get(Context, working_dir_str));
+	      workingdir_md->addOperand(llvm::MDNode::get(Context, workingdir));
+	    }
 	  }
 	  
 	  // AIR limits (since Metal 2.3)

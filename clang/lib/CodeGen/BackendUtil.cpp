@@ -786,6 +786,11 @@ void EmitAssemblyHelper::CreatePasses(legacy::PassManager &MPM,
     PMBuilder.SLPVectorize = false;
     PMBuilder.LoopVectorize = false;
   }
+  // for Metal: enable vectorization
+  if (PMBuilder.EnableMetalPasses) {
+    PMBuilder.SLPVectorize = true;
+    PMBuilder.LoopVectorize = true;
+  }
 
   if (TM)
     TM->adjustPassManager(PMBuilder);

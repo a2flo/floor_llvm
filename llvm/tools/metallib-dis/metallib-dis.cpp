@@ -69,26 +69,83 @@ static cl::opt<bool> PreserveAssemblyUseListOrder(
     cl::desc("Preserve use-list order when writing LLVM assembly."),
     cl::init(false), cl::Hidden);
 
+/* .metallib layout (as of Metal 2.4 / macOS 12.0)
+ 
+ versioning:
+ [magic: char[4] = MTLB]
+ [container version]
+      [major version + macOS flag: uint16_t - MSB is macOS flag]
+      [minor version: uint16_t]
+      [bugfix version: uint16_t]
+ [flags]
+      [flags #1: 1:7 bit-field (uint8_t), MSB: stub flag, rest: file type (0 is metallib executable)s]
+      [flags #2: 1:7 bit-field (uint8_t), MSB: 64-bit flag, rest: platform (macOS: 1, iOS: 2, tvOS: 3, watchOS: 4]
+ [platform version: 16:8:8 bit-field (32-bit) = major.minor.update]
+ 
+ header:
+ [program metadata offset: uint64_t]
+ [program metadata length: uint64_t]
+ [reflection metadata offset: uint64_t]
+ [reflection metadata length: uint64_t]
+ [debug metadata offset: uint64_t]
+ [debug metadata length: uint64_t]
+ [bitcode offset: uint64_t]
+ [bitcode length: uint64_t]
+ 
+ program metadata:
+     [program count: uint32_t] // NOTE: not included by "program metadata length"
+     [program metadata ...]
+ 
+ additional program metadata (not included in "program metadata"!)
+ [optional: embedded source code: char[4] = "HSRD"]
+ 	[tag length: uint16_t = 16]
+    [embedded source code offset: uint64_t]
+    [embedded source code length: uint64_t]
+ [optional: metallib UUID: char[4] = "UUID"]
+ 	[tag length: uint16_t = 16]
+    [UUID: uint8_t[16]]
+ [additional program metadata terminator: char[4] = "ENDT"]
+ 
+ [reflection metadata ...]
+ [debug metadata ...]
+ 
+ bitcode:
+ [LLVM 5.0 bitcode binaries ...]
+ 
+ (opt) embedded source code:
+ [source archive count: uint32_t]
+ [linker command line info: \0-terminated string]
+ [working direction: \0-terminated string]
+ source archives:
+ 	[source archive length: uint32_t]
+    [source archive...]
+        [magic: char[4] = SARC] // NOTE: program source offsets point here (+"embedded source code offset")
+        [archive length: uint32_t]
+        [archive number in ASCII: uint16_t = 0x30/'0'...]
+        [bzip2 compressed .a archive]
+ 
+ */
+
 //
 static constexpr const char metallib_magic[4] { 'M', 'T', 'L', 'B' };
 
 struct __attribute__((packed)) metallib_version {
-	// version of the container (NOTE: per-program Metal/AIR version info is extra)
-	uint32_t container_version_major : 8;
-	uint32_t container_version_rev : 4; // lo
-	uint32_t container_version_minor : 4; // hi
+	// container/file version
+	uint16_t container_version_major : 15;
+	uint16_t is_macos_target : 1;
+	uint16_t container_version_minor;
+	uint16_t container_version_bugfix;
 	
-	// unknown: always 2, 0, 0
-	// TODO: might be dwarf version?
-	uint32_t unknown_version_major : 8;
-	uint32_t unknown_version_rev : 4; // lo
-	uint32_t unknown_version_minor : 4; // hi
-
-	// unknown: always 2 (macOS), 3 (iOS), 5 (macOS since 10.16/11.0)
-	uint32_t unkown_version;
+	// flags
+	uint8_t file_type : 7;
+	uint8_t is_stub : 1;
+	uint8_t platform : 7;
+	uint8_t is_64_bit : 1;
 	
-	// unknown: always 0
-	uint32_t zero;
+	// platform version
+	uint32_t platform_version_major : 16;
+	uint32_t platform_version_minor : 8;
+	uint32_t platform_version_update : 8;
 };
 static_assert(sizeof(metallib_version) == 12, "invalid version header length");
 
@@ -101,9 +158,8 @@ struct __attribute__((packed)) metallib_header_control {
 	uint64_t debug_length;
 	uint64_t bitcode_offset;
 	uint64_t bitcode_length;
-	uint32_t program_count;
 };
-static_assert(sizeof(metallib_header_control) == 68, "invalid program info length");
+static_assert(sizeof(metallib_header_control) == 64, "invalid program info length");
 
 struct __attribute__((packed)) metallib_header {
 	const char magic[4]; // == metallib_magic
@@ -127,6 +183,7 @@ struct metallib_program_info {
 		MD_SIZE		= make_tag_type('M', 'D', 'S', 'Z'),
 		OFFSET		= make_tag_type('O', 'F', 'F', 'T'),
 		VERSION		= make_tag_type('V', 'E', 'R', 'S'),
+		SOFF        = make_tag_type('S', 'O', 'F', 'F'),
 		// used in reflection section
 		CNST        = make_tag_type('C', 'N', 'S', 'T'),
 		VATT        = make_tag_type('V', 'A', 'T', 'T'),
@@ -135,10 +192,15 @@ struct metallib_program_info {
 		ARGR        = make_tag_type('A', 'R', 'G', 'R'),
 		// used in debug section
 		DEBI        = make_tag_type('D', 'E', 'B', 'I'),
+		DEPF        = make_tag_type('D', 'E', 'P', 'F'),
+		// additional metadata
+		HSRD        = make_tag_type('H', 'S', 'R', 'D'),
+		UUID        = make_tag_type('U', 'U', 'I', 'D'),
+		// used for source code/archive
+		SARC        = make_tag_type('S', 'A', 'R', 'C'),
 		// TODO/TBD
 		LAYR        = make_tag_type('L', 'A', 'Y', 'R'),
 		TESS        = make_tag_type('T', 'E', 'S', 'S'),
-		SOFF        = make_tag_type('S', 'O', 'F', 'F'),
 		// generic end tag
 		END         = make_tag_type('E', 'N', 'D', 'T'),
 	};
@@ -165,6 +227,12 @@ struct metallib_program_info {
 		uint64_t bitcode_offset;
 	};
 	
+	struct debug_entry {
+		std::string source_file_name;
+		uint32_t function_line { 0 };
+		std::string dependent_file;
+	};
+	
 	struct entry {
 		uint32_t length;
 		string name; // NOTE: limited to 65536 - 1 ('\0')
@@ -178,7 +246,8 @@ struct metallib_program_info {
 		version_info metal_version { 0, 0, 0 };
 		version_info metal_language_version { 0, 0, 0 };
 		uint8_t tess_info { 0 };
-		uint64_t soffset { 0 };
+		uint64_t source_offset { 0 };
+		std::optional<debug_entry> debug;
 	};
 	vector<entry> entries;
 };
@@ -261,6 +330,38 @@ struct MetalLibDisDiagnosticHandler : public DiagnosticHandler {
 };
 } // end anon namespace
 
+static void hex_dump(raw_fd_ostream& os, const char* ptr, const size_t length, const char* name) {
+	os << '\n' << name << ":\n";
+	static constexpr const uint32_t row_width = 16;
+	for (uint32_t row = 0, row_count = ((length + row_width - 1) / row_width); row < row_count; ++row) {
+		for (uint32_t i = 0; i < row_width; ++i) {
+			const auto ch_idx = row * row_width + i;
+			if (ch_idx < length) {
+				const auto ch_ptr = (const uint8_t*)ptr + ch_idx;
+				llvm::write_hex(os, (uint64_t)*ch_ptr, HexPrintStyle::Upper, 2);
+				os << " ";
+			} else {
+				os << "   ";
+			}
+		}
+		os << " |  ";
+		for (uint32_t i = 0; i < row_width; ++i) {
+			const auto ch_idx = row * row_width + i;
+			if (ch_idx < length) {
+				const auto ch_ptr = ptr + ch_idx;
+				if (*ch_ptr >= 0x20) {
+					os << *ch_ptr;
+				} else if (*ch_ptr == 0) {
+					os << "∅";
+				} else {
+					os << ' ';
+				}
+			}
+		}
+		os << '\n';
+	}
+}
+
 static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>& Out) {
 	auto& os = Out->os();
 	
@@ -285,10 +386,49 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	
 	// dump
 	os << "[header]" << '\n';
-	os << "container version: " << header.version.container_version_major << "." << header.version.container_version_minor << "." << header.version.container_version_rev << '\n';
-	os << "unknown version: " << header.version.unknown_version_major << "." << header.version.unknown_version_minor << "." << header.version.unknown_version_rev << '\n';
-	os << "unknown: " << header.version.unkown_version << '\n';
-	os << "zero?: " << header.version.zero << '\n';
+	os << "container version: " << header.version.container_version_major << "." << header.version.container_version_minor << "." << header.version.container_version_bugfix << '\n';
+	os << "macOS: " << (header.version.is_macos_target ? "yes" : "no") << '\n';
+	os << "64-bit: " << (header.version.is_64_bit ? "yes" : "no") << '\n';
+	os << "stub: " << (header.version.is_stub ? "yes" : "no") << '\n';
+	os << "file-type: ";
+	switch (header.version.file_type) {
+		case 0:
+			os << "execute";
+			break;
+		case 1:
+			os << "CI";
+			break;
+		case 2:
+			os << "dylib";
+			break;
+		case 3:
+			os << "companion";
+			break;
+		default:
+			os << "unknown";
+			break;
+	}
+	os << '\n';
+	os << "platform: ";
+	switch (header.version.platform) {
+		case 1:
+			os << "macOS";
+			break;
+		case 2:
+			os << "iOS";
+			break;
+		case 3:
+			os << "tvOS";
+			break;
+		case 4:
+			os << "watchOS";
+			break;
+		default:
+			os << "unknown";
+			break;
+	}
+	os << '\n';
+	os << "platform version: " << header.version.platform_version_major << "." << header.version.platform_version_minor << "." << header.version.platform_version_update << '\n';
 	os << "length: " << header.file_length << '\n';
 	
 	os << '\n';
@@ -300,7 +440,6 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	os << "debug_length: " << header.header_control.debug_length << '\n';
 	os << "bitcode_offset: " << header.header_control.bitcode_offset << '\n';
 	os << "bitcode_length: " << header.header_control.bitcode_length << '\n';
-	os << "program_count: " << header.header_control.program_count << '\n';
 	
 	// read programs info
 	if(buffer.size() < header.header_control.programs_offset + header.header_control.programs_length + 4u) {
@@ -308,10 +447,27 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	}
 	
 	metallib_program_info info;
-	auto program_ptr = &data[header.header_control.programs_offset + 4];
+	auto program_ptr = &data[header.header_control.programs_offset];
+	const auto add_program_md_offset = header.header_control.programs_offset + 4 + header.header_control.programs_length;
+	auto add_program_md_ptr = &data[add_program_md_offset];
+	const auto add_program_md_end = find((const uint32_t*)add_program_md_ptr,
+										 (const uint32_t*)add_program_md_ptr + (header.header_control.reflection_offset -
+																				add_program_md_offset) / 4u,
+										 0x54444E45u /* rev(ENDT) */) + 1;
+	const auto add_program_md_length = std::distance(add_program_md_ptr, (const char*)add_program_md_end);
+	auto refl_ptr = &data[header.header_control.reflection_offset];
+	auto debug_ptr = &data[header.header_control.debug_offset];
 	
-	info.entries.resize(header.header_control.program_count);
-	for(uint32_t i = 0; i < header.header_control.program_count; ++i) {
+	const auto program_count = *(const uint32_t*)program_ptr; program_ptr += 4;
+	os << "program_count: " << program_count << '\n';
+	info.entries.resize(program_count);
+	
+	hex_dump(os, program_ptr, header.header_control.programs_length, "program metadata");
+	hex_dump(os, add_program_md_ptr, add_program_md_length, "additional program metadata");
+	hex_dump(os, refl_ptr, header.header_control.reflection_length, "reflection metadata");
+	hex_dump(os, debug_ptr, header.header_control.debug_length, "debug metadata");
+	
+	for(uint32_t i = 0; i < program_count; ++i) {
 		auto& entry = info.entries[i];
 		
 		entry.length = *(const uint32_t*)program_ptr; program_ptr += 4;
@@ -357,7 +513,6 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 					break;
 				}
 				case metallib_program_info::TAG_TYPE::MD_SIZE: {
-					// TODO: this might not exist?
 					entry.bitcode_size = *(const uint64_t*)program_ptr;
 					break;
 				}
@@ -370,7 +525,7 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 						return make_error<StringError>("invalid SOFF size: " + to_string(tag_length),
 													   inconvertibleErrorCode());
 					}
-					entry.soffset = *(const uint64_t*)program_ptr;
+					entry.source_offset = *(const uint64_t*)program_ptr;
 					break;
 				}
 				case metallib_program_info::TAG_TYPE::END: {
@@ -378,14 +533,106 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 					break;
 				}
 				default:
-					return make_error<StringError>("invalid tag: " + to_string((uint32_t)tag),
+					return make_error<StringError>("invalid program metadata tag: " + to_string((uint32_t)tag),
 												   inconvertibleErrorCode());
 			}
 			program_ptr += tag_length;
 		}
 	}
-	if(info.entries.size() != header.header_control.program_count) {
+	if(info.entries.size() != program_count) {
 		return make_error<StringError>("invalid entry count", inconvertibleErrorCode());
+	}
+	
+	// parse additional metadata
+	{
+		bool found_end_tag = false;
+		while (!found_end_tag) {
+			const auto tag = *(const metallib_program_info::TAG_TYPE*)add_program_md_ptr; add_program_md_ptr += 4;
+			uint32_t tag_length = 0;
+			if (tag != metallib_program_info::TAG_TYPE::END) {
+				tag_length = *(const uint16_t*)add_program_md_ptr;
+				add_program_md_ptr += 2;
+				
+				if (tag_length == 0) {
+					return make_error<StringError>("tag " + to_string(uint32_t(tag)) + " should not be empty",
+												   inconvertibleErrorCode());
+				}
+			}
+			
+			switch(tag) {
+				case metallib_program_info::TAG_TYPE::HSRD: {
+					const auto src_archives_offset = *(const uint64_t*)add_program_md_ptr;
+					const auto src_archives_length = *(const uint64_t*)(add_program_md_ptr + 8u);
+					os << "\nembedded source archives:\n\toffset: " << src_archives_offset << "\n\tlength: " << src_archives_length << '\n';
+					break;
+				}
+				case metallib_program_info::TAG_TYPE::UUID: {
+					os << "\nUUID: ";
+					raw_ostream::uuid_t uuid;
+					memcpy(&uuid, add_program_md_ptr, sizeof(uuid));
+					os.write_uuid(uuid);
+					os << '\n';
+					break;
+				}
+				case metallib_program_info::TAG_TYPE::END: {
+					found_end_tag = true;
+					break;
+				}
+				default:
+					return make_error<StringError>("invalid additional program metadata tag: " + to_string((uint32_t)tag),
+												   inconvertibleErrorCode());
+			}
+			add_program_md_ptr += tag_length;
+		}
+	}
+	
+	// parse debug info
+	for (uint32_t i = 0; i < program_count; ++i) {
+		auto& entry = info.entries[i];
+		
+		metallib_program_info::debug_entry dbg_entry {};
+		//const auto dbg_entry_length = *(const uint32_t*)debug_ptr;
+		debug_ptr += 4;
+		
+		bool found_end_tag = false;
+		while (!found_end_tag) {
+			const auto tag = *(const metallib_program_info::TAG_TYPE*)debug_ptr; debug_ptr += 4;
+			uint32_t tag_length = 0;
+			if(tag != metallib_program_info::TAG_TYPE::END) {
+				tag_length = *(const uint16_t*)debug_ptr;
+				debug_ptr += 2;
+				
+				if(tag_length == 0) {
+					return make_error<StringError>("tag " + to_string(uint32_t(tag)) + " should not be empty",
+												   inconvertibleErrorCode());
+				}
+			}
+			
+			switch(tag) {
+				case metallib_program_info::TAG_TYPE::DEBI: {
+					dbg_entry.function_line = *(const uint32_t*)debug_ptr;
+					dbg_entry.source_file_name = string((const char*)debug_ptr + 4, tag_length - 5u);
+					break;
+				}
+				case metallib_program_info::TAG_TYPE::DEPF: {
+					dbg_entry.dependent_file = string((const char*)debug_ptr, tag_length - 1u);
+					break;
+				}
+				case metallib_program_info::TAG_TYPE::END: {
+					found_end_tag = true;
+					break;
+				}
+				default:
+					return make_error<StringError>("invalid debug metadata tag: " + to_string((uint32_t)tag),
+												   inconvertibleErrorCode());
+			}
+			debug_ptr += tag_length;
+		}
+		
+		// only set this debug entry if it actually contains anything
+		if (!dbg_entry.source_file_name.empty() || !dbg_entry.dependent_file.empty()) {
+			entry.debug = move(dbg_entry);
+		}
 	}
 	
 	//
@@ -427,15 +674,32 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 		}
 		os << hash_hex.str() << '\n';
 		os << "\ttess info: " << uint32_t(prog.tess_info) << '\n';
-		os << "\tsoffset: " << uint32_t(prog.soffset) << '\n';
+		os << "\tsource offset: " << uint32_t(prog.source_offset) << '\n';
 		
-		// output LLVM IR
 		// TODO: could use stringref?
 		auto bc_mem = WritableMemoryBuffer::getNewUninitMemBuffer(prog.bitcode_size, "bc_module");
 		const auto bc_offset = header.header_control.bitcode_offset + prog.offset.bitcode_offset;
 		os << "\toffset: " << bc_offset << '\n';
-		os << "\tsize: " << bc_mem->getBufferSize() << ", " << prog.bitcode_size << '\n';
+		os << "\tsize: " << bc_mem->getBufferSize();
+		if (bc_mem->getBufferSize() != prog.bitcode_size) {
+			os << " != expected: " << prog.bitcode_size << " (!!!)";
+		}
 		os << '\n';
+		if (prog.debug) {
+			os << "\tdebug:\n";
+			if (!prog.debug->source_file_name.empty()) {
+				os << "\t\tsource file: " << prog.debug->source_file_name << '\n';
+			}
+			if (prog.debug->function_line != 0) {
+				os << "\t\tsource line: " << prog.debug->function_line << '\n';
+			}
+			if (!prog.debug->dependent_file.empty()) {
+				os << "\t\tdependent file: " << prog.debug->dependent_file << '\n';
+			}
+		}
+		os << '\n';
+		
+		// output LLVM IR
 		memcpy((char*)bc_mem->getBufferStart(), data + bc_offset, bc_mem->getBufferSize());
 		
 		LLVMContext Context;

@@ -567,7 +567,17 @@ void CGDebugInfo::CreateCompileUnit() {
     LangTag = llvm::dwarf::DW_LANG_C89;
   }
 
-  std::string Producer = getClangFullVersion();
+  std::string Producer;
+  if (!CGM.getLangOpts().Metal) {
+    Producer = getClangFullVersion();
+  } else {
+    // override producer when targeting Metal
+    if (CGM.getLangOpts().MetalVersion < 240) {
+      Producer = "Apple LLVM version 31001.143 (metalfe-31001.143)";
+    } else {
+      Producer = "Apple metal version 31001.363 (metalfe-31001.363)";
+    }
+  }
 
   // Figure out which version of the ObjC runtime we have.
   unsigned RuntimeVers = 0;
@@ -600,11 +610,27 @@ void CGDebugInfo::CreateCompileUnit() {
   // file. Its directory part specifies what becomes the
   // DW_AT_comp_dir (the compilation directory), even if the source
   // file was specified with an absolute path.
+  // NOTE: however, for Metal we always need to specify the absolute path
   if (CSKind)
     CSInfo.emplace(*CSKind, Checksum);
+  std::string cu_file_name;
+  if (!CGM.getLangOpts().Metal) {
+    cu_file_name = remapDIPath(MainFileName);
+  } else {
+    cu_file_name = MainFileName;
+    SmallVector<char> src_file_name(cu_file_name.size());
+    src_file_name.assign(cu_file_name.begin(), cu_file_name.end());
+    llvm::sys::fs::make_absolute(src_file_name);
+    cu_file_name.resize(src_file_name.size(), '\0');
+    cu_file_name.assign(src_file_name.begin(), src_file_name.end());
+  }
   llvm::DIFile *CUFile = DBuilder.createFile(
-      remapDIPath(MainFileName), remapDIPath(getCurrentDirname()), CSInfo,
+      cu_file_name, remapDIPath(getCurrentDirname()), CSInfo,
       getSource(SM, SM.getMainFileID()));
+  if (CGM.getLangOpts().Metal) {
+    // cache DIFile, so we don't emit it twice
+    DIFileCache[CUFile->getFilename().data()].reset(CUFile);
+  }
 
   StringRef Sysroot, SDK;
   if (CGM.getCodeGenOpts().getDebuggerTuning() == llvm::DebuggerKind::LLDB) {

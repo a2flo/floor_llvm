@@ -1144,7 +1144,7 @@ void DarwinClang::AddLinkARCArgs(const ArgList &Args,
 
 unsigned DarwinClang::GetDefaultDwarfVersion() const {
   if (getTriple().getArch() == llvm::Triple::ArchType::air64) {
-    return 2; // AIR is always dwarf 2
+    return 4; // AIR is always Dwarf 4 (for Metal 2.x)
   }
   // Default to use DWARF 2 on OS X 10.10 / iOS 8 and lower.
   if ((isTargetMacOSBased() && isMacosxVersionLT(10, 11)) ||

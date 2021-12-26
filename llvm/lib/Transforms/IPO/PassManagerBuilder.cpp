@@ -557,6 +557,11 @@ void PassManagerBuilder::addFunctionSimplificationPasses(
 /// FIXME: Should LTO cause any differences to this set of passes?
 void PassManagerBuilder::addVectorPasses(legacy::PassManagerBase &PM,
                                          bool IsFullLTO) {
+  if (EnableMetalPasses) {
+    // Metal: enable ld/st vectorization
+    PM.add(createLoadStoreVectorizerPass());
+  }
+
   PM.add(createLoopVectorizePass(!LoopsInterleaved, !LoopVectorize));
 
   if (IsFullLTO) {
@@ -1004,7 +1009,12 @@ void PassManagerBuilder::populateModulePassManager(
   // llvm.loop.distribute=true or when -enable-loop-distribute is specified.
   MPM.add(createLoopDistributePass());
 
+  // NOTE: this is false by default, but we actually want additional
+  // optimizations for CUDA/OpenCL/Metal/Vulkan
   addVectorPasses(MPM, /* IsFullLTO */ false);
+  if (EnableCUDAPasses || EnableSPIRPasses || EnableMetalPasses || EnableVulkanPasses) {
+    addVectorPasses(MPM, true);
+  }
 
   // FIXME: We shouldn't bother with this anymore.
   MPM.add(createStripDeadPrototypesPass()); // Get rid of dead prototypes
