@@ -1265,9 +1265,34 @@ def CUDAConstant : InheritableAttr {
 }
 
 def FloorImageDataType : InheritableAttr {
-  let Spellings = [GNU<"floor_image">, CXX11<"","floor_image", 200809>];
+  let Spellings = [CXX11<"floor","image_data_type", 200809>];
   let Args = [TypeArgument<"ImageDataType">];
   let TemplateDependent = 1;
+  let Documentation = [Undocumented];
+}
+
+def FloorImageFlags : InheritableAttr {
+  let Spellings = [CXX11<"floor","image_flags", 200809>];
+  let Args = [ExprArgument<"ImageFlags">];
+  let TemplateDependent = 1;
+  let AdditionalMembers = [{
+    uint64_t eval_flags = 0;
+    uint64_t getEvalFlags() const {
+      return eval_flags;
+    }
+    void setEvalFlags(uint64_t flags) {
+      eval_flags = flags;
+    }
+    bool isReadOnly() const {
+        return (eval_flags & 0xC00u) == 0x400u;
+    }
+    bool isWriteOnly() const {
+        return (eval_flags & 0xC00u) == 0x800u;
+    }
+    bool isReadWrite() const {
+        return (eval_flags & 0xC00u) == 0xC00u;
+    }
+  }];
   let Documentation = [Undocumented];
 }
 

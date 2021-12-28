@@ -692,6 +692,30 @@ namespace {
 			if(!array_type_->isArrayTy()) return;
 			ArrayType* array_type = cast<ArrayType>(array_type_);
 			
+			// check if this is a 2D array, in which case there is another load
+			LoadInst* outer_load = dyn_cast<LoadInst>(src_ptr);
+			GetElementPtrInst* outer_array_elem_gep = nullptr;
+			bool is_2d_array = false;
+			if (outer_load) {
+				is_2d_array = true;
+				auto outer_load_ptr_op = outer_load->getPointerOperand();
+				// might be bitcasted as well
+				BitCastInst* outer_load_ptr_op_bc = dyn_cast_or_null<BitCastInst>(outer_load_ptr_op);
+				if (outer_load_ptr_op_bc) {
+					outer_load_ptr_op = outer_load_ptr_op_bc->getOperand(0);
+				}
+				
+				// again: array element ptr must have come from a GEP
+				outer_array_elem_gep = dyn_cast<GetElementPtrInst>(outer_load_ptr_op);
+				if (!outer_array_elem_gep) return;
+				
+				// actual GEP src pointer
+				src_ptr = outer_array_elem_gep->getPointerOperand();
+				array_type_ = src_ptr->getType()->getPointerElementType();
+				if (!array_type_->isArrayTy()) return;
+				array_type = cast<ArrayType>(array_type_);
+			}
+			
 			// check if it started out from a bitcast (used by dynamic indexing)
 			BitCastInst* BC = dyn_cast<BitCastInst>(src_ptr);
 			ArrayType* src_array_type = nullptr;
@@ -718,27 +742,49 @@ namespace {
 			
 			// abort if not an opaque ptr type in an address space
 			// TODO: opaque type check?
-			if(!src_array_type->getArrayElementType()->isPointerTy() ||
-			   src_array_type->getArrayElementType()->getPointerAddressSpace() == 0) {
-				return;
+			llvm::Type* img_type = nullptr;
+			if (!is_2d_array) {
+				if (!src_array_type->getArrayElementType()->isPointerTy() ||
+					src_array_type->getArrayElementType()->getPointerAddressSpace() == 0) {
+					return;
+				}
+				img_type = src_array_type->getArrayElementType();
+			} else {
+				if (!src_array_type->getArrayElementType()->isPointerTy() ||
+					!src_array_type->getArrayElementType()->getPointerElementType()->isArrayTy() ||
+					!src_array_type->getArrayElementType()->getPointerElementType()->getArrayElementType()->isPointerTy() ||
+					src_array_type->getArrayElementType()->getPointerElementType()->getArrayElementType()->getPointerAddressSpace() == 0) {
+					return;
+				}
+				img_type = src_array_type->getArrayElementType()->getPointerElementType()->getArrayElementType();
 			}
 			
 			// create the call
-			const auto img_type = src_array_type->getArrayElementType();
-			const std::vector<Value*> params {
-				img_array,
-				// GEP ptr, 0, %idx, ... -> want third operand
-				array_elem_gep->getOperand(2)
+			std::vector<Value*> params {
+				img_array
 			};
-			const std::vector<Type*> param_types {
-				params[0]->getType(), params[1]->getType()
-			};
+			// GEP ptr, 0, (%outer_idx,) %idx, ... -> want third operand(s)
+			if (is_2d_array) {
+				params.push_back(outer_array_elem_gep->getOperand(2));
+			}
+			params.push_back(array_elem_gep->getOperand(2));
+			
+			std::vector<Type*> param_types;
+			for (const auto& param : params) {
+				param_types.push_back(param->getType());
+			}
+			
 			const auto func_type = llvm::FunctionType::get(img_type, param_types, false);
 			
 			auto handle_instr = cast<Instruction>(handle);
+			std::string elem_counts_str = "." + std::to_string(src_array_type->getNumElements());
+			if (is_2d_array) {
+				auto inner_arr_type = src_array_type = cast<ArrayType>(src_array_type->getArrayElementType()->getPointerElementType());
+				elem_counts_str += "." + std::to_string(inner_arr_type->getNumElements());
+			}
 			auto CI = CallInst::Create(M->getOrInsertFunction("floor.image_array_load." +
 															  img_type->getPointerElementType()->getStructName().str() +
-															  "." + std::to_string(src_array_type->getNumElements()),
+															  elem_counts_str,
 															  func_type),
 									   params, "imgarrld", handle_instr);
 			

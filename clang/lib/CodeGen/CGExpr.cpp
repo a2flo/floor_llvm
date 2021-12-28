@@ -4258,10 +4258,20 @@ static Address emitAddrOfFieldStorage(CodeGenFunction &CGF, Address base,
 
   // deal with array of opaque (struct) types (e.g. used for array of images)
   if (elem_type->isArrayTy() &&
-      elem_type->getArrayElementType()->isPointerTy() &&
-      elem_type->getArrayElementType()->getPointerElementType()->isStructTy() &&
-      !elem_type->getArrayElementType()->getPointerElementType()->isSized()) {
-    return CGF.Builder.CreateConstArrayGEP(base, idx, field->getName());
+      elem_type->getArrayElementType()->isPointerTy()) {
+    if (elem_type->getArrayElementType()->getPointerElementType()->isStructTy() &&
+        !elem_type->getArrayElementType()->getPointerElementType()->isSized()) {
+      // -> 1D
+      return CGF.Builder.CreateConstArrayGEP(base, idx, field->getName());
+    } else if (elem_type->getArrayElementType()->getPointerElementType()->isArrayTy()) {
+      // -> 2D
+      auto arr_type = dyn_cast<llvm::ArrayType>(elem_type->getArrayElementType()->getPointerElementType());
+      if (arr_type && arr_type->getElementType()->isPointerTy() &&
+          arr_type->getElementType()->getPointerElementType()->isStructTy() &&
+          !arr_type->getElementType()->getPointerElementType()->isSized()) {
+        return CGF.Builder.CreateConstArrayGEP(base, idx, field->getName());
+      }
+    }
   }
 
   return CGF.Builder.CreateStructGEP(base, idx, field->getName());

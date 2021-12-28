@@ -4489,8 +4489,12 @@ static std::pair<bool, bool> isAggregateImageTypeRecurse(const CXXRecordDecl* de
 	bool has_any_image = false;
 	for(const auto* field : decl->fields()) {
 		// direct image type or array thereof
-		if(!field->getType()->isImageType() &&
-		   !field->getType()->isArrayImageType(false)) {
+		if (!field->getType()->isImageType() &&
+			!field->getType()->isArrayImageType(false)) {
+			// ignore zero-sized fields (if there are not an image)
+			if (field->isZeroSize(decl->getASTContext())) {
+				continue;
+			}
 			return { false, false };
 		}
 		has_any_image = true;

@@ -8269,6 +8269,9 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
     case ParsedAttr::AT_FloorImageDataType:
       attr.setUsedAsTypeAttr();
       break;
+    case ParsedAttr::AT_FloorImageFlags:
+      attr.setUsedAsTypeAttr();
+      break;
     case ParsedAttr::AT_VectorCompat:
       attr.setUsedAsTypeAttr();
       break;

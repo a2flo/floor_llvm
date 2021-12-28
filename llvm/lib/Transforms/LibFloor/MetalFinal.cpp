@@ -49,6 +49,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
+#include "../../IR/LLVMContextImpl.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/LegacyPassManager.h"
@@ -71,6 +72,9 @@
 #include <cxxabi.h>
 using namespace llvm;
 
+#if defined(DEBUG_TYPE)
+#undef DEBUG_TYPE
+#endif
 #define DEBUG_TYPE "MetalFinal"
 
 #if 1
@@ -1175,6 +1179,7 @@ namespace {
 	};
 	
 	// MetalFinalModuleCleanup:
+	// * image storage class name replacement
 	// * calling convention cleanup
 	// * strip unused functions/prototypes/externs
 	// * debug info cleanup
@@ -1189,14 +1194,70 @@ namespace {
 			initializeMetalFinalModuleCleanupPass(*PassRegistry::getPassRegistry());
 		}
 		
+		// this finds all libfloor image storage class structs and replaces their names with the appropriate Apple Metal texture struct type name
+		// NOTE: we need to do this, since Apple decided to handle these specially based on their name alone (e.g. no allocating additional registers)
+		bool run_array_of_images_name_replacement() {
+			std::vector<llvm::StructType*> image_storage_types;
+			for (const auto& st_type : ctx->pImpl->NamedStructTypes) {
+				if (st_type.first().startswith("struct.floor_image::image_storage")) {
+					image_storage_types.emplace_back(st_type.second);
+				}
+			}
+			for (auto& st_type : image_storage_types) {
+				if (st_type->getNumElements() != 1) {
+					// we only expect a single element
+					continue;
+				}
+				auto img_ptr_type = st_type->getElementType(0);
+				if (!img_ptr_type->isPointerTy()) {
+					// expected a pointer type
+					continue;
+				}
+				auto img_type = dyn_cast_or_null<llvm::StructType>(img_ptr_type->getPointerElementType());
+				if (!img_type || !img_type->isOpaque()) {
+					// expected an opaque struct type
+					continue;
+				}
+				
+				// we already emit the correct texture opaque texture type name -> find the corresponding Metal struct name
+				static const std::unordered_map<std::string, std::string> metal_name_lut {
+					{ "struct._texture_1d_t", "struct.metal::texture1d" },
+					{ "struct._texture_1d_array_t", "struct.metal::texture1d_array" },
+					{ "struct._texture_2d_t", "struct.metal::texture2d" },
+					{ "struct._texture_2d_array_t", "struct.metal::texture2d_array" },
+					{ "struct._depth_2d_t", "struct.metal::depth2d" },
+					{ "struct._depth_2d_array_t", "struct.metal::depth2d_array" },
+					{ "struct._texture_2d_ms_t", "struct.metal::texture2d_ms" },
+					{ "struct._texture_2d_ms_array_t", "struct.metal::texture2d_ms_array" },
+					{ "struct._depth_2d_ms_t", "struct.metal::depth2d_ms" },
+					{ "struct._depth_2d_ms_array_t", "struct.metal::depth2d_ms_array" },
+					{ "struct._texture_cube_t", "struct.metal::texturecube" },
+					{ "struct._texture_cube_array_t", "struct.metal::texturecube_array" },
+					{ "struct._depth_cube_t", "struct.metal::depthcube" },
+					{ "struct._depth_cube_array_t", "struct.metal::depthcube_array" },
+					{ "struct._texture_3d_t", "struct.metal::texture3d" },
+				};
+				auto repl_iter = metal_name_lut.find(img_type->getName().str());
+				if (repl_iter == metal_name_lut.end()) {
+					continue;
+				}
+				
+				//llvm::dbgs() << "replace " << img_type->getName().str() << " -> " << repl_iter->second << "\n";
+				st_type->setName(repl_iter->second);
+			}
+			
+			return false;
+		}
+		
 		bool runOnModule(Module& Mod) override {
 			M = &Mod;
 			ctx = &M->getContext();
 			
+			bool module_modified = run_array_of_images_name_replacement();
+			
 			// * strip floor_* calling convention from all functions and their users (replace it with C CC)
 			// * kill all functions named floor.*
 			// * strip debug info from declarations
-			bool module_modified = false;
 			for (auto func_iter = Mod.begin(); func_iter != Mod.end();) {
 				auto& func = *func_iter;
 				if (func.getName().startswith("floor.")) {

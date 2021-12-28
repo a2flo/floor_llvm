@@ -655,6 +655,15 @@ static void instantiateDependentFloorImageDataTypeAttr(
   }
 }
 
+static void instantiateDependentFloorImageFlagsAttr(
+    Sema &S, const MultiLevelTemplateArgumentList &TemplateArgs,
+    const FloorImageFlagsAttr *A, const Decl *Tmpl, Decl *New) {
+  EnterExpressionEvaluationContext Unevaluated(S, Sema::ExpressionEvaluationContext::ConstantEvaluated);
+  ExprResult Result = S.SubstExpr(A->getImageFlags(), TemplateArgs);
+  if (!Result.isInvalid())
+    S.AddFloorImageFlagsAttr(A->getLocation(), New, Result.getAs<Expr>(), *A);
+}
+
 static void instantiateDependentGraphicsFBOColorLocationAttr(
     Sema &S, const MultiLevelTemplateArgumentList &TemplateArgs,
     const GraphicsFBOColorLocationAttr *A, const Decl *Tmpl, Decl *New) {
@@ -786,6 +795,11 @@ void Sema::InstantiateAttrs(const MultiLevelTemplateArgumentList &TemplateArgs,
     auto *ImgType = dyn_cast<FloorImageDataTypeAttr>(TmplAttr);
     if (ImgType && ImgType->getImageDataType()->isDependentType()) {
       instantiateDependentFloorImageDataTypeAttr(*this, TemplateArgs, ImgType, Tmpl, New);
+      continue;
+    }
+
+    if (auto *ImgFlags = dyn_cast<FloorImageFlagsAttr>(TmplAttr)) {
+      instantiateDependentFloorImageFlagsAttr(*this, TemplateArgs, ImgFlags, Tmpl, New);
       continue;
     }
 

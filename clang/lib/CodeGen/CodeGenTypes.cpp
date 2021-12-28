@@ -1048,46 +1048,46 @@ void CodeGenTypes::aggregate_scalar_fields_add_array(const CXXRecordDecl* root_d
 	if(expand_array_image ||
 	   !(CAT->getElementType()->isAggregateImageType() ||
 		 CAT->getElementType()->isImageType())) {
-	const auto count = CAT->getSize().getZExtValue();
-	const auto ET = CAT->getElementType();
-	if(const auto arr_rdecl = ET->getAsCXXRecordDecl()) {
+		const auto count = CAT->getSize().getZExtValue();
+		const auto ET = CAT->getElementType();
+		if(const auto arr_rdecl = ET->getAsCXXRecordDecl()) {
 			auto contained_ret = get_aggregate_scalar_fields(root_decl, arr_rdecl, false, false, expand_array_image);
-		for(auto& entry : contained_ret) {
-			entry.parents.push_back(parent_decl);
-		}
-		for(uint64_t i = 0; i < count; ++i) {
-			ret.insert(ret.end(), contained_ret.begin(), contained_ret.end());
-		}
-	}
-	else if(ET->isArrayType()) {
-		const auto aoa_decl = dyn_cast<ConstantArrayType>(ET->getAsArrayTypeUnsafe());
-		if(aoa_decl) {
+			for(auto& entry : contained_ret) {
+				entry.parents.push_back(parent_decl);
+			}
 			for(uint64_t i = 0; i < count; ++i) {
-				const auto idx_str = "_" + std::to_string(i);
+				ret.insert(ret.end(), contained_ret.begin(), contained_ret.end());
+			}
+		}
+		else if(ET->isArrayType()) {
+			const auto aoa_decl = dyn_cast<ConstantArrayType>(ET->getAsArrayTypeUnsafe());
+			if(aoa_decl) {
+				for(uint64_t i = 0; i < count; ++i) {
+					const auto idx_str = "_" + std::to_string(i);
 					aggregate_scalar_fields_add_array(root_decl, parent_decl, aoa_decl, attrs, parent_field_decl,
 													  name + idx_str, expand_array_image, ret);
+				}
+			}
+			else {
+				// TODO: error
 			}
 		}
 		else {
-			// TODO: error
-		}
-	}
-	else {
-		for(uint64_t i = 0; i < count; ++i) {
-			const auto idx_str = "_" + std::to_string(i);
-			ret.push_back(aggregate_scalar_entry {
-				ET,
-				name + idx_str,
-				aggregate_scalar_fields_mangle(root_decl, TheCXXABI.getMangleContext(), name + idx_str, ET),
-				attrs,
+			for(uint64_t i = 0; i < count; ++i) {
+				const auto idx_str = "_" + std::to_string(i);
+				ret.push_back(aggregate_scalar_entry {
+					ET,
+					name + idx_str,
+					aggregate_scalar_fields_mangle(root_decl, TheCXXABI.getMangleContext(), name + idx_str, ET),
+					attrs,
 					parent_field_decl,
-				{ parent_decl },
-				false,
-				false
-			});
+					{ parent_decl },
+					false,
+					false
+				});
+			}
 		}
 	}
-}
 	else {
 		// directly add an array entry
 		ret.push_back(aggregate_scalar_entry {

@@ -2777,6 +2777,52 @@ static void handleFloorImageDataTypeAttr(Sema &S, Decl *D, const ParsedAttr &Att
   D->addAttr(::new (S.Context) FloorImageDataTypeAttr(S.Context, Attr, ParmTSI));
 }
 
+static void handleFloorImageFlagsAttr(Sema &S, Decl *D, const ParsedAttr &Attr) {
+  if (!Attr.checkExactlyNumArgs(S, 1)) {
+    Attr.setInvalid();
+    return;
+  }
+  S.AddFloorImageFlagsAttr(Attr.getRange(), D, Attr.getArgAsExpr(0), Attr);
+}
+
+void Sema::AddFloorImageFlagsAttr(SourceRange AttrRange, Decl *D, Expr *E, const AttributeCommonInfo &CI) {
+  FloorImageFlagsAttr TmpAttr(Context, CI, E);
+  SourceLocation AttrLoc = AttrRange.getBegin();
+
+  QualType T;
+  if (ValueDecl *VD = dyn_cast<ValueDecl>(D))
+    T = VD->getType();
+  else {
+    Diag(AttrLoc, diag::err_attribute_argument_type) <<
+      &TmpAttr << AANT_ArgumentIntegerConstant;
+    return;
+  }
+
+  if (!E->isValueDependent()) {
+    Expr::EvalResult result;
+    if (!E->EvaluateAsRValue(result, Context) || !result.Val.isInt()) {
+      Diag(AttrLoc, diag::err_attribute_argument_n_type)
+        << &TmpAttr << 0u << AANT_ArgumentConstantExpr
+        << E->getSourceRange();
+      return;
+    }
+    auto& ImageFlags = result.Val.getInt();
+    if (ImageFlags.getBitWidth() != 64 || !ImageFlags.isUnsigned()) {
+      Diag(AttrLoc, diag::err_attribute_argument_invalid) <<
+        &TmpAttr << AANT_ArgumentIntegerConstant;
+      return;
+    }
+
+    auto attr = ::new (Context) FloorImageFlagsAttr(Context, CI, E);
+    attr->setEvalFlags(ImageFlags.getZExtValue());
+    D->addAttr(attr);
+    return;
+  }
+
+  // Save dependent expressions in the AST to be instantiated.
+  D->addAttr(::new (Context) FloorImageFlagsAttr(TmpAttr));
+}
+
 static void handleGraphicsFBOColorLocationAttr(Sema &S, Decl *D, const ParsedAttr &Attr) {
   if (!Attr.checkExactlyNumArgs(S, 1)) {
     Attr.setInvalid();
@@ -2826,7 +2872,6 @@ void Sema::AddGraphicsFBOColorLocationAttr(SourceRange AttrRange, Decl *D, Expr 
 
   // Save dependent expressions in the AST to be instantiated.
   D->addAttr(::new (Context) GraphicsFBOColorLocationAttr(TmpAttr));
-  return;
 }
 
 static void handleGraphicsFBODepthTypeAttr(Sema &S, Decl *D, const ParsedAttr &Attr) {
@@ -8296,6 +8341,9 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
     break;
   case ParsedAttr::AT_FloorImageDataType:
     handleFloorImageDataTypeAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_FloorImageFlags:
+    handleFloorImageFlagsAttr(S, D, AL);
     break;
   case ParsedAttr::AT_VectorCompat:
     handleSimpleAttribute<VectorCompatAttr>(S, D, AL);
