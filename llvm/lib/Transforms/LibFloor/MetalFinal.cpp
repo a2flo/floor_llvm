@@ -1199,7 +1199,7 @@ namespace {
 		bool run_array_of_images_name_replacement() {
 			std::vector<llvm::StructType*> image_storage_types;
 			for (const auto& st_type : ctx->pImpl->NamedStructTypes) {
-				if (st_type.first().startswith("struct.floor_image::image_storage")) {
+				if (st_type.first().startswith("class.floor_image::image")) {
 					image_storage_types.emplace_back(st_type.second);
 				}
 			}
@@ -1242,7 +1242,7 @@ namespace {
 					continue;
 				}
 				
-				//llvm::dbgs() << "replace " << img_type->getName().str() << " -> " << repl_iter->second << "\n";
+				//llvm::dbgs() << "replace " << st_type->getName().str() << " (" << img_type->getName().str() << ") -> " << repl_iter->second << "\n";
 				st_type->setName(repl_iter->second);
 			}
 			

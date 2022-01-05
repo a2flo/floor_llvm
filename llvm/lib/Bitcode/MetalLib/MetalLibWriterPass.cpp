@@ -39,6 +39,11 @@
 using namespace llvm;
 using namespace std;
 
+// workaround Windows stupidity ...
+#if defined(uuid_t)
+#undef uuid_t
+#endif
+
 PreservedAnalyses MetalLibWriterPass::run(Module &M, ModuleAnalysisManager &) {
   WriteMetalLibToFile(M, OS);
   return PreservedAnalyses::all();
@@ -816,7 +821,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     if (target_air_version >= 230) {
       if (auto llvm_ident = cloned_mod->getNamedMetadata("llvm.ident")) {
         if (MDNode *ident_op = llvm_ident->getOperand(0)) {
-          static const std::unordered_map<uint32_t, std::string> ident_versions{
+          static const std::unordered_map<uint32_t, const char*> ident_versions{
               {230, "Apple LLVM version 31001.143 (metalfe-31001.143)"},
               {240, "Apple metal version 31001.363 (metalfe-31001.363)"},
           };
