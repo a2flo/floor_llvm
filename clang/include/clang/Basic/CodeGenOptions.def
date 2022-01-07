@@ -97,6 +97,8 @@ VALUE_CODEGENOPT(VulkanIUBSize, 32, 256) ///< max supported size of Vulkan inlin
 VALUE_CODEGENOPT(VulkanIUBCount, 32, 4) ///< max supported count of Vulkan inline uniform blocks
 CODEGENOPT(VulkanLLVMPreStructurizationPass , 1, 0) ///< Enable LLVM CFG structurization pass prior to actual structurization.
 CODEGENOPT(VulkanSoftPrintf , 1, 0) ///< Enables support of software printf emulation.
+CODEGENOPT(GraphicsPrimitiveID , 1, 0) ///< Enables support for builtin primitive id.
+CODEGENOPT(GraphicsBarycentricCoord , 1, 0) ///< Enables support for builtin primitive id.
 CODEGENOPT(EmulatedTLS       , 1, 0) ///< Set by default or -f[no-]emulated-tls.
 CODEGENOPT(ExplicitEmulatedTLS , 1, 0) ///< Set if -f[no-]emulated-tls is used.
 /// Embed Bitcode mode (off/all/bitcode/marker).

@@ -448,12 +448,15 @@ CodeGenTypes::arrangeCXXConstructorCall(const CallArgList &args,
 uint32_t CodeGenTypes::getMetalVulkanImplicitArgCount(const FunctionDecl* FD) const {
   if (!FD) return 0;
 
-  if (!CGM.getLangOpts().Metal && !CGM.getLangOpts().Vulkan) {
+  const auto& LangOpts = CGM.getLangOpts();
+  const auto& CodeGenOpts = CGM.getCodeGenOpts();
+
+  if (!LangOpts.Metal && !LangOpts.Vulkan) {
     return 0;
   }
 
-  if (CGM.getLangOpts().Metal) {
-    const uint32_t printf_arg = (CGM.getCodeGenOpts().MetalSoftPrintf > 0 ? 1 : 0);
+  if (LangOpts.Metal) {
+    const uint32_t printf_arg = (CodeGenOpts.MetalSoftPrintf > 0 ? 1 : 0);
     if (FD->hasAttr<ComputeKernelAttr>()) {
       if (CGM.getTriple().getOS() != llvm::Triple::OSType::MacOSX) {
         return 6 + printf_arg;
@@ -463,16 +466,16 @@ uint32_t CodeGenTypes::getMetalVulkanImplicitArgCount(const FunctionDecl* FD) co
     } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
       return 2 + printf_arg;
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
-      return 1 + printf_arg;
+      return 1 + printf_arg + (CodeGenOpts.GraphicsPrimitiveID ? 1 : 0) + (CodeGenOpts.GraphicsBarycentricCoord ? 1 : 0);
     }
-  } else if(CGM.getLangOpts().Vulkan) {
-    const uint32_t printf_arg = (CGM.getCodeGenOpts().VulkanSoftPrintf > 0 ? 1 : 0);
+  } else if(LangOpts.Vulkan) {
+    const uint32_t printf_arg = (CodeGenOpts.VulkanSoftPrintf > 0 ? 1 : 0);
     if (FD->hasAttr<ComputeKernelAttr>()) {
       return 4 + printf_arg;
     } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
       return 3 + printf_arg;
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
-      return 3 + printf_arg;
+      return 3 + printf_arg + (CodeGenOpts.GraphicsPrimitiveID ? 1 : 0) + (CodeGenOpts.GraphicsBarycentricCoord ? 1 : 0);
     }
   }
 
@@ -483,7 +486,10 @@ uint32_t CodeGenTypes::getMetalVulkanImplicitArgCount(const FunctionDecl* FD) co
 void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgList* ArgList, const FunctionDecl* FD) {
   if (!FD) return; // just in case
 
-  if (!CGM.getLangOpts().Metal && !CGM.getLangOpts().Vulkan) {
+  const auto& LangOpts = CGM.getLangOpts();
+  const auto& CodeGenOpts = CGM.getCodeGenOpts();
+
+  if (!LangOpts.Metal && !LangOpts.Vulkan) {
     return; // nothing to change here
   }
 
@@ -526,8 +532,8 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
 
   // add implicit internal args
   // NOTE: Metal and Vulkan handle these differently: Metal uses direct params, Vulkan uses pointers in input AS
-  if (CGM.getLangOpts().Metal) {
-    if (CGM.getCodeGenOpts().MetalSoftPrintf > 0) {
+  if (LangOpts.Metal) {
+    if (CodeGenOpts.MetalSoftPrintf > 0) {
       add_arg(Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.IntTy, LangAS::opencl_global)), "__metal__printf_buffer__");
     }
 
@@ -552,12 +558,21 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       add_arg(Ctx.IntTy, "__metal__vertex_id__");
       add_arg(Ctx.IntTy, "__metal__instance_id__");
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
-      // only point coord for now:
+      // optional: primitive id and barycentric coord
+      if (CodeGenOpts.GraphicsPrimitiveID) {
+        add_arg(Ctx.IntTy, "__metal__primitive_id__");
+      }
+      if (CodeGenOpts.GraphicsBarycentricCoord) {
+        auto float3_type = Ctx.getExtVectorType(Ctx.FloatTy, 3);
+        add_arg(float3_type, "__metal__barycentric_coord__");
+      }
+
+      // fixed: only point coord for now:
       auto float2_type = Ctx.getExtVectorType(Ctx.FloatTy, 2);
       add_arg(float2_type, "__metal__point_coord__");
     }
-  } else if(CGM.getLangOpts().Vulkan) {
-    if (CGM.getCodeGenOpts().VulkanSoftPrintf > 0) {
+  } else if(LangOpts.Vulkan) {
+    if (CodeGenOpts.VulkanSoftPrintf > 0) {
       add_arg(Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.IntTy, LangAS::opencl_global)), "vulkan.printf_buffer");
     }
 
@@ -576,12 +591,22 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       add_arg(int_ptr_type, "vulkan.view_index");
       add_arg(int_ptr_type, "vulkan.instance_index");
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
-      // only point + frag coord + view index for now:
+      auto int_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.IntTy, LangAS::vulkan_input));
+
+      // optional: primitive id and barycentric coord
+      if (CodeGenOpts.GraphicsPrimitiveID) {
+        add_arg(int_ptr_type, "vulkan.primitive_id");
+      }
+      if (CodeGenOpts.GraphicsBarycentricCoord) {
+        auto float3_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.getExtVectorType(Ctx.FloatTy, 3), LangAS::vulkan_input));
+        add_arg(float3_ptr_type, "vulkan.barycentric_coord");
+      }
+
+      // fixed: only point + frag coord + view index for now:
       auto float2_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.getExtVectorType(Ctx.FloatTy, 2), LangAS::vulkan_input));
       add_arg(float2_ptr_type, "vulkan.point_coord");
       auto float4_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.getExtVectorType(Ctx.FloatTy, 4), LangAS::vulkan_input));
       add_arg(float4_ptr_type, "vulkan.frag_coord");
-      auto int_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.IntTy, LangAS::vulkan_input));
       add_arg(int_ptr_type, "vulkan.view_index");
     }
   }

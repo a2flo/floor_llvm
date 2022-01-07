@@ -1,7 +1,7 @@
 //===- VulkanImage.cpp - Vulkan-specific floor image transformations ------===//
 ////
 //  Flo's Open libRary (floor)
-//  Copyright (C) 2004 - 2021 Florian Ziesche
+//  Copyright (C) 2004 - 2022 Florian Ziesche
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by

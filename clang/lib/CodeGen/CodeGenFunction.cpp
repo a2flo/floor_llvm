@@ -666,11 +666,20 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
       (FD->hasAttr<GraphicsVertexShaderAttr>() ? "air.vertex" :
        (FD->hasAttr<GraphicsFragmentShaderAttr>() ? "air.fragment" : "air.kernel")));
   }
+  MainMetadataNode->addOperand(kernelMDNode);
+
   // add soft-printf info
   if (CGM.getCodeGenOpts().MetalSoftPrintf > 0 || CGM.getCodeGenOpts().VulkanSoftPrintf > 0) {
     CGM.getModule().getOrInsertNamedMetadata("floor.soft_printf");
   }
-  MainMetadataNode->addOperand(kernelMDNode);
+
+  // add primitive id and barycentric coord info
+  if (CGM.getCodeGenOpts().GraphicsPrimitiveID) {
+    CGM.getModule().getOrInsertNamedMetadata("floor.primitive_id");
+  }
+  if (CGM.getCodeGenOpts().GraphicsBarycentricCoord) {
+    CGM.getModule().getOrInsertNamedMetadata("floor.barycentric_coord");
+  }
 
   // additional air info
   if (CGM.getLangOpts().Metal) {

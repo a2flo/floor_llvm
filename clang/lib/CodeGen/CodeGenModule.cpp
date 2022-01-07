@@ -2344,6 +2344,12 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "view_index"));
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "instance_index"));
 	} else if (is_fragment) {
+		if (getCodeGenOpts().GraphicsPrimitiveID) {
+			stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "primitive_id"));
+		}
+		if (getCodeGenOpts().GraphicsBarycentricCoord) {
+			stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "barycentric_coord"));
+		}
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "point_coord"));
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "frag_coord"));
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "view_index"));
@@ -3077,17 +3083,43 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			}, true);
 		}
 	} else if (is_fragment) {
-		// TODO: other stuff
+		if (getCodeGenOpts().GraphicsPrimitiveID) {
+			SmallVector<llvm::Metadata*, 6> arg_info;
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.primitive_id"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "uint"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "__metal__primitive_id__"));
+			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+			++arg_idx; // next llvm arg
+		}
 		
-		SmallVector<llvm::Metadata*, 6> arg_info;
-		arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
-		arg_info.push_back(llvm::MDString::get(VMContext, "air.point_coord"));
-		arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
-		arg_info.push_back(llvm::MDString::get(VMContext, "float2"));
-		arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
-		arg_info.push_back(llvm::MDString::get(VMContext, "__metal__point_coord__"));
-		arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
-		++arg_idx; // next llvm arg
+		if (getCodeGenOpts().GraphicsBarycentricCoord) {
+			SmallVector<llvm::Metadata*, 8> arg_info;
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.barycentric_coord"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.center"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.perspective"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "float3"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "__metal__barycentric_coord__"));
+			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+			++arg_idx; // next llvm arg
+		}
+		
+		{
+			SmallVector<llvm::Metadata*, 6> arg_info;
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.point_coord"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "float2"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "__metal__point_coord__"));
+			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+			++arg_idx; // next llvm arg
+		}
 		
 		const auto add_fs_output = [this, &Builder, &stage_infos, &make_type_name](const CodeGenTypes::aggregate_scalar_entry& entry,
 																				   const unsigned int& location) {

@@ -1850,6 +1850,8 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
   Opts.VulkanLLVMPreStructurizationPass = Args.hasArg(OPT_vulkan_llvm_pre_structurization_pass);
   Opts.VulkanSoftPrintf = Args.hasArg(OPT_vulkan_soft_printf);
   Opts.SPIRCompileOptions = Args.getLastArgValue(OPT_cl_spir_compile_options).trim("\t\n\v\f\r\" ");
+  Opts.GraphicsPrimitiveID = Args.hasArg(OPT_graphics_primitive_id);
+  Opts.GraphicsBarycentricCoord = Args.hasArg(OPT_graphics_barycentric_coord);
 
   if (Args.getLastArg(OPT_femulated_tls) ||
       Args.getLastArg(OPT_fno_emulated_tls)) {

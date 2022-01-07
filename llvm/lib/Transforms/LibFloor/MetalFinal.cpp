@@ -1,7 +1,7 @@
 //===- MetalFinal.cpp - Metal final pass ----------------------------------===//
 //
 //  Flo's Open libRary (floor)
-//  Copyright (C) 2004 - 2021 Florian Ziesche
+//  Copyright (C) 2004 - 2022 Florian Ziesche
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -311,6 +311,8 @@ namespace {
 		
 		// added fragment function args
 		Argument* point_coord { nullptr };
+		Argument* primitive_id { nullptr };
+		Argument* barycentric_coord { nullptr };
 		
 		// any function args
 		Argument* soft_printf { nullptr };
@@ -459,10 +461,16 @@ namespace {
 				}
 			}
 			
-			// check for soft-printf
-			bool has_soft_printf = false;
+			// check for optional features: soft-printf, primitive id, barycentric coord
+			bool has_soft_printf = false, has_primitive_id = false, has_barycentric_coord = false;
 			if (auto soft_printf_meta = M->getNamedMetadata("floor.soft_printf")) {
 				has_soft_printf = true;
+			}
+			if (auto primitive_id_meta = M->getNamedMetadata("floor.primitive_id")) {
+				has_primitive_id = true;
+			}
+			if (auto barycentric_coord_meta = M->getNamedMetadata("floor.barycentric_coord")) {
+				has_barycentric_coord = true;
 			}
 			
 			// get args if this is a kernel function
@@ -522,14 +530,32 @@ namespace {
 			// get args if this is a fragment function
 			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
 			if(is_fragment_func) {
-				if (F.arg_size() >= METAL_FRAGMENT_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
+				const uint32_t opt_arg_count = (has_soft_printf ? 1u : 0u) + (has_primitive_id ? 1u : 0u) + (has_barycentric_coord ? 1u : 0u);
+				if (F.arg_size() >= METAL_FRAGMENT_ARG_COUNT + opt_arg_count) {
 					point_coord = get_arg_by_idx(METAL_POINT_COORD);
+					
+					// NOTE: reverse order!
+					uint32_t opt_arg_counter = 1;
+					if (has_barycentric_coord) {
+						barycentric_coord = get_arg_by_idx(-(METAL_FRAGMENT_ARG_COUNT + opt_arg_counter++));
+					} else {
+						barycentric_coord = nullptr;
+					}
+					if (has_primitive_id) {
+						primitive_id = get_arg_by_idx(-(METAL_FRAGMENT_ARG_COUNT + opt_arg_counter++));
+					} else {
+						primitive_id = nullptr;
+					}
 					if (has_soft_printf) {
-						soft_printf = get_arg_by_idx(-(METAL_FRAGMENT_ARG_COUNT + 1));
+						soft_printf = get_arg_by_idx(-(METAL_FRAGMENT_ARG_COUNT + opt_arg_counter++));
+					} else {
+						soft_printf = nullptr;
 					}
 				} else {
 					errs() << "invalid fragment function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
 					point_coord = nullptr;
+					primitive_id = nullptr;
+					barycentric_coord = nullptr;
 					soft_printf = nullptr;
 				}
 			}
@@ -895,6 +921,28 @@ namespace {
 				
 				// special case
 				I.replaceAllUsesWith(soft_printf);
+				I.eraseFromParent();
+				return;
+			}
+			else if(func_name == "floor.get_primitive_id.i32") {
+				if (primitive_id == nullptr) {
+					llvm::errs() << "failed to get primitive_id arg, not in a fragment function or feature is not enabled\n";
+					llvm::errs().flush();
+					return;
+				}
+				
+				I.replaceAllUsesWith(primitive_id);
+				I.eraseFromParent();
+				return;
+			}
+			else if(func_name == "floor.get_barycentric_coord.float3") {
+				if (barycentric_coord == nullptr) {
+					llvm::errs() << "failed to get barycentric_coord arg, not in a fragment function or feature is not enabled\n";
+					llvm::errs().flush();
+					return;
+				}
+			
+				I.replaceAllUsesWith(barycentric_coord);
 				I.eraseFromParent();
 				return;
 			}

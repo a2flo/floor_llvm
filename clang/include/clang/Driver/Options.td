@@ -5912,6 +5912,15 @@ def vulkan_soft_printf : Flag<["-"], "vulkan-soft-printf">,
   HelpText<"Enables support of software printf emulation">;
 
 //===----------------------------------------------------------------------===//
+// Graphics Options
+//===----------------------------------------------------------------------===//
+
+def graphics_primitive_id : Flag<["-"], "graphics-primitive-id">,
+  HelpText<"Enables support for primitive id query in fragment shaders">;
+def graphics_barycentric_coord : Flag<["-"], "graphics-barycentric-coord">,
+  HelpText<"Enables support for barycentric coordinate query in fragment shaders">;
+
+//===----------------------------------------------------------------------===//
 // OpenMP Options
 //===----------------------------------------------------------------------===//
 
