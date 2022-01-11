@@ -598,7 +598,12 @@ namespace {
 		
 		static std::optional<std::string> get_suffix_for_type(llvm::Type* type, const bool is_signed) {
 			std::string ret = ".";
-			switch (type->getTypeID()) {
+			auto elem_type = type;
+			if (auto vec_type = dyn_cast_or_null<FixedVectorType>(type); vec_type) {
+				elem_type = vec_type->getElementType();
+				ret += "v" + std::to_string(vec_type->getNumElements());
+			}
+			switch (elem_type->getTypeID()) {
 				case llvm::Type::IntegerTyID:
 					ret += (is_signed ? "s." : "u.");
 					ret += "i" + std::to_string(cast<IntegerType>(type)->getBitWidth());
@@ -696,6 +701,9 @@ namespace {
 					// handled signedness and AIR function name
 					bool is_signed = true;
 					std::string func_name = "air.";
+					const bool is_fast = (op_lhs->getType()->isFloatTy() ||
+										  (op_lhs->getType()->isVectorTy() &&
+										   cast<FixedVectorType>(op_lhs->getType())->getElementType()->isFloatTy()));
 					switch (I.getIntrinsicID()) {
 						case Intrinsic::umin:
 							is_signed = false;
@@ -712,10 +720,10 @@ namespace {
 							func_name += "max";
 							break;
 						case Intrinsic::minnum:
-							func_name += (op_lhs->getType()->isFloatTy() ? "fast_fmin" : "fmin");
+							func_name += (is_fast ? "fast_fmin" : "fmin");
 							break;
 						case Intrinsic::maxnum:
-							func_name += (op_lhs->getType()->isFloatTy() ? "fast_fmax" : "fmax");
+							func_name += (is_fast ? "fast_fmax" : "fmax");
 							break;
 						default:
 							ctx->emitError(&I, "unexpected intrinsic:\n" + print_instr(I));
