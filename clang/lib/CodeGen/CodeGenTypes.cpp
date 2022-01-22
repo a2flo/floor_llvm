@@ -88,7 +88,8 @@ void CodeGenTypes::addRecordTypeName(const RecordDecl *RD,
 /// ConvertType in that it is used to convert to the memory representation for
 /// a type.  For example, the scalar representation for _Bool is i1, but the
 /// memory representation is usually i8 or i32, depending on the target.
-llvm::Type *CodeGenTypes::ConvertTypeForMem(QualType T, bool ForBitField) {
+llvm::Type *CodeGenTypes::ConvertTypeForMem(QualType T, bool ForBitField,
+                                            bool ForRecordField) {
   if (T->isConstantMatrixType()) {
     const Type *Ty = Context.getCanonicalType(T).getTypePtr();
     const ConstantMatrixType *MT = cast<ConstantMatrixType>(Ty);
@@ -96,7 +97,7 @@ llvm::Type *CodeGenTypes::ConvertTypeForMem(QualType T, bool ForBitField) {
                                 MT->getNumRows() * MT->getNumColumns());
   }
 
-  llvm::Type *R = ConvertType(T);
+  llvm::Type *R = ConvertType(T, !ForRecordField);
 
   // If this is a bool type, or an ExtIntType in a bitfield representation,
   // map this integer to the target-specified size.
@@ -393,13 +394,14 @@ llvm::Type *CodeGenTypes::ConvertFunctionTypeInternal(QualType QFT) {
 }
 
 /// ConvertType - Convert the specified type to its LLVM form.
-llvm::Type *CodeGenTypes::ConvertType(QualType T) {
+llvm::Type *CodeGenTypes::ConvertType(QualType T, bool convert_array_image_type) {
   T = Context.getCanonicalType(T);
 
   const Type *Ty = T.getTypePtr();
 
   // intercept image arrays before RT conversion
-  if (Ty->isArrayImageType(true))
+  // NOTE: we do not want this when this is part of a record/struct
+  if (convert_array_image_type && Ty->isArrayImageType(true))
     return ConvertArrayImageType(Ty);
 
   // For the device-side compilation, CUDA device builtin surface/texture types

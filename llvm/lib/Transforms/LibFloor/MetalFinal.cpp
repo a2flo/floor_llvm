@@ -1250,13 +1250,15 @@ namespace {
 			initializeMetalFinalModuleCleanupPass(*PassRegistry::getPassRegistry());
 		}
 		
-		// this finds all libfloor image storage class structs and replaces their names with the appropriate Apple Metal texture struct type name
+		// this finds all libfloor image storage class structs and other structs, and replaces their names with the appropriate Apple Metal struct type name
 		// NOTE: we need to do this, since Apple decided to handle these specially based on their name alone (e.g. no allocating additional registers)
 		bool run_array_of_images_name_replacement() {
 			std::vector<llvm::StructType*> image_storage_types;
-			for (const auto& st_type : ctx->pImpl->NamedStructTypes) {
+			for (auto& st_type : ctx->pImpl->NamedStructTypes) {
 				if (st_type.first().startswith("class.floor_image::image")) {
 					image_storage_types.emplace_back(st_type.second);
+				} else if (st_type.first().startswith("struct.std::__1::array")) {
+					st_type.second->setName("struct.metal::array");
 				}
 			}
 			for (auto& st_type : image_storage_types) {

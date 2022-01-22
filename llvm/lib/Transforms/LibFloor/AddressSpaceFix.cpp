@@ -122,6 +122,7 @@ namespace {
 				if(func.getName().count('.') > 0) continue;
 				module_modified |= runOnFunction(func);
 			}
+			DBG(if (module_modified) { errs() << "address space fixed module:\n" << Mod << "\n"; })
 			return module_modified;
 		}
 		
@@ -186,6 +187,11 @@ namespace {
 				}
 				case Instruction::Load: {
 					auto LD = cast<LoadInst>(instr);
+					// don't replace load pointer type if it's already correct (and may differ from "address_space"!)
+					if (parent->getType()->isPointerTy() &&
+						parent->getType()->getPointerElementType() == LD->getType()) {
+						break;
+					}
 					if(LD->getType()->isPointerTy()) {
 						auto new_ptr_type = PointerType::get(LD->getType()->getPointerElementType(), address_space);
 						DBG(errs() << ">> LD: " << *LD->getType() << " -> ";)
@@ -294,7 +300,8 @@ namespace {
 						// TODO: for targets with a generic address space, might want to use that instead
 						ctx->emitError("more than one return type in function " + func->getName().str());
 					}
-					else if((*ret_types.begin())->getPointerAddressSpace() !=
+					else if((*ret_types.begin())->isPointerTy() &&
+							(*ret_types.begin())->getPointerAddressSpace() !=
 							func->getReturnType()->getPointerAddressSpace()) {
 						// fix func return type
 						std::vector<Type*> param_types;
@@ -483,8 +490,8 @@ namespace {
 					DBG(errs() << "\treplacing arg #" << i << "!\n";)
 					DBG(errs() << "\t" << called_arg_type->getPointerAddressSpace() << ", ";)
 					DBG(errs() << expected_arg_type->getPointerAddressSpace() << "\n";)
-					DBG(errs() << "\t"; called_arg_type->dump(); errs() << ", ";)
-					DBG(expected_arg_type->dump(); errs() << "\n";)
+					DBG(errs() << "\tgot: "; called_arg_type->dump();)
+					DBG(errs() << "\texpected: "; expected_arg_type->dump();)
 					DBG({
 						int err = 0;
 						const char* demangled_name = abi::__cxa_demangle(CI.getCalledFunction()->getName().data(), 0, 0, &err);
@@ -528,11 +535,16 @@ namespace {
 					const bool is_constant_as = (as_ptr->getPointerAddressSpace() == 2);
 					const bool is_readonly = CI.onlyReadsMemory(i);
 					const bool is_load = isa<LoadInst>(arg);
+					// don't allow cloning/alloca-read-only-fix for certain constructs (e.g. too expensive or not allowed)
+					const bool is_clonable = !(as_ptr->getElementType()->isArrayTy() ||
+											   (as_ptr->getElementType()->isStructTy() &&
+												cast<StructType>(as_ptr->getElementType())->getName().startswith("class.floor_image::image")));
 					
+					DBG(errs() << "\tread-only: " << is_constant_as << ", " << is_readonly << ", " << is_load << "; " << is_clonable << "\n";)
 					fix_args.push_back(as_fix_arg_info {
 						i,
 						as_ptr->getPointerAddressSpace(),
-						is_constant_as || is_readonly || is_load,
+						(is_constant_as || is_readonly || is_load) && is_clonable,
 					});
 				}
 			}

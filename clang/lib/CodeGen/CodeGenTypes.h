@@ -135,13 +135,18 @@ public:
   CanQualType DeriveThisType(const CXXRecordDecl *RD, const CXXMethodDecl *MD);
 
   /// ConvertType - Convert type T into a llvm::Type.
-  llvm::Type *ConvertType(QualType T);
+  /// "convert_array_image_type" signals if we want to directly convert struct
+  /// types containing image arrays to native LLVM arrays (default).
+  llvm::Type *ConvertType(QualType T, bool convert_array_image_type = true);
 
   /// ConvertTypeForMem - Convert type T into a llvm::Type.  This differs from
   /// ConvertType in that it is used to convert to the memory representation for
   /// a type.  For example, the scalar representation for _Bool is i1, but the
   /// memory representation is usually i8 or i32, depending on the target.
-  llvm::Type *ConvertTypeForMem(QualType T, bool ForBitField = false);
+  /// "ForRecordField" signals if this should be converted for a field type
+  /// within a record/struct.
+  llvm::Type *ConvertTypeForMem(QualType T, bool ForBitField = false,
+                                bool ForRecordField = false);
 
   /// GetFunctionType - Get the LLVM function type for \arg Info.
   llvm::FunctionType *GetFunctionType(const CGFunctionInfo &Info);

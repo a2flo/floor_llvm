@@ -831,6 +831,15 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
         }
       }
     }
+    // * kill other named metadata that is no longer needed
+    for (auto nmd_iter = cloned_mod->named_metadata_begin(); nmd_iter != cloned_mod->named_metadata_end(); ) {
+      if (nmd_iter->getName().startswith("floor.")) {
+        auto erase_nmd = &*nmd_iter++;
+        cloned_mod->eraseNamedMetadata(erase_nmd);
+      } else {
+        ++nmd_iter;
+      }
+    }
 
     // modify local and constant memory GVs
     const auto &DL = cloned_mod->getDataLayout();

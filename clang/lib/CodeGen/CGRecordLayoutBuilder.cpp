@@ -145,7 +145,7 @@ struct CGRecordLowering {
   /// Gets the storage type for a field decl and handles storage
   /// for itanium bitfields that are smaller than their declared type.
   llvm::Type *getStorageType(const FieldDecl *FD) {
-    llvm::Type *Type = Types.ConvertTypeForMem(FD->getType());
+    llvm::Type *Type = Types.ConvertTypeForMem(FD->getType(), false, true);
     if (!FD->isBitField()) return Type;
     if (isDiscreteBitFieldABI()) return Type;
     return getIntNType(std::min(FD->getBitWidthValue(Context),

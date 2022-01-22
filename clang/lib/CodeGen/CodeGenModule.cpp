@@ -66,6 +66,7 @@
 #include "llvm/Support/MD5.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/X86TargetParser.h"
+#include "llvm/Transforms/LibFloor/FloorImageType.h"
 
 #include <sstream>
 #include <unordered_set>
@@ -2428,7 +2429,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 	
 	//
 	const PrintingPolicy &Policy = Context.getPrintingPolicy();
-	const auto make_type_name = [&Policy](const clang::QualType& type) {
+	const std::function<std::string(const clang::QualType&)> make_type_name = [&Policy, &make_type_name](const clang::QualType& type) -> std::string {
 		// NOTE: air wants the type w/o qualifiers
 		const auto base_unq_type = type.getTypePtr()->getBaseElementTypeUnsafe();
 		const auto unqualified_type = base_unq_type->getCanonicalTypeInternal();
@@ -2450,19 +2451,160 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			return in_str;
 		};
 		
-		// convert floor "vectorN<type>" to "typeN"
-		if (const auto cxx_rdecl = unqualified_type->getAsCXXRecordDecl();
-			cxx_rdecl && cxx_rdecl->hasAttr<VectorCompatAttr>()) {
-			const auto floor_vec_name = unqualified_type.getAsString(Policy);
-			const auto type_param_start = floor_vec_name.find('<');
-			const auto type_param_end = floor_vec_name.rfind('>');
+		// convert special C++/floor types:
+		//  * "vectorN<type>" to "typeN"
+		//  * "floor_image::image<TYPE>" to Metal texture type name
+		//  * "std::array<T, N>" to "array<make_type_name(T), N>"
+		do {
+			const auto cxx_rdecl = unqualified_type->getAsCXXRecordDecl();
+			if (!cxx_rdecl) {
+				break;
+			}
+			
+			const auto type_name_str = unqualified_type.getAsString(Policy);
+			const auto type_param_start = type_name_str.find('<');
+			const auto type_param_end = type_name_str.rfind('>');
 			if (type_param_start != std::string::npos && type_param_start > 0 &&
 				type_param_end != std::string::npos && type_param_end > type_param_start) {
-				const auto vec_elem_type = floor_vec_name.substr(type_param_start + 1, type_param_end - type_param_start - 1);
-				const auto vec_size = floor_vec_name.substr(type_param_start - 1, 1);
-				return strip_cvr(vec_elem_type + vec_size);
 			}
-		}
+			
+			const auto template_param = type_name_str.substr(type_param_start + 1, type_param_end - type_param_start - 1);
+			if (cxx_rdecl->hasAttr<VectorCompatAttr>()) {
+				// floor vector type
+				const auto vec_size = type_name_str.substr(type_param_start - 1, 1);
+				return strip_cvr(template_param + vec_size);
+			} else if (type_name_str.find("floor_image::image") == 0) {
+				// floor image type
+				// NOTE: this handling is slightly different than the one further down below
+				const auto image_type = (COMPUTE_IMAGE_TYPE)strtoull(template_param.c_str(), nullptr, 10);
+				static constexpr const COMPUTE_IMAGE_TYPE opaque_image_mask {
+					COMPUTE_IMAGE_TYPE::__DIM_MASK |
+					COMPUTE_IMAGE_TYPE::FLAG_DEPTH |
+					COMPUTE_IMAGE_TYPE::FLAG_ARRAY |
+					COMPUTE_IMAGE_TYPE::FLAG_BUFFER |
+					COMPUTE_IMAGE_TYPE::FLAG_CUBE |
+					COMPUTE_IMAGE_TYPE::FLAG_MSAA
+				};
+				const auto masked_image_type = image_type & opaque_image_mask;
+				
+				std::string img_type_str;
+				switch (masked_image_type) {
+					case COMPUTE_IMAGE_TYPE::IMAGE_1D:
+						img_type_str = "texture1d";
+						break;
+					case COMPUTE_IMAGE_TYPE::IMAGE_1D_ARRAY:
+						img_type_str = "texture1d_array";
+						break;
+					case COMPUTE_IMAGE_TYPE::IMAGE_1D_BUFFER:
+						img_type_str = "texture1d_buffer";
+						break;
+					case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH:
+					case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_STENCIL:
+						img_type_str = "depth2d";
+						break;
+					case COMPUTE_IMAGE_TYPE::IMAGE_2D:
+						img_type_str = "texture2d";
+						break;
+					case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_ARRAY:
+						img_type_str = "depth2d_array";
+						break;
+					case COMPUTE_IMAGE_TYPE::IMAGE_2D_ARRAY:
+						img_type_str = "texture2d_array";
+						break;
+					case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_MSAA:
+						img_type_str = "depth2d_ms";
+						break;
+					case COMPUTE_IMAGE_TYPE::IMAGE_2D_MSAA:
+						img_type_str = "texture2d_ms";
+						break;
+					case COMPUTE_IMAGE_TYPE::IMAGE_3D:
+						img_type_str = "texture3d";
+						break;
+					case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_CUBE:
+						img_type_str = "depthcube";
+						break;
+					case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_CUBE_ARRAY:
+						img_type_str = "depthcube_array";
+						break;
+					case COMPUTE_IMAGE_TYPE::IMAGE_CUBE:
+						img_type_str = "texturecube";
+						break;
+					case COMPUTE_IMAGE_TYPE::IMAGE_CUBE_ARRAY:
+						img_type_str = "texturecube_array";
+						break;
+					case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_MSAA_ARRAY:
+						img_type_str = "depth2d_ms_array";
+						break;
+					case COMPUTE_IMAGE_TYPE::IMAGE_2D_MSAA_ARRAY:
+						img_type_str = "texture2d_ms_array";
+						break;
+					default:
+						break;
+				}
+				if (img_type_str.empty()) {
+					break;
+				}
+				
+				img_type_str += '<';
+				switch (image_type & COMPUTE_IMAGE_TYPE::__DATA_TYPE_MASK) {
+					case COMPUTE_IMAGE_TYPE::FLOAT:
+						img_type_str += "float";
+						break;
+					case COMPUTE_IMAGE_TYPE::INT:
+						img_type_str += "int";
+						break;
+					case COMPUTE_IMAGE_TYPE::UINT:
+						img_type_str += "uint";
+						break;
+					default:
+						break;
+				}
+				
+				img_type_str += ", ";
+				switch (image_type & COMPUTE_IMAGE_TYPE::__ACCESS_MASK) {
+					case COMPUTE_IMAGE_TYPE::READ_WRITE:
+						img_type_str += "read_write";
+						break;
+					case COMPUTE_IMAGE_TYPE::READ:
+						img_type_str += "sample";
+						break;
+					case COMPUTE_IMAGE_TYPE::WRITE:
+						img_type_str += "write";
+						break;
+					default:
+						break;
+				}
+				
+				img_type_str += '>';
+				return img_type_str;
+			} else if (type_name_str.find("std::array") == 0) {
+				auto arr_def = cxx_rdecl->getDefinition();
+				if (!arr_def || !arr_def->isCompleteDefinition()) {
+					break;
+				}
+				
+				auto arr_templ_decl = dyn_cast_or_null<ClassTemplateSpecializationDecl>(arr_def);
+				if (!arr_templ_decl) {
+					break;
+				}
+				
+				const auto& arr_templ_args = arr_templ_decl->getTemplateArgs();
+				if (arr_templ_args.size() != 2) {
+					break;
+				}
+				
+				const auto& arr_elem_type = arr_templ_args.get(0);
+				if (arr_elem_type.getKind() != TemplateArgument::Type) {
+					break;
+				}
+				const auto& arr_elem_count = arr_templ_args.get(1);
+				if (arr_elem_count.getKind() != TemplateArgument::Integral) {
+					break;
+				}
+				
+				return "array<" + make_type_name(arr_elem_type.getAsType()) + "," + std::to_string(arr_elem_count.getAsIntegral().getZExtValue()) + ">";
+			}
+		} while (false);
 		
 		std::string type_name = "";
 		if (type->isVectorType()) {
@@ -2486,21 +2628,27 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		const auto cxx_rdecl = clang_type->getAsCXXRecordDecl();
 		
 		//
-		const auto add_image_arg = [this, &Builder, &tex_idx, &arg_infos, &arg_idx, &parm](const clang::QualType& type,
-																						   const FloorImageFlagsAttr* flags_attr,
-																						   const FloorImageDataTypeAttr* data_type,
-																						   const std::string& name,
-																						   const uint32_t elem_count = 1) {
+		const auto add_image_arg = [this, &Builder, &parm](const clang::QualType& type,
+														   const FloorImageFlagsAttr* flags_attr,
+														   const FloorImageDataTypeAttr* data_type,
+														   const std::string& name,
+														   const bool is_top_level,
+														   uint32_t& arg_idx_at_level,
+														   uint32_t& tex_idx_at_level,
+														   const uint32_t elem_count = 1) -> SmallVector<llvm::Metadata*, 16>{
 			SmallVector<llvm::Metadata*, 16> arg_info;
 			
 			// #0: param index
-			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx_at_level)));
+			if (!is_top_level) {
+				++arg_idx_at_level;
+			}
 			// #1: storage type
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.texture"));
 			// #2/#3: location_index (note: separate for buffers and textures)
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.location_index"));
-			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(tex_idx)));
-			tex_idx += elem_count;
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(tex_idx_at_level)));
+			tex_idx_at_level += std::max(elem_count, 1u);
 			// #4: index count/range
 			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(elem_count)));
 			// #5: access type (sample = 0, read = 1 or write = 2)
@@ -2508,8 +2656,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			if (flags_attr && flags_attr->isWriteOnly()) {
 				arg_info.push_back(llvm::MDString::get(VMContext, "air.write"));
 			} else if (flags_attr && flags_attr->isReadWrite()) {
-				// TODO: this isn't really supported
-				arg_info.push_back(llvm::MDString::get(VMContext, "air.write"));
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.read_write"));
 			} else {
 				arg_info.push_back(llvm::MDString::get(VMContext, "air.sample"));
 			}
@@ -2524,7 +2671,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			const auto builtin_type = type->getAs<BuiltinType>();
 			if (!builtin_type) {
 				Error(parm->getSourceRange().getBegin(), StringRef("invalid image type (not a builtin type)!"));
-				return;
+				return {};
 			}
 			switch (builtin_type->getKind()) {
 				case BuiltinType::OCLImage1d:
@@ -2568,7 +2715,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 					break;
 				default:
 					Error(parm->getSourceRange().getBegin(), StringRef("invalid image type!"));
-					return;
+					return {};
 			}
 			
 			tex_type_name += "<";
@@ -2583,6 +2730,8 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			tex_type_name += ", ";
 			if (flags_attr && flags_attr->isReadOnly()) {
 				tex_type_name += "sample";
+			} else if (flags_attr && flags_attr->isReadWrite()) {
+				tex_type_name += "read_write";
 			} else {
 				tex_type_name += "write";
 			}
@@ -2597,7 +2746,8 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			// #8/#9: arg name
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
 			arg_info.push_back(llvm::MDString::get(VMContext, StringRef(name)));
-			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+			
+			return arg_info;
 		};
 		
 		//
@@ -2640,12 +2790,14 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		
 		// handle "air.struct_type_info" metadata
 		const std::function<SmallVector<llvm::Metadata*, 16>(const CXXRecordDecl&, const Decl&, const bool, const bool, uint32_t&, uint32_t&)> add_struct_type_info =
-		[this, &add_struct_type_info, &add_buffer_arg, &make_type_name, &add_indirect_constant, &Builder](const CXXRecordDecl& struct_rdecl,
-																										  const Decl& parent_decl,
-																										  const bool is_indirect, // specifies if we're within an indirect buffer
-																										  const bool indirect_buffer,
-																										  uint32_t& arg_idx_child,
-																										  uint32_t& buffer_idx_child) -> SmallVector<llvm::Metadata*, 16> {
+		[this, &add_struct_type_info, &add_buffer_arg, &make_type_name, &add_indirect_constant, &Builder,
+		 &add_image_arg](const CXXRecordDecl& struct_rdecl,
+						 const Decl& parent_decl,
+						 const bool is_indirect, // specifies if we're within an indirect buffer
+						 const bool indirect_buffer,
+						 uint32_t& arg_idx_child,
+						 // NOTE: buffer and texture location indices use the same space
+						 uint32_t& buffer_or_tex_idx_child) -> SmallVector<llvm::Metadata*, 16> {
 			// TODO: this is not ideal and doesn't properly handle unions
 			const auto fields = get_aggregate_fields(&struct_rdecl);
 			bool ignore = false;
@@ -2675,7 +2827,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				auto field_pointee_type = field_type->getPointeeType();
 				
 				bool is_inline_struct = false;
-				const auto buffer_idx_offset = buffer_idx_child;
+				const auto buffer_idx_offset = buffer_or_tex_idx_child;
 				if (indirect_buffer || is_indirect) {
 					if (!field_type->isPointerType() &&
 						!field_type->isReferenceType() &&
@@ -2698,7 +2850,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 							// next param
 							++arg_idx_child;
 							// adjust buffer index at this level
-							buffer_idx_child += std::max(array_size, 1u) * struct_buf_idx_child;
+							buffer_or_tex_idx_child += std::max(array_size, 1u) * struct_buf_idx_child;
 						}
 					}
 				}
@@ -2723,30 +2875,65 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 						struct_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(buffer_idx_offset)));
 					} else if (field_type->isPointerType() || field_type->isReferenceType()) {
 						// buffer field
-						auto field_arg_info = add_buffer_arg(field_type, **field, false, true, arg_idx_child, buffer_idx_child, array_size);
+						auto field_arg_info = add_buffer_arg(field_type, **field, false, false /* this is a pointer and not inline */,
+															 arg_idx_child, buffer_or_tex_idx_child, array_size);
 						if (field_arg_info.empty()) {
 							return {};
 						}
 						struct_info.push_back(llvm::MDNode::get(VMContext, field_arg_info));
 					} else if (field_type->isImageType()) {
-						// TODO: support this
-						Error(struct_rdecl.getSourceRange().getBegin(), StringRef("images are not yet supported in indirect/argument buffers"));
-						return {};
+						auto field_arg_info = add_image_arg(field_type, field->getAttr<FloorImageFlagsAttr>(),
+															field->getAttr<FloorImageDataTypeAttr>(), field->getName().str(),
+															false, arg_idx_child, buffer_or_tex_idx_child);
+						if (field_arg_info.empty()) {
+							return {};
+						}
+						struct_info.push_back(llvm::MDNode::get(VMContext, field_arg_info));
 					} else if (field_type->isArrayImageType(true)) {
-						// TODO: support this
-						Error(struct_rdecl.getSourceRange().getBegin(), StringRef("image arrays are not yet supported in indirect/argument buffers"));
-						return {};
+						const auto array_image_info = get_array_image_info(field_type->getAsCXXRecordDecl(), Context);
+						if (array_image_info) {
+							auto arg_info = add_image_arg(array_image_info->image_type,
+														  array_image_info->flags,
+														  array_image_info->data_type,
+														  field->getName().str(),
+														  false, arg_idx_child, buffer_or_tex_idx_child,
+														  array_image_info->element_count);
+							if (arg_info.empty()) {
+								return {};
+							}
+							struct_info.push_back(llvm::MDNode::get(VMContext, arg_info));
+						} else {
+							Error(field->getSourceRange().getBegin(), StringRef("invalid image array in indirect/argument buffer!"));
+							return {};
+						}
 					} else if (field_type->isAggregateImageType()) {
-						// TODO: support this
-						Error(struct_rdecl.getSourceRange().getBegin(), StringRef("aggregate images are not yet supported in indirect/argument buffers"));
-						return {};
+						const auto agg_images = get_aggregate_image_fields(field_type->getAsCXXRecordDecl());
+						const std::string base_name = field->getName().str() + ".";
+						unsigned int img_idx = 0;
+						for (const auto& img : agg_images) {
+							auto arg_info = add_image_arg(img->getType(),
+														  img->getAttr<FloorImageFlagsAttr>(),
+														  img->getAttr<FloorImageDataTypeAttr>(),
+														  base_name + std::to_string(img_idx),
+														  false, arg_idx_child, buffer_or_tex_idx_child);
+							if (arg_info.empty()) {
+								return {};
+							}
+							struct_info.push_back(llvm::MDNode::get(VMContext, arg_info));
+							++img_idx;
+							
+							// next llvm arg
+							++arg_idx_child;
+						}
+						// fix up llvm arg count (will inc again after this)
+						--arg_idx_child;
 					} else if (parent_decl.hasAttr<GraphicsStageInputAttr>()) {
 						// hard error
 						Error(struct_rdecl.getSourceRange().getBegin(), StringRef("stage input is not supported in indirect/argument buffers"));
 						return {};
 					} else {
 						// value / "indirect constant"
-						auto field_arg_info = add_indirect_constant(field_type, **field, false, arg_idx_child, buffer_idx_child, array_size);
+						auto field_arg_info = add_indirect_constant(field_type, **field, false, arg_idx_child, buffer_or_tex_idx_child, array_size);
 						if (field_arg_info.empty()) {
 							return {};
 						}
@@ -2804,8 +2991,9 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			
 			// #6/#7: struct info
 			if (const auto pointee_rdecl = clang_pointee_type->getAsCXXRecordDecl()) {
-				uint32_t arg_idx_child = 0, buffer_idx_child = 0; // for indirect/arg buffers
-				auto struct_type_info = add_struct_type_info(*pointee_rdecl, decl, is_indirect, indirect_buffer, arg_idx_child, buffer_idx_child);
+				uint32_t arg_idx_child = 0, buffer_or_tex_idx_child = 0; // for indirect/arg buffers
+				auto struct_type_info = add_struct_type_info(*pointee_rdecl, decl, is_indirect, indirect_buffer,
+															 arg_idx_child, buffer_or_tex_idx_child);
 				if (!struct_type_info.empty()) {
 					arg_info.push_back(llvm::MDString::get(VMContext, "air.struct_type_info"));
 					arg_info.push_back(llvm::MDNode::get(VMContext, struct_type_info));
@@ -2839,16 +3027,26 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			}
 			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
 		} else if (clang_type->isImageType()) { // image
-			add_image_arg(clang_type, parm->getAttr<FloorImageFlagsAttr>(),
-						  parm->getAttr<FloorImageDataTypeAttr>(), parm->getName().str());
+			auto arg_info = add_image_arg(clang_type, parm->getAttr<FloorImageFlagsAttr>(),
+										  parm->getAttr<FloorImageDataTypeAttr>(), parm->getName().str(),
+										  true, arg_idx, tex_idx);
+			if (arg_info.empty()) {
+				return;
+			}
+			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
 		} else if (clang_type->isArrayImageType(true)) { // image array
 			const auto array_image_info = get_array_image_info(cxx_rdecl, Context);
 			if (array_image_info) {
-				add_image_arg(array_image_info->image_type,
-							  array_image_info->flags,
-							  array_image_info->data_type,
-							  parm->getName().str(),
-							  array_image_info->element_count);
+				auto arg_info = add_image_arg(array_image_info->image_type,
+											  array_image_info->flags,
+											  array_image_info->data_type,
+											  parm->getName().str(),
+											  true, arg_idx, tex_idx,
+											  array_image_info->element_count);
+				if (arg_info.empty()) {
+					return;
+				}
+				arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
 			} else {
 				Error(parm->getSourceRange().getBegin(), StringRef("invalid image array!"));
 				return;
@@ -2859,10 +3057,15 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			const std::string base_name = parm->getName().str() + ".";
 			unsigned int img_idx = 0;
 			for (const auto& img : agg_images) {
-				add_image_arg(img->getType(),
-							  img->getAttr<FloorImageFlagsAttr>(),
-							  img->getAttr<FloorImageDataTypeAttr>(),
-							  base_name + std::to_string(img_idx));
+				auto arg_info = add_image_arg(img->getType(),
+											  img->getAttr<FloorImageFlagsAttr>(),
+											  img->getAttr<FloorImageDataTypeAttr>(),
+											  base_name + std::to_string(img_idx),
+											  true, arg_idx, tex_idx);
+				if (arg_info.empty()) {
+					return;
+				}
+				arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
 				++img_idx;
 				
 				// next llvm arg
@@ -3452,6 +3655,85 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 			}
 			return arg_info;
 		};
+		struct aggregate_image_ret_t {
+			uint64_t arg_info;
+			uint32_t arg_index_bias;
+		};
+		const auto add_aggregate_image_arg = [&CGM, &add_image_arg](const CXXRecordDecl* cxx_rdecl,
+																	const bool allow_multi_image) -> std::optional<aggregate_image_ret_t> {
+			const auto agg_images = get_aggregate_image_fields(cxx_rdecl);
+			
+			// image count must either be 1 (for single read or write images) or 2 (one read, one write image)
+			const auto field_count = agg_images.size();
+			if (field_count == 0) {
+				CGM.Error(cxx_rdecl->getSourceRange().getBegin(),
+						  StringRef("no images in aggregate-image (min: 1)"));
+				return {};
+			} else if (field_count >= 2 && !allow_multi_image) {
+				CGM.Error(cxx_rdecl->getSourceRange().getBegin(),
+						  StringRef("aggregate-image in this instance is limited to a single image (e.g. read-only or write-only for backends with limited read-write support)"));
+				return {};
+			} else if (field_count > 2) {
+				CGM.Error(cxx_rdecl->getSourceRange().getBegin(),
+						  StringRef("too many images in aggregate-image (max: 2)"));
+				return {};
+			}
+			
+			// sanity check that all field types are actually images, have proper access attributes and image types match
+			// (should probably put this somewhere else, since it is sema-checking, but then I'd need to duplicate code)
+			FLOOR_ARG_INFO floor_img_type = FLOOR_ARG_INFO::NONE;
+			uint64_t floor_img_access = 0;
+			for (const auto& img : agg_images) {
+				const auto access_attr = img->getAttr<FloorImageFlagsAttr>();
+				if (access_attr == nullptr) {
+					CGM.Error(img->getSourceRange().getBegin(),
+							  StringRef("image type in an aggregate-image must have an access qualifier"));
+					return {};
+				}
+				floor_img_access |= uint64_t(get_image_access(access_attr));
+				
+				// first field initializes this
+				auto img_type = img->getType();
+				if (img_type->isArrayImageType(false)) {
+					// get element image type if this is an array
+					if (img_type->isPointerType()) {
+						img_type = img_type->getPointeeType();
+					}
+					img_type = img_type->getAsArrayTypeUnsafe()->getElementType();
+				}
+				if (floor_img_type == FLOOR_ARG_INFO::NONE) {
+					floor_img_type = img_type_to_floor_type(img_type.getTypePtr());
+				} else {
+					// second field must have the same type!
+					if (floor_img_type != img_type_to_floor_type(img_type.getTypePtr())) {
+						CGM.Error(img->getSourceRange().getBegin(),
+								  StringRef("second image in aggregate-image does not have the same type as the first"));
+						return {};
+					}
+				}
+			}
+			
+			// if the aggregate has two image objects, one must be read, one must be write -> read/write
+			if (field_count == 2 && floor_img_access != uint64_t(FLOOR_ARG_INFO::IMG_ACCESS_READ_WRITE)) {
+				CGM.Error(cxx_rdecl->getSourceRange().getBegin(),
+						  StringRef("aggregate-image has 2 image fields, but joint access is not read-write"));
+				return {};
+			}
+			
+			// everything works out, add this as a single kernel argument (floor backends will handle r/w images as necessary)
+			// NOTE: for aggregate images that contain an array of images we still only count this as one image,
+			//       since this is behind-the-scenes stuff and not part of the user interface!
+			auto arg_info = add_image_arg(floor_img_type, (FLOOR_ARG_INFO)floor_img_access);
+			
+			// 1 clang aggregate-image == 2 llvm image types -> inc index once more
+			uint32_t arg_index_bias = 0;
+			if (field_count == 2) {
+				arg_index_bias = 1;
+			}
+			assert(allow_multi_image || (!allow_multi_image && arg_index_bias == 0));
+			
+			return aggregate_image_ret_t { arg_info, arg_index_bias };
+		};
 		// anything that isn't a pointer or special type
 		const auto add_normal_arg = [&compute_type_size](llvm::Type* llvm_type,
 														 const clang::QualType& clang_type,
@@ -3469,12 +3751,13 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 		};
 		//
 		const std::function<uint64_t(const clang::QualType&, const NamedDecl&, const bool, const bool, const bool, const uint32_t)>
-		add_buffer_arg = [&CGM, &vulkan_iub_count, &compute_type_size, &arg_buf_info, &Fn, &add_buffer_arg, &add_normal_arg](const clang::QualType& type,
-																															 const NamedDecl& decl,
-																															 const bool is_top_level,
-																															 const bool is_indirect, // specifies if we're within an indirect buffer
-																															 const bool has_arg_buffer_attr,
-																															 const uint32_t arg_idx) -> uint64_t /* arg info */ {
+		add_buffer_arg = [this, &CGM, &vulkan_iub_count, &compute_type_size, &arg_buf_info, &Fn, /*&add_buffer_arg,*/ &add_normal_arg,
+						  &add_image_arg, &add_aggregate_image_arg](const clang::QualType& type,
+																	const NamedDecl& decl,
+																	const bool is_top_level,
+																	const bool is_indirect, // specifies if we're within an indirect buffer
+																	const bool has_arg_buffer_attr,
+																	const uint32_t arg_idx) -> uint64_t /* arg info */ {
 			const auto clang_pointee_type = type->getPointeeType();
 			const auto llvm_type = CGM.getTypes().ConvertTypeForMem(type);
 			const auto llvm_pointee_type = llvm_type->getPointerElementType();
@@ -3557,21 +3840,33 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 							if (indirect_buffer || is_indirect) {
 								if (field_type->isPointerType() || field_type->isReferenceType()) {
 									// buffer field
-									// TODO: handle recursive arg buffers
-									const auto field_arg_info = add_buffer_arg(field_type, **field, false, true, false, field_arg_idx);
-									this_arg_buf_info << field_arg_info << ",";
+									// TODO: handle recursive arg buffers -> for now, ignore this and add it as a 8-byte sized normal arg
+									//const auto field_arg_info = add_buffer_arg(field_type, **field, false, true, false, field_arg_idx);
+									//this_arg_buf_info << field_arg_info << ",";
+									this_arg_buf_info << "8,";
 								} else if (field_type->isImageType()) {
-									// TODO: support this
-									CGM.Error(decl.getSourceRange().getBegin(), StringRef("images are not yet supported in indirect/argument buffers"));
-									return {};
+									const auto field_arg_info = add_image_arg(img_type_to_floor_type(field_type.getTypePtr()),
+																			  get_image_access(decl.getAttr<FloorImageFlagsAttr>()));
+									this_arg_buf_info << field_arg_info << ",";
 								} else if (field_type->isArrayImageType(true)) {
-									// TODO: support this
-									CGM.Error(decl.getSourceRange().getBegin(), StringRef("image arrays are not yet supported in indirect/argument buffers"));
-									return {};
+									const auto array_image_info = get_array_image_info(field_type->getAsCXXRecordDecl(), getContext());
+									if (array_image_info) {
+										const auto field_arg_info = add_image_arg(img_type_to_floor_type(array_image_info->image_type.getTypePtr()),
+																				  get_image_access(array_image_info->flags),
+																				  array_image_info->element_count);
+										this_arg_buf_info << field_arg_info << ",";
+									} else {
+										CGM.Error(decl.getSourceRange().getBegin(), StringRef("invalid image array in indirect/argument buffer!"));
+										return {};
+									}
 								} else if (field_type->isAggregateImageType()) {
-									// TODO: support this
-									CGM.Error(decl.getSourceRange().getBegin(), StringRef("aggregate images are not yet supported in indirect/argument buffers"));
-									return {};
+									auto agg_img_ret = add_aggregate_image_arg(field_type->getAsCXXRecordDecl(),
+																			   false /* must be read-only or write-only */);
+									if (!agg_img_ret) {
+										return {}; // error already printed
+									}
+									assert(agg_img_ret->arg_index_bias == 0); // this is the case when only have read-only or write-only
+									this_arg_buf_info << agg_img_ret->arg_info << ",";
 								} else if (decl.hasAttr<GraphicsStageInputAttr>()) {
 									// hard error
 									CGM.Error(decl.getSourceRange().getBegin(), StringRef("stage input is not supported in indirect/argument buffers"));
@@ -3618,71 +3913,12 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 			CGM.Error(parm->getSourceRange().getBegin(), StringRef("C array of images not supported yet"));
 			return;
 		} else if (clang_type->isAggregateImageType()) { // aggregate of image types (used with OpenCL/Metal/Vulkan)
-			const auto agg_images = get_aggregate_image_fields(cxx_rdecl);
-			
-			// image count must either be 1 (for single read or write images) or 2 (one read, one write image)
-			const auto field_count = agg_images.size();
-			if (field_count == 0) {
-				CGM.Error(cxx_rdecl->getSourceRange().getBegin(),
-						  StringRef("no images in aggregate-image (min: 1)"));
-				return;
-			} else if (field_count > 2) {
-				CGM.Error(cxx_rdecl->getSourceRange().getBegin(),
-						  StringRef("too many images in aggregate-image (max: 2)"));
-				return;
+			auto agg_img_ret = add_aggregate_image_arg(cxx_rdecl, true /* allow multi-image */);
+			if (!agg_img_ret) {
+				return; // error already printed
 			}
-			
-			// sanity check that all field types are actually images, have proper access attributes and image types match
-			// (should probably put this somewhere else, since it is sema-checking, but then I'd need to duplicate code)
-			FLOOR_ARG_INFO floor_img_type = FLOOR_ARG_INFO::NONE;
-			uint64_t floor_img_access = 0;
-			for (const auto& img : agg_images) {
-				const auto access_attr = img->getAttr<FloorImageFlagsAttr>();
-				if (access_attr == nullptr) {
-					CGM.Error(img->getSourceRange().getBegin(),
-							  StringRef("image type in an aggregate-image must have an access qualifier"));
-					return;
-				}
-				floor_img_access |= uint64_t(get_image_access(access_attr));
-				
-				// first field initializes this
-				auto img_type = img->getType();
-				if (img_type->isArrayImageType(false)) {
-					// get element image type if this is an array
-					if (img_type->isPointerType()) {
-						img_type = img_type->getPointeeType();
-					}
-					img_type = img_type->getAsArrayTypeUnsafe()->getElementType();
-				}
-				if (floor_img_type == FLOOR_ARG_INFO::NONE) {
-					floor_img_type = img_type_to_floor_type(img_type.getTypePtr());
-				} else {
-					// second field must have the same type!
-					if (floor_img_type != img_type_to_floor_type(img_type.getTypePtr())) {
-						CGM.Error(img->getSourceRange().getBegin(),
-								  StringRef("second image in aggregate-image does not have the same type as the first"));
-						return;
-					}
-				}
-			}
-			
-			// if the aggregate has two image objects, one must be read, one must be write -> read/write
-			if (field_count == 2 && floor_img_access != uint64_t(FLOOR_ARG_INFO::IMG_ACCESS_READ_WRITE)) {
-				CGM.Error(cxx_rdecl->getSourceRange().getBegin(),
-						  StringRef("aggregate-image has 2 image fields, but joint access is not read-write"));
-				return;
-			}
-			
-			// everything works out, add this as a single kernel argument (floor backends will handle r/w images as necessary)
-			// NOTE: for aggregate images that contain an array of images we still only count this as one image,
-			//       since this is behind-the-scenes stuff and not part of the user interface!
-			const auto arg_info = add_image_arg(floor_img_type, (FLOOR_ARG_INFO)floor_img_access);
-			info << arg_info << ",";
-			
-			// 1 clang aggregate-image == 2 llvm image types -> inc index once more
-			if (field_count == 2) {
-				++arg_idx;
-			}
+			info << agg_img_ret->arg_info << ",";
+			arg_idx += agg_img_ret->arg_index_bias;
 		} else if (getLangOpts().CUDA || getLangOpts().FloorHostCompute) { // handle non-pointer parameters
 			// is this an aggregate that is expanded into multiple llvm arguments?
 			if (cxx_rdecl &&
