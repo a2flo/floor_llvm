@@ -3452,6 +3452,8 @@ enum CXCallingConv {
   CXCallingConv_FloorKernel = 41,
   CXCallingConv_FloorVertex = 42,
   CXCallingConv_FloorFragment = 43,
+  CXCallingConv_FloorTessControl = 44,
+  CXCallingConv_FloorTessEval = 45,
 
   CXCallingConv_Invalid = 100,
   CXCallingConv_Unexposed = 200

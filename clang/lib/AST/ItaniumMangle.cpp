@@ -3072,6 +3072,9 @@ void CXXNameMangler::mangleType(const BuiltinType *T) {
   case BuiltinType::OCLReserveID:
     Out << "13ocl_reserveid";
     break;
+  case BuiltinType::OCLPatchControlPoint:
+    Out << "24__patch_control_point_t";
+    break;
 #define EXT_OPAQUE_TYPE(ExtType, Id, Ext) \
   case BuiltinType::Id: \
     type_name = "ocl_" #ExtType; \
@@ -3127,6 +3130,8 @@ StringRef CXXNameMangler::getCallingConvQualifierName(CallingConv CC) {
   case CC_FloorKernel:
   case CC_FloorVertex:
   case CC_FloorFragment:
+  case CC_FloorTessControl:
+  case CC_FloorTessEval:
   case CC_PreserveMost:
   case CC_PreserveAll:
     // FIXME: we should be mangling all of the above.
@@ -6466,8 +6471,10 @@ void ItaniumMangleContextImpl::mangleMetalFieldName(const FieldDecl *D, const CX
 void ItaniumMangleContextImpl::mangleMetalGeneric(const std::string& name, QualType Ty,
 												  const CXXRecordDecl* RD, raw_ostream &Out) {
 	CXXNameMangler Mangler(*this, Out, nullptr);
-	Out << name.size();
-	Out << name;
+	if (!name.empty()) {
+		Out << name.size();
+		Out << name;
+	}
 	Mangler.mangleType(Ty);
 }
 

@@ -10036,7 +10036,8 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
   MarkUnusedFileScopedDecl(NewFD);
 
 
-  if (getLangOpts().OpenCL && NewFD->hasAttr<ComputeKernelAttr>()) {
+  if (getLangOpts().OpenCL && (NewFD->hasAttr<ComputeKernelAttr>() ||
+                               NewFD->hasAttr<GraphicsTessellationControlShaderAttr>())) {
     // OpenCL v1.2, s6.9 -- Kernels can only have return type void.
     if (!NewFD->getReturnType()->isVoidType()) {
       SourceRange RTRange = NewFD->getReturnTypeSourceRange();
@@ -10049,8 +10050,10 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
 
   if (NewFD->hasAttr<ComputeKernelAttr>() ||
       NewFD->hasAttr<GraphicsVertexShaderAttr>() ||
-      NewFD->hasAttr<GraphicsFragmentShaderAttr>()) {
-    // static is invalid for kernel/vertex/fragment functions.
+      NewFD->hasAttr<GraphicsFragmentShaderAttr>() ||
+      NewFD->hasAttr<GraphicsTessellationControlShaderAttr>() ||
+      NewFD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
+    // static is invalid for kernel/shader functions.
     if (SC == SC_Static) {
       Diag(D.getIdentifierLoc(), diag::err_static_kernel);
       D.setInvalidType();
@@ -11162,9 +11165,10 @@ bool Sema::CheckFunctionDeclaration(Scope *S, FunctionDecl *NewFD,
     // compatible, and if it does, warn the user.
     // But, issue any diagnostic on the first declaration only.
     if (Previous.empty() && NewFD->isExternC() &&
-        // ignore this for vertex/fragment shaders
+        // ignore this for vertex/fragment/tess-eval shaders
         !NewFD->hasAttr<GraphicsVertexShaderAttr>() &&
-        !NewFD->hasAttr<GraphicsFragmentShaderAttr>()) {
+        !NewFD->hasAttr<GraphicsFragmentShaderAttr>() &&
+        !NewFD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
       QualType R = NewFD->getReturnType();
       if (R->isIncompleteType() && !R->isVoidType())
         Diag(NewFD->getLocation(), diag::warn_return_value_udt_incomplete)
@@ -14189,10 +14193,12 @@ ShouldWarnAboutMissingPrototype(const FunctionDecl *FD,
   if (FD->isFunctionTemplateSpecialization())
     return false;
 
-  // Don't warn for compute kernels, or vertex/fragment shaders.
+  // Don't warn for compute kernels or shaders.
   if (FD->hasAttr<ComputeKernelAttr>() ||
       FD->hasAttr<GraphicsVertexShaderAttr>() ||
-      FD->hasAttr<GraphicsFragmentShaderAttr>())
+      FD->hasAttr<GraphicsFragmentShaderAttr>() ||
+      FD->hasAttr<GraphicsTessellationControlShaderAttr>() ||
+      FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>())
     return false;
 
   // Don't warn on explicitly deleted functions.
@@ -14450,7 +14456,9 @@ Decl *Sema::ActOnStartOfFunctionDef(Scope *FnBodyScope, Decl *D,
   // and (possibly) structure need to be known later on
   if(FD->hasAttr<ComputeKernelAttr>() ||
      FD->hasAttr<GraphicsVertexShaderAttr>() ||
-     FD->hasAttr<GraphicsFragmentShaderAttr>()) {
+     FD->hasAttr<GraphicsFragmentShaderAttr>() ||
+     FD->hasAttr<GraphicsTessellationControlShaderAttr>() ||
+     FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
     for (const auto& Param : FD->parameters()) {
       const auto param_type = Param->getType();
       const CXXRecordDecl* cxx_rdecl = nullptr;

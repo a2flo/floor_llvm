@@ -1996,6 +1996,30 @@ Sema::CheckBuiltinFunctionCall(FunctionDecl *FDecl, unsigned BuiltinID,
   case Builtin::BI__builtin_matrix_column_major_store:
     return SemaBuiltinMatrixColumnMajorStore(TheCall, TheCallResult);
 
+  case Builtin::BI__libfloor_access_patch_control_point:
+    if (checkArgCount(*this, TheCall, 3))
+      return ExprError();
+
+    if (!TheCall->getArg(0)->getType()->isIntegerType()) {
+      auto err_diagID = Diags.getCustomDiagID(DiagnosticsEngine::Fatal, "first argument must be an integer");
+      Diag(TheCall->getArg(0)->getBeginLoc(), err_diagID);
+      return ExprError();
+    }
+    if (!TheCall->getArg(1)->getType()->isPatchControlPointT()) {
+      auto err_diagID = Diags.getCustomDiagID(DiagnosticsEngine::Fatal, "second argument must be a patch control point");
+      Diag(TheCall->getArg(1)->getBeginLoc(), err_diagID);
+      return ExprError();
+    }
+    if (!TheCall->getArg(2)->getType()->isStructureOrClassType()) {
+      auto err_diagID = Diags.getCustomDiagID(DiagnosticsEngine::Fatal, "third argument must be a struct or class type");
+      Diag(TheCall->getArg(2)->getBeginLoc(), err_diagID);
+      return ExprError();
+    }
+
+    // third arg specifies the return type
+    TheCall->setType(TheCall->getArg(2)->getType());
+    break;
+
   case Builtin::BI__builtin_get_device_side_mangled_name: {
     auto Check = [](CallExpr *TheCall) {
       if (TheCall->getNumArgs() != 1)

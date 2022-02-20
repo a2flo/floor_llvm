@@ -603,6 +603,8 @@ lltok::Kind LLLexer::LexIdentifier() {
   KEYWORD(floor_kernel);
   KEYWORD(floor_vertex);
   KEYWORD(floor_fragment);
+  KEYWORD(floor_tessellation_control);
+  KEYWORD(floor_tessellation_evaluation);
   KEYWORD(floor_func);
   KEYWORD(intel_ocl_bicc);
   KEYWORD(x86_64_sysvcc);

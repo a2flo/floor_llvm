@@ -982,6 +982,12 @@ void TypePrinter::printFunctionAfter(const FunctionType::ExtInfo &Info,
     case CC_FloorFragment:
       OS << "floor_fragment";
       break;
+    case CC_FloorTessControl:
+      OS << "floor_tessellation_control";
+      break;
+    case CC_FloorTessEval:
+      OS << "floor_tessellation_evaluation";
+      break;
     case CC_Swift:
       OS << " __attribute__((swiftcall))";
       break;
@@ -1727,6 +1733,8 @@ void TypePrinter::printAttributedAfter(const AttributedType *T,
   case attr::ComputeKernel: OS << "floor_kernel"; break;
   case attr::GraphicsFragmentShader: OS << "floor_fragment"; break;
   case attr::GraphicsVertexShader: OS << "floor_vertex"; break;
+  case attr::GraphicsTessellationControlShader: OS << "floor_tessellation_control"; break;
+  case attr::GraphicsTessellationEvaluationShader: OS << "floor_tessellation_evaluation"; break;
   case attr::FloorArgBuffer: OS << "floor_arg_buffer"; break;
   case attr::Pcs: {
     OS << "pcs(";

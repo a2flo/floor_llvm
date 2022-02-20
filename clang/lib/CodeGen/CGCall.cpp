@@ -65,6 +65,8 @@ unsigned CodeGenTypes::ClangCallConvToLLVMCallConv(CallingConv CC) {
   case CC_FloorKernel: return llvm::CallingConv::FLOOR_KERNEL;
   case CC_FloorVertex: return llvm::CallingConv::FLOOR_VERTEX;
   case CC_FloorFragment: return llvm::CallingConv::FLOOR_FRAGMENT;
+  case CC_FloorTessControl: return llvm::CallingConv::FLOOR_TESS_CONTROL;
+  case CC_FloorTessEval: return llvm::CallingConv::FLOOR_TESS_EVAL;
   case CC_PreserveMost: return llvm::CallingConv::PreserveMost;
   case CC_PreserveAll: return llvm::CallingConv::PreserveAll;
   case CC_Swift: return llvm::CallingConv::Swift;
@@ -245,6 +247,12 @@ static CallingConv getCallingConventionForDecl(const ObjCMethodDecl *D,
 
   if (D->hasAttr<GraphicsFragmentShaderAttr>())
     return CC_FloorFragment;
+
+  if (D->hasAttr<GraphicsTessellationControlShaderAttr>())
+    return CC_FloorTessControl;
+
+  if (D->hasAttr<GraphicsTessellationEvaluationShaderAttr>())
+    return CC_FloorTessEval;
 
   if (D->hasAttr<ComputeKernelAttr>())
     return CC_FloorKernel;
@@ -457,7 +465,7 @@ uint32_t CodeGenTypes::getMetalVulkanImplicitArgCount(const FunctionDecl* FD) co
 
   if (LangOpts.Metal) {
     const uint32_t printf_arg = (CodeGenOpts.MetalSoftPrintf > 0 ? 1 : 0);
-    if (FD->hasAttr<ComputeKernelAttr>()) {
+    if (FD->hasAttr<ComputeKernelAttr>() || FD->hasAttr<GraphicsTessellationControlShaderAttr>()) {
       if (CGM.getTriple().getOS() != llvm::Triple::OSType::MacOSX) {
         return 6 + printf_arg;
       } else {
@@ -467,6 +475,8 @@ uint32_t CodeGenTypes::getMetalVulkanImplicitArgCount(const FunctionDecl* FD) co
       return 2 + printf_arg;
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
       return 1 + printf_arg + (CodeGenOpts.GraphicsPrimitiveID ? 1 : 0) + (CodeGenOpts.GraphicsBarycentricCoord ? 1 : 0);
+    } else if (FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
+      return 3 + printf_arg;
     }
   } else if(LangOpts.Vulkan) {
     const uint32_t printf_arg = (CodeGenOpts.VulkanSoftPrintf > 0 ? 1 : 0);
@@ -476,6 +486,10 @@ uint32_t CodeGenTypes::getMetalVulkanImplicitArgCount(const FunctionDecl* FD) co
       return 3 + printf_arg;
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
       return 3 + printf_arg + (CodeGenOpts.GraphicsPrimitiveID ? 1 : 0) + (CodeGenOpts.GraphicsBarycentricCoord ? 1 : 0);
+    } else if (FD->hasAttr<GraphicsTessellationControlShaderAttr>()) {
+      return 0 + printf_arg; // TODO: !
+    } else if (FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
+      return 0 + printf_arg; // TODO: !
     }
   }
 
@@ -495,7 +509,9 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
 
   if (!FD->hasAttr<ComputeKernelAttr>() &&
       !FD->hasAttr<GraphicsVertexShaderAttr>() &&
-      !FD->hasAttr<GraphicsFragmentShaderAttr>()) {
+      !FD->hasAttr<GraphicsFragmentShaderAttr>() &&
+      !FD->hasAttr<GraphicsTessellationControlShaderAttr>() &&
+      !FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
     return; // no entry function/point
   }
 
@@ -537,7 +553,7 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       add_arg(Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.IntTy, LangAS::opencl_global)), "__metal__printf_buffer__");
     }
 
-    if (FD->hasAttr<ComputeKernelAttr>()) {
+    if (FD->hasAttr<ComputeKernelAttr>() || FD->hasAttr<GraphicsTessellationControlShaderAttr>()) {
       // id types, all int3:
       auto int3_type = Ctx.getExtVectorType(Ctx.IntTy, 3);
       add_arg(int3_type, "__metal__global_id__");
@@ -570,6 +586,13 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       // fixed: only point coord for now:
       auto float2_type = Ctx.getExtVectorType(Ctx.FloatTy, 2);
       add_arg(float2_type, "__metal__point_coord__");
+    } else if (FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
+      // patch id, instance id and position-in-patch:
+      add_arg(Ctx.IntTy, "__metal__patch_id__");
+      add_arg(Ctx.IntTy, "__metal__instance_id__");
+      // TODO: figure out a way to support both triangles and quads! -> for now, triangle only
+      auto float3_type = Ctx.getExtVectorType(Ctx.FloatTy, 3);
+      add_arg(float3_type, "__metal__position_in_patch__");
     }
   } else if(LangOpts.Vulkan) {
     if (CodeGenOpts.VulkanSoftPrintf > 0) {
@@ -608,6 +631,10 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       auto float4_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.getExtVectorType(Ctx.FloatTy, 4), LangAS::vulkan_input));
       add_arg(float4_ptr_type, "vulkan.frag_coord");
       add_arg(int_ptr_type, "vulkan.view_index");
+    } else if (FD->hasAttr<GraphicsTessellationControlShaderAttr>()) {
+      // TODO: !
+    } else if (FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
+      // TODO: !
     }
   }
 
@@ -1112,11 +1139,11 @@ struct FloorVectorCompatExpansion : TypeExpansion {
 struct FloorAggregateExpansion : TypeExpansion {
   SmallVector<const CXXBaseSpecifier *, 1> bases;
   SmallVector<const FieldDecl *, 1> field_decls;
-  std::vector<CodeGenTypes::aggregate_scalar_entry> fields;
+  std::vector<ASTContext::aggregate_scalar_entry> fields;
 
   FloorAggregateExpansion(SmallVector<const CXXBaseSpecifier *, 1> &&bases_,
                           SmallVector<const FieldDecl *, 1> &&field_decls_,
-                          std::vector<CodeGenTypes::aggregate_scalar_entry> &&fields_)
+                          std::vector<ASTContext::aggregate_scalar_entry> &&fields_)
       : TypeExpansion(TEK_FloorAggregate), bases(bases_), field_decls(field_decls_), fields(fields_) {}
   static bool classof(const TypeExpansion *TE) {
     return TE->Kind == TEK_FloorAggregate;
@@ -1141,26 +1168,34 @@ getTypeExpansion(QualType Ty, const ASTContext &Context,
   const RecordType *RT = Ty->getAs<RecordType>();
   const CXXRecordDecl* cxx_rdecl = (RT != nullptr ? RT->getAsCXXRecordDecl() : nullptr);
   if (cxx_rdecl) {
-    // libfloor vector compat expansion (metal/vulkan vertex/fragment shader only, or vulkan compute shader)
+    // libfloor vector compat expansion (Metal/Vulkan shader only, or vulkan compute shader)
     if (cxx_rdecl->hasAttr<VectorCompatAttr>() &&
         ((Context.getLangOpts().Metal && (CC == CallingConv::CC_FloorVertex ||
-                                          CC == CallingConv::CC_FloorFragment)) ||
+                                          CC == CallingConv::CC_FloorFragment ||
+                                          CC == CallingConv::CC_FloorTessControl ||
+                                          CC == CallingConv::CC_FloorTessEval)) ||
          (Context.getLangOpts().Vulkan && (CC == CallingConv::CC_FloorKernel ||
                                            CC == CallingConv::CC_FloorVertex ||
-                                           CC == CallingConv::CC_FloorFragment)))) {
-      const auto vec_type = CGT.get_compat_vector_type(cxx_rdecl);
+                                           CC == CallingConv::CC_FloorFragment ||
+                                           CC == CallingConv::CC_FloorTessControl ||
+                                           CC == CallingConv::CC_FloorTessEval)))) {
+      const auto vec_type = Context.get_compat_vector_type(cxx_rdecl);
       return std::make_unique<FloorVectorCompatExpansion>(Ty, vec_type);
     }
     // libfloor aggregate expansion:
     // * any aggregate image type
-    // * any aggregate if calling a metal vertex/fragment shader function
+    // * any aggregate if calling a Metal shader function
     // similar to (non-union) record expansion below, but also stores some additional information
     if ((Ty->isAggregateImageType() ||
          ((Context.getLangOpts().Metal && (CC == CallingConv::CC_FloorVertex ||
-                                           CC == CallingConv::CC_FloorFragment)) ||
+                                           CC == CallingConv::CC_FloorFragment ||
+                                           CC == CallingConv::CC_FloorTessControl ||
+                                           CC == CallingConv::CC_FloorTessEval)) ||
           (Context.getLangOpts().Vulkan && (CC == CallingConv::CC_FloorKernel ||
                                             CC == CallingConv::CC_FloorVertex ||
-                                            CC == CallingConv::CC_FloorFragment)))) &&
+                                            CC == CallingConv::CC_FloorFragment ||
+                                            CC == CallingConv::CC_FloorTessControl ||
+                                            CC == CallingConv::CC_FloorTessEval)))) &&
         !cxx_rdecl->isUnion()) {
       SmallVector<const CXXBaseSpecifier *, 1> bases;
       SmallVector<const FieldDecl *, 1> field_decls;

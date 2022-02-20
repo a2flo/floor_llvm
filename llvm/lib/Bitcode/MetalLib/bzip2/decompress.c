@@ -18,6 +18,10 @@
    in the file LICENSE.
    ------------------------------------------------------------------ */
 
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wimplicit-fallthrough"
+#endif
 
 #include "bzlib_private.h"
 
@@ -650,3 +654,7 @@ Int32 BZ2_decompress ( DState* s )
 /*-------------------------------------------------------------*/
 /*--- end                                      decompress.c ---*/
 /*-------------------------------------------------------------*/
+
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif

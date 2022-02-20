@@ -240,6 +240,8 @@ namespace {
 		bool is_vertex_func { false };
 		bool is_fragment_func { false };
 		bool is_kernel_func { false };
+		bool is_tess_control_func { false };
+		bool is_tess_eval_func { false };
 		
 		MetalFirst(const bool enable_intel_workarounds_ = false,
 				   const bool enable_nvidia_workarounds_ = false) :
@@ -260,6 +262,8 @@ namespace {
 			is_vertex_func = F.getCallingConv() == CallingConv::FLOOR_VERTEX;
 			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
 			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
+			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
+			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
 			
 			// NOTE: for now, this is no longer needed
 			was_modified = false;
@@ -292,6 +296,8 @@ namespace {
 		bool is_kernel_func { false };
 		bool is_vertex_func { false };
 		bool is_fragment_func { false };
+		bool is_tess_control_func { false };
+		bool is_tess_eval_func { false };
 		
 		// added kernel function args
 		Argument* global_id { nullptr };
@@ -313,6 +319,10 @@ namespace {
 		Argument* point_coord { nullptr };
 		Argument* primitive_id { nullptr };
 		Argument* barycentric_coord { nullptr };
+		
+		// added tessellation evaluation function args
+		Argument* patch_id { nullptr };
+		Argument* position_in_patch { nullptr };
 		
 		// any function args
 		Argument* soft_printf { nullptr };
@@ -418,7 +428,7 @@ namespace {
 		
 		enum METAL_VERTEX_ARG_REV_IDX : int32_t {
 			METAL_VERTEX_ID = -2,
-			METAL_INSTANCE_ID = -1,
+			METAL_VS_INSTANCE_ID = -1,
 			
 			METAL_VERTEX_ARG_COUNT = 2,
 		};
@@ -427,6 +437,14 @@ namespace {
 			METAL_POINT_COORD = -1,
 			
 			METAL_FRAGMENT_ARG_COUNT = 1,
+		};
+		
+		enum METAL_TESS_EVAL_ARG_REV_IDX : int32_t {
+			METAL_PATCH_ID = -3,
+			METAL_TES_INSTANCE_ID = -2,
+			METAL_POSITION_IN_PATCH = -1,
+			
+			METAL_TESS_EVAL_ARG_COUNT = 3,
 		};
 		
 		bool runOnFunction(Function &F) override {
@@ -475,7 +493,8 @@ namespace {
 			
 			// get args if this is a kernel function
 			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
-			if(is_kernel_func) {
+			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
+			if(is_kernel_func || is_tess_control_func) {
 				if (F.arg_size() >= (has_sub_group_support ? METAL_KERNEL_SUB_GROUPS_ARG_COUNT : METAL_KERNEL_ARG_COUNT) + (has_soft_printf ? 1 : 0)) {
 					int32_t rev_idx = -1;
 					if (has_sub_group_support) {
@@ -494,7 +513,8 @@ namespace {
 						soft_printf = get_arg_by_idx(rev_idx--);
 					}
 				} else {
-					errs() << "invalid kernel function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
+					errs() << "invalid " << (is_kernel_func ? "kernel" : "tessellation-control");
+					errs() << " function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
 					global_id = nullptr;
 					global_size = nullptr;
 					local_id = nullptr;
@@ -515,7 +535,7 @@ namespace {
 				if (F.arg_size() >= METAL_VERTEX_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
 					// TODO: this should be optional / only happen on request
 					vertex_id = get_arg_by_idx(METAL_VERTEX_ID);
-					instance_id = get_arg_by_idx(METAL_INSTANCE_ID);
+					instance_id = get_arg_by_idx(METAL_VS_INSTANCE_ID);
 					if (has_soft_printf) {
 						soft_printf = get_arg_by_idx(-(METAL_VERTEX_ARG_COUNT + 1));
 					}
@@ -523,6 +543,26 @@ namespace {
 					errs() << "invalid vertex function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
 					vertex_id = nullptr;
 					instance_id = nullptr;
+					soft_printf = nullptr;
+				}
+			}
+			
+			// get args if this is a tessellation evaluation function
+			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
+			if(is_tess_eval_func) {
+				if (F.arg_size() >= METAL_TESS_EVAL_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
+					// TODO: this should be optional / only happen on request
+					patch_id = get_arg_by_idx(METAL_PATCH_ID);
+					instance_id = get_arg_by_idx(METAL_TES_INSTANCE_ID);
+					position_in_patch = get_arg_by_idx(METAL_POSITION_IN_PATCH);
+					if (has_soft_printf) {
+						soft_printf = get_arg_by_idx(-(METAL_TESS_EVAL_ARG_COUNT + 1));
+					}
+				} else {
+					errs() << "invalid tessellation-evaluation function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
+					patch_id = nullptr;
+					instance_id = nullptr;
+					position_in_patch = nullptr;
 					soft_printf = nullptr;
 				}
 			}
@@ -561,7 +601,7 @@ namespace {
 			}
 			
 			// update function signature / param list
-			if(is_kernel_func || is_vertex_func || is_fragment_func) {
+			if(is_kernel_func || is_vertex_func || is_fragment_func || is_tess_control_func || is_tess_eval_func) {
 				std::vector<Type*> param_types;
 				for(auto& arg : F.args()) {
 					param_types.push_back(arg.getType());
@@ -581,7 +621,7 @@ namespace {
 			visit(F);
 			
 			// always modified
-			return was_modified || is_kernel_func || is_vertex_func || is_fragment_func;
+			return was_modified || is_kernel_func || is_vertex_func || is_fragment_func || is_tess_control_func || is_tess_eval_func;
 		}
 		
 		// InstVisitor overrides...
@@ -825,7 +865,13 @@ namespace {
 		//
 		void visitCallInst(CallInst &I) {
 			// if this isn't a kernel function we don't need to do anything here (yet)
-			if(!is_kernel_func && !is_vertex_func && !is_fragment_func) return;
+			if (!is_kernel_func &&
+				!is_vertex_func &&
+				!is_fragment_func &&
+				!is_tess_control_func &&
+				!is_tess_eval_func) {
+				return;
+			}
 			
 			const auto func = I.getCalledFunction();
 			if(!func) return;
@@ -875,7 +921,7 @@ namespace {
 			}
 			else if(func_name == "floor.get_work_dim.i32") {
 				if(group_size == nullptr) {
-					DBG(printf("failed to get group_size arg, probably not in a kernel function?\n"); fflush(stdout);)
+					DBG(printf("failed to get group_size arg, probably not in a kernel or tessellation-control function?\n"); fflush(stdout);)
 					return;
 				}
 				
@@ -901,13 +947,33 @@ namespace {
 				I.eraseFromParent();
 				return;
 			}
+			else if(func_name == "floor.get_patch_id.i32") {
+				if(patch_id == nullptr) {
+					DBG(printf("failed to get patch_id arg, probably not in a tessellation-evaluation function?\n"); fflush(stdout);)
+					return;
+				}
+				
+				I.replaceAllUsesWith(patch_id);
+				I.eraseFromParent();
+				return;
+			}
 			else if(func_name == "floor.get_instance_id.i32") {
 				if(instance_id == nullptr) {
-					DBG(printf("failed to get instance_id arg, probably not in a vertex function?\n"); fflush(stdout);)
+					DBG(printf("failed to get instance_id arg, probably not in a vertex or tessellation-evaluation function?\n"); fflush(stdout);)
 					return;
 				}
 				
 				I.replaceAllUsesWith(instance_id);
+				I.eraseFromParent();
+				return;
+			}
+			else if(func_name == "floor.get_position_in_patch.float3") {
+				if(position_in_patch == nullptr) {
+					DBG(printf("failed to get position_in_patch arg, probably not in a tessellation-evaluation function?\n"); fflush(stdout);)
+					return;
+				}
+			
+				I.replaceAllUsesWith(position_in_patch);
 				I.eraseFromParent();
 				return;
 			}
@@ -923,7 +989,7 @@ namespace {
 			}
 			else if(func_name == "floor.builtin.get_printf_buffer") {
 				if(soft_printf == nullptr) {
-					DBG(printf("failed to get printf_buffer arg, probably not in a kernel/vertex/fragment function?\n"); fflush(stdout);)
+					DBG(printf("failed to get printf_buffer arg, probably not in a kernel/vertex/fragment/tessellation function?\n"); fflush(stdout);)
 					return;
 				}
 				
@@ -1257,8 +1323,20 @@ namespace {
 			for (auto& st_type : ctx->pImpl->NamedStructTypes) {
 				if (st_type.first().startswith("class.floor_image::image")) {
 					image_storage_types.emplace_back(st_type.second);
-				} else if (st_type.first().startswith("struct.std::__1::array")) {
-					st_type.second->setName("struct.metal::array");
+				} else {
+					// simple libfloor/std name -> Metal name replacement
+					// NOTE: since we need to match the start of the name, we can't simply use a map here
+					static const std::vector<std::pair<std::string, std::string>> simple_repl_lut {
+						{ "struct.std::__1::array", "struct.metal::array" },
+						{ "struct.triangle_tessellation_levels_t", "struct.metal::MTLTriangleTessellationFactorsHalf" },
+						{ "struct.quad_tessellation_levels_t", "struct.metal::MTLQuadTessellationFactorsHalf" },
+					};
+					for (const auto& repl : simple_repl_lut) {
+						if (st_type.first().startswith(repl.first)) {
+							st_type.second->setName(repl.second);
+							break;
+						}
+					}
 				}
 			}
 			for (auto& st_type : image_storage_types) {

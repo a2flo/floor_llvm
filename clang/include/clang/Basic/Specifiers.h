@@ -95,6 +95,7 @@ namespace clang {
     TST_queue_t,          // OpenCL queue_t
     TST_clk_event_t,      // OpenCL clk_event_t
     TST_reserve_id_t,     // OpenCL reserve_id_t
+    TST_patch_control_point_t, // Metal/Vulkan __patch_control_point_t
     TST_error // erroneous type
   };
 
@@ -278,12 +279,12 @@ namespace clang {
     CC_AAPCS,       // __attribute__((pcs("aapcs")))
     CC_AAPCS_VFP,   // __attribute__((pcs("aapcs-vfp")))
     CC_IntelOclBicc, // __attribute__((intel_ocl_bicc))
-    // NOTE: don't go above 15 for anything that is actually used by clang
     CC_FloorFunction, // default for OpenCL/SPIR, Metal/AIR, CUDA and Vulkan/SPIR-V functions (non entry points)
     CC_FloorKernel,   // inferred for OpenCL/SPIR, Metal/AIR, CUDA and Vulkan/SPIR-V kernels
     CC_FloorVertex,   // inferred for Metal/AIR and Vulkan/SPIR-V vertex shaders
     CC_FloorFragment, // inferred for Metal/AIR and Vulkan/SPIR-V fragment shaders
-    // ^^^ 15
+    CC_FloorTessControl, // inferred for Metal/AIR and Vulkan/SPIR-V tessellation control shaders
+    CC_FloorTessEval, // inferred for Metal/AIR and Vulkan/SPIR-V tessellation evaluation shaders
     CC_Swift,        // __attribute__((swiftcall))
     CC_SwiftAsync,        // __attribute__((swiftasynccall))
     CC_PreserveMost, // __attribute__((preserve_most))
@@ -305,6 +306,8 @@ namespace clang {
     case CC_FloorKernel:
     case CC_FloorVertex:
     case CC_FloorFragment:
+    case CC_FloorTessControl:
+    case CC_FloorTessEval:
     case CC_Swift:
     case CC_SwiftAsync:
       return false;

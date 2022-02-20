@@ -182,6 +182,7 @@ enum OpenCLTypeKind : uint8_t {
   OCLTK_Queue,
   OCLTK_ReserveID,
   OCLTK_Sampler,
+  OCLTK_PatchControlPoint,
 };
 
 /// Exposes information about the current target.

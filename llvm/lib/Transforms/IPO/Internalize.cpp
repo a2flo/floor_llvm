@@ -122,7 +122,9 @@ bool InternalizePass::shouldPreserveGV(const GlobalValue &GV) {
     if (F &&
         (F->getCallingConv() == CallingConv::FLOOR_KERNEL ||
          F->getCallingConv() == CallingConv::FLOOR_VERTEX ||
-         F->getCallingConv() == CallingConv::FLOOR_FRAGMENT)) {
+         F->getCallingConv() == CallingConv::FLOOR_FRAGMENT ||
+         F->getCallingConv() == CallingConv::FLOOR_TESS_CONTROL ||
+         F->getCallingConv() == CallingConv::FLOOR_TESS_EVAL)) {
       return true;
     }
   }

@@ -109,6 +109,8 @@ namespace {
 		bool is_kernel_func { false };
 		bool is_vertex_func { false };
 		bool is_fragment_func { false };
+		bool is_tess_control_func { false };
+		bool is_tess_eval_func { false };
 		
 		// added kernel function args
 		Argument* global_id { nullptr };
@@ -129,6 +131,8 @@ namespace {
 		Argument* frag_coord { nullptr };
 		Argument* primitive_id { nullptr };
 		Argument* barycentric_coord { nullptr };
+		
+		// TODO: tessellation args!
 		
 		// any function args
 		Argument* soft_printf { nullptr };
@@ -170,6 +174,8 @@ namespace {
 			VULKAN_FRAGMENT_ARG_COUNT = 3,
 		};
 		
+		// TODO: tessellation arg enums/handling
+		
 		bool runOnFunction(Function &F) override {
 			// exit if empty function
 			if(F.empty()) return false;
@@ -179,7 +185,15 @@ namespace {
 			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
 			is_vertex_func = F.getCallingConv() == CallingConv::FLOOR_VERTEX;
 			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
-			if(!is_kernel_func && !is_vertex_func && !is_fragment_func) return false;
+			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
+			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
+			if (!is_kernel_func &&
+				!is_vertex_func &&
+				!is_fragment_func &&
+				!is_tess_control_func &&
+				!is_tess_eval_func) {
+				return false;
+			}
 			
 			//
 			M = F.getParent();
@@ -479,6 +493,8 @@ namespace {
 		bool is_kernel_func { false };
 		bool is_vertex_func { false };
 		bool is_fragment_func { false };
+		bool is_tess_control_func { false };
+		bool is_tess_eval_func { false };
 		
 		VulkanFinal() :
 		FunctionPass(ID) {
@@ -545,6 +561,8 @@ namespace {
 			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
 			is_vertex_func = F.getCallingConv() == CallingConv::FLOOR_VERTEX;
 			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
+			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
+			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
 			if(!is_kernel_func && !is_vertex_func && !is_fragment_func) return false;
 			
 			//
@@ -557,7 +575,7 @@ namespace {
 			
 			// handle return value / output
 			DBG(errs() << "> handling return values ...\n";)
-			if(is_vertex_func || is_fragment_func) {
+			if(is_vertex_func || is_fragment_func || is_tess_eval_func) {
 				const auto emit_output_var = [this](const std::string& var_name,
 													llvm::Type* global_type,
 													uint32_t address_space,
@@ -841,7 +859,7 @@ namespace {
 		}
 		
 		void visitReturnInst(ReturnInst &RI) {
-			if(!is_vertex_func && !is_fragment_func) return;
+			if(!is_vertex_func && !is_fragment_func && !is_tess_eval_func) return;
 			
 			auto ret_val = RI.getReturnValue();
 			const auto ret_type = ret_val->getType();
@@ -902,6 +920,8 @@ namespace {
 		bool is_kernel_func { false };
 		bool is_vertex_func { false };
 		bool is_fragment_func { false };
+		bool is_tess_control_func { false };
+		bool is_tess_eval_func { false };
 		bool was_modified { false };
 		ConstantFolder folder;
 		
@@ -929,7 +949,15 @@ namespace {
 			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
 			is_vertex_func = F.getCallingConv() == CallingConv::FLOOR_VERTEX;
 			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
-			if(!is_kernel_func && !is_vertex_func && !is_fragment_func) return false;
+			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
+			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
+			if (!is_kernel_func &&
+				!is_vertex_func &&
+				!is_fragment_func &&
+				!is_tess_control_func &&
+				!is_tess_eval_func) {
+				return false;
+			}
 			
 			//
 			M = F.getParent();

@@ -913,6 +913,7 @@ bool Sema::containsUnexpandedParameterPacks(Declarator &D) {
   case TST_queue_t:
   case TST_clk_event_t:
   case TST_reserve_id_t:
+  case TST_patch_control_point_t:
   case TST_unknown_anytype:
   case TST_error:
     break;

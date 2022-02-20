@@ -5067,6 +5067,61 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
     Value *HalfVal = Builder.CreateLoad(Address);
     return RValue::get(Builder.CreateFPExt(HalfVal, Builder.getFloatTy()));
   }
+  case Builtin::BI__libfloor_access_patch_control_point: {
+    // figure out the name of the control point getter (which was created during metadata handling in CGM)
+    auto ret_type = E->getArg(2)->getType();
+    std::string gen_type_name = "";
+    llvm::raw_string_ostream gen_type_name_stream(gen_type_name);
+    CGM.getCXXABI().getMangleContext().mangleMetalGeneric("", ret_type, nullptr, gen_type_name_stream);
+    std::string func_name;
+    if (CGM.getLangOpts().Metal) {
+      func_name = "_Z" + gen_type_name_stream.str() + ".MTL_CONTROL_POINT_FN";
+    } else {
+      func_name = "floor.get_control_point." + gen_type_name_stream.str();
+    }
+    auto ctrl_pnt_gv = CGM.GetGlobalValue(func_name);
+    if (!ctrl_pnt_gv || !isa<llvm::Function>(ctrl_pnt_gv)) {
+      assert(false && "this should have been defined/created in CGM");
+      llvm::errs() << "control point function getter '" << func_name << "' is not defined at this point, but should be!\n";
+      return RValue::getIgnored();
+    }
+
+    // call it
+    auto ctrl_pnt_func = (llvm::Function*)ctrl_pnt_gv;
+    llvm::FunctionCallee func { ctrl_pnt_func->getFunctionType(), ctrl_pnt_func };
+    auto call = EmitNounwindRuntimeCall(func, { EmitScalarExpr(E->getArg(0)), EmitScalarExpr(E->getArg(1)) });
+    call->setOnlyReadsMemory();
+
+    auto ret_val = ReturnValue.getValue();
+    if (call->getType() != ret_val.getType()) {
+      // return value type doesn't match our (adjusted graphics I/O) type,
+      // use some coercion to make it right (this will be simplified/optimized later on)
+      if (ret_val.getType()->isPointerTy() &&
+          cast<llvm::PointerType>(ret_val.getType())->getPointerElementType()->isStructTy()) {
+        // memcpy each struct field individually (we can't memcpy the whole thing, since sizes/offsets/alignments might differ)
+        auto ret_st_type = cast<llvm::StructType>(cast<llvm::PointerType>(ret_val.getType())->getPointerElementType());
+        for (uint32_t st_idx = 0, st_count = ret_st_type->getNumElements(); st_idx < st_count; ++st_idx) {
+          auto ex_value = Builder.CreateExtractValue(call, { st_idx });
+          auto field_gep = Builder.CreateStructGEP(ret_val, st_idx);
+          auto field_gep_bc = Builder.CreateBitCast(field_gep, llvm::PointerType::get(ex_value->getType(), 0));
+          Builder.CreateStore(ex_value, Address(field_gep_bc));
+        }
+        return RValue::get(ret_val.getPointer());
+      } else {
+        // just memcpy non-struct types (do we ever have these?)
+        auto new_return_value = Builder.CreateAlloca(call->getType());
+        auto ret_store = Builder.CreateDefaultAlignedStore(call, new_return_value);
+        assert(CGM.getDataLayout().getTypeStoreSize(ret_val.getType()->getElementType()).getFixedValue() ==
+               CGM.getDataLayout().getTypeStoreSize(new_return_value->getType()->getElementType()).getFixedValue());
+        auto mcpy = Builder.CreateMemCpy(ret_val,
+                                         Address(new_return_value, CharUnits::fromQuantity(ret_store->getAlignment())),
+                                         CGM.getDataLayout().getTypeStoreSize(ret_val.getType()->getElementType()).getFixedValue());
+        return RValue::get(mcpy);
+      }
+    } else {
+      return RValue::get(Builder.CreateStore(call, ret_val));
+    }
+  }
   case Builtin::BIprintf:
     if (getTarget().getTriple().isNVPTX())
       return EmitNVPTXDevicePrintfCallExpr(E, ReturnValue);

@@ -1485,6 +1485,15 @@ public:
   /// offloading languages CUDA and HIP.
   void printPostfixForExternalizedStaticVar(llvm::raw_ostream &OS) const;
 
+  /// Creates and returns a graphics backend (Metal/Vulkan) compatible struct
+  /// type from the specified clang "type" and pre-existing LLVM "llvm_type".
+  /// If "create_packed" is true, this will create a packed struct type.
+  /// If "create_unnamed" is true, this will create an unname struct type.
+  llvm::Type* GraphicsExpandIOType(const QualType& type, llvm::Type* llvm_type,
+                                   CodeGenTypes& CGT,
+                                   const bool create_packed = true,
+                                   const bool create_unnamed = false);
+
 private:
   llvm::Constant *GetOrCreateLLVMFunction(
       StringRef MangledName, llvm::Type *Ty, GlobalDecl D, bool ForVTable,

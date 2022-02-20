@@ -1791,6 +1791,8 @@ void LLParser::parseOptionalDLLStorageClass(unsigned &Res) {
 ///   ::= 'floor_kernel'
 ///   ::= 'floor_vertex'
 ///   ::= 'floor_fragment'
+///   ::= 'floor_tessellation_control'
+///   ::= 'floor_tessellation_evaluation'
 ///   ::= 'x86_64_sysvcc'
 ///   ::= 'win64cc'
 ///   ::= 'webkit_jscc'
@@ -1842,6 +1844,8 @@ bool LLParser::parseOptionalCallingConv(unsigned &CC) {
   case lltok::kw_floor_kernel:   CC = CallingConv::FLOOR_KERNEL; break;
   case lltok::kw_floor_vertex:   CC = CallingConv::FLOOR_VERTEX; break;
   case lltok::kw_floor_fragment: CC = CallingConv::FLOOR_FRAGMENT; break;
+  case lltok::kw_floor_tessellation_control:    CC = CallingConv::FLOOR_TESS_CONTROL; break;
+  case lltok::kw_floor_tessellation_evaluation: CC = CallingConv::FLOOR_TESS_EVAL; break;
   case lltok::kw_floor_func:     CC = CallingConv::FLOOR_FUNC; break;
   case lltok::kw_intel_ocl_bicc: CC = CallingConv::Intel_OCL_BI; break;
   case lltok::kw_x86_64_sysvcc:  CC = CallingConv::X86_64_SysV; break;

@@ -725,6 +725,8 @@ llvm::DIType *CGDebugInfo::CreateType(const BuiltinType *BT) {
     return getOrCreateStructPtrType("opencl_queue_t", OCLQueueDITy);
   case BuiltinType::OCLReserveID:
     return getOrCreateStructPtrType("opencl_reserve_id_t", OCLReserveIDDITy);
+  case BuiltinType::OCLPatchControlPoint:
+    return getOrCreateStructPtrType("__patch_control_point_t", OCLPatchControlPointTyDITy);
 #define EXT_OPAQUE_TYPE(ExtType, Id, Ext) \
   case BuiltinType::Id: \
     return getOrCreateStructPtrType("opencl_" #ExtType, Id##Ty);
@@ -1341,6 +1343,8 @@ static unsigned getDwarfCC(CallingConv CC) {
   case CC_FloorKernel:
   case CC_FloorVertex:
   case CC_FloorFragment:
+  case CC_FloorTessControl:
+  case CC_FloorTessEval:
     return llvm::dwarf::DW_CC_LLVM_OpenCLKernel;
   case CC_Swift:
     return llvm::dwarf::DW_CC_LLVM_Swift;

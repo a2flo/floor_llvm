@@ -327,6 +327,7 @@ public:
     case OCLTK_ClkEvent:
     case OCLTK_Queue:
     case OCLTK_ReserveID:
+    case OCLTK_PatchControlPoint:
       return LangAS::opencl_global;
 
     default:

@@ -1576,7 +1576,9 @@ static bool addNoRecurseAttrs(const SCCNodeSet &SCCNodes) {
   // set norecurse for all compute kernels and vertex/fragment shaders
   if (F->getCallingConv() == CallingConv::FLOOR_KERNEL ||
       F->getCallingConv() == CallingConv::FLOOR_VERTEX ||
-      F->getCallingConv() == CallingConv::FLOOR_FRAGMENT) {
+      F->getCallingConv() == CallingConv::FLOOR_FRAGMENT ||
+      F->getCallingConv() == CallingConv::FLOOR_TESS_CONTROL ||
+      F->getCallingConv() == CallingConv::FLOOR_TESS_EVAL) {
     F->setDoesNotRecurse();
     ++NumNoRecurse;
     return true;

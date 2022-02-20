@@ -26,6 +26,7 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/VersionTuple.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/LibFloor/MetalTypes.h"
 #include "sha256.hpp"
 #define BZ_NO_STDIO 1
 #include "bzip2/bzlib.h"
@@ -38,6 +39,7 @@
 #include <sstream>
 using namespace llvm;
 using namespace std;
+using namespace metal;
 
 // workaround Windows stupidity ...
 #if defined(uuid_t)
@@ -118,48 +120,10 @@ static_assert(sizeof(metallib_header) == 4 + sizeof(metallib_version) +
               "invalid metallib header size");
 
 struct metallib_program_info {
-// NOTE: tag types are always 32-bit
-// NOTE: tag types are always followed by a uint16_t that specifies the length
-// of the tag data
-#define make_tag_type(a, b, c, d)                                              \
-  ((uint32_t(d) << 24u) | (uint32_t(c) << 16u) | (uint32_t(b) << 8u) |         \
-   uint32_t(a))
-  enum TAG_TYPE : uint32_t {
-    // used in initial header section
-    NAME = make_tag_type('N', 'A', 'M', 'E'),
-    TYPE = make_tag_type('T', 'Y', 'P', 'E'),
-    HASH = make_tag_type('H', 'A', 'S', 'H'),
-    MD_SIZE = make_tag_type('M', 'D', 'S', 'Z'),
-    OFFSET = make_tag_type('O', 'F', 'F', 'T'),
-    VERSION = make_tag_type('V', 'E', 'R', 'S'),
-    SOFF = make_tag_type('S', 'O', 'F', 'F'),
-    // used in reflection section
-    CNST = make_tag_type('C', 'N', 'S', 'T'),
-    VATT = make_tag_type('V', 'A', 'T', 'T'),
-    VATY = make_tag_type('V', 'A', 'T', 'Y'),
-    RETR = make_tag_type('R', 'E', 'T', 'R'),
-    ARGR = make_tag_type('A', 'R', 'G', 'R'),
-    // used in debug section
-    DEBI = make_tag_type('D', 'E', 'B', 'I'),
-    DEPF = make_tag_type('D', 'E', 'P', 'F'),
-    // additional metadata
-    HSRD = make_tag_type('H', 'S', 'R', 'D'),
-    UUID = make_tag_type('U', 'U', 'I', 'D'),
-    // used for source code/archive
-    SARC = make_tag_type('S', 'A', 'R', 'C'),
-    // TODO/TBD
-    LAYR = make_tag_type('L', 'A', 'Y', 'R'),
-    TESS = make_tag_type('T', 'E', 'S', 'S'),
-    // generic end tag
-    END = make_tag_type('E', 'N', 'D', 'T'),
-  };
-#undef make_tag_type
-
   enum class PROGRAM_TYPE : uint8_t {
     VERTEX = 0,
     FRAGMENT = 1,
     KERNEL = 2,
-    // TODO: tessellation?
     NONE = 255
   };
 
@@ -210,6 +174,16 @@ struct metallib_program_info {
     bool emit_debug_info{false};
     uint64_t debug_source_offset{0u};
 
+    union tess_data_t {
+      struct tess_info_t {
+        uint8_t primitive_type : 2;      // 1 = triangle, 2 = quad
+        uint8_t control_point_count : 6; // hardware limit is 32
+      } info;
+      uint8_t data;
+    } tess;
+
+    std::vector<vertex_attribute> vertex_attributes;
+
     // output in same order as Apple:
     //  * NAME
     //  * TYPE
@@ -233,6 +207,11 @@ struct metallib_program_info {
       length += sizeof(offset_info);      // offset
       length += sizeof(version_info) * 2; // both versions
       length += sizeof(uint64_t);         // module size, always 8 bytes
+      if (tess.data != 0u) {
+        length += sizeof(TAG_TYPE); // TESS
+        length += sizeof(uint16_t); // tag length
+        length += sizeof(uint8_t);  // tessellation info
+      }
       if (emit_debug_info) {
         length += sizeof(uint64_t); // SOFF, always 8 bytes
       }
@@ -287,6 +266,13 @@ struct metallib_program_info {
       write_value(OS, uint16_t(2 * sizeof(version_info)));
       write_value(OS, *(const uint32_t *)&metal_version);
       write_value(OS, *(const uint32_t *)&metal_language_version);
+
+      if (tess.data != 0u) {
+        // TESS
+        write_value(OS, TAG_TYPE::TESS);
+        write_value(OS, uint16_t(1u));
+        write_value(OS, tess.data);
+      }
 
       // MDSZ
       write_value(OS, TAG_TYPE::MD_SIZE);
@@ -644,20 +630,20 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     // * create .tar.bz2
     auto tar_data = create_tar(source_files);
 #if 0
-		{
-			error_code ec;
-			raw_fd_ostream tar_file(src_file_name + ".tar", ec, sys::fs::CreationDisposition::CD_CreateAlways);
-			tar_file.write(tar_data.data(), tar_data.size());
-		}
+    {
+      error_code ec;
+      raw_fd_ostream tar_file(src_file_name + ".tar", ec, sys::fs::CreationDisposition::CD_CreateAlways);
+      tar_file.write(tar_data.data(), tar_data.size());
+    }
 #endif
     source_archive_data =
         compress_source_archive(tar_data.data(), tar_data.size());
 #if 0
-		{
-			error_code ec;
-			raw_fd_ostream bz2_file(src_file_name + ".tar.bz2", ec, sys::fs::CreationDisposition::CD_CreateAlways);
-			bz2_file.write((const char*)source_archive_data.first.get(), source_archive_data.second);
-		}
+    {
+      error_code ec;
+      raw_fd_ostream bz2_file(src_file_name + ".tar.bz2", ec, sys::fs::CreationDisposition::CD_CreateAlways);
+      bz2_file.write((const char*)source_archive_data.first.get(), source_archive_data.second);
+    }
 #endif
 
     // * export the original complete bitcode file as well
@@ -821,10 +807,11 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     if (target_air_version >= 230) {
       if (auto llvm_ident = cloned_mod->getNamedMetadata("llvm.ident")) {
         if (MDNode *ident_op = llvm_ident->getOperand(0)) {
-          static const std::unordered_map<uint32_t, const char*> ident_versions{
-              {230, "Apple LLVM version 31001.143 (metalfe-31001.143)"},
-              {240, "Apple metal version 31001.363 (metalfe-31001.363)"},
-          };
+          static const std::unordered_map<uint32_t, const char *>
+              ident_versions{
+                  {230, "Apple LLVM version 31001.143 (metalfe-31001.143)"},
+                  {240, "Apple metal version 31001.363 (metalfe-31001.363)"},
+              };
           ident_op->replaceOperandWith(
               0, llvm::MDString::get(cloned_mod->getContext(),
                                      ident_versions.at(target_air_version)));
@@ -832,7 +819,8 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       }
     }
     // * kill other named metadata that is no longer needed
-    for (auto nmd_iter = cloned_mod->named_metadata_begin(); nmd_iter != cloned_mod->named_metadata_end(); ) {
+    for (auto nmd_iter = cloned_mod->named_metadata_begin();
+         nmd_iter != cloned_mod->named_metadata_end();) {
       if (nmd_iter->getName().startswith("floor.")) {
         auto erase_nmd = &*nmd_iter++;
         cloned_mod->eraseNamedMetadata(erase_nmd);
@@ -861,6 +849,95 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       }
     }
 
+    // extract tessellation info
+    if (auto vertex_md = cloned_mod->getNamedMetadata("air.vertex");
+        vertex_md && vertex_md->getNumOperands() > 0) {
+      // there should only be one vertex function entry
+      assert(vertex_md->getNumOperands() == 1u);
+      auto tess_func_md = vertex_md->getOperand(0);
+      for (auto op_iter = tess_func_md->op_begin() + 1;
+           op_iter != tess_func_md->op_end(); ++op_iter) {
+        auto node = dyn_cast_or_null<MDNode>(*op_iter);
+        if (!node) {
+          continue;
+        }
+        if (auto first_md = dyn_cast_or_null<MDString>(node->getOperand(0));
+            first_md && first_md->getString().equals("air.patch")) {
+          auto prim_md = dyn_cast_or_null<MDString>(node->getOperand(1));
+          if (!prim_md) {
+            continue;
+          }
+          auto ctrl_pnts_md =
+              dyn_cast_or_null<ConstantAsMetadata>(node->getOperand(3));
+          if (!ctrl_pnts_md) {
+            continue;
+          }
+          auto ctrl_pnts =
+              dyn_cast_or_null<ConstantInt>(ctrl_pnts_md->getValue());
+          if (!ctrl_pnts) {
+            continue;
+          }
+
+          auto prim_str = prim_md->getString();
+          if (prim_str.startswith("triangle")) {
+            entry.tess.info.primitive_type = 1u;
+          } else if (prim_str.startswith("quad")) {
+            entry.tess.info.primitive_type = 2u;
+          }
+          entry.tess.info.control_point_count = min(
+              (uint32_t)ctrl_pnts->getValue().getZExtValue(), 63u /* 6 bits */);
+        } else if (auto ctrl_pnt_md =
+                       dyn_cast_or_null<MDNode>(node->getOperand(0));
+                   ctrl_pnt_md) {
+          if (ctrl_pnt_md->getNumOperands() < 4) {
+            continue;
+          }
+          // op #0: arg index (should be 0)
+          // op #1: "air.patch_control_point_input"
+          if (auto patch_ctrl_pnt_str =
+                  dyn_cast_or_null<MDString>(ctrl_pnt_md->getOperand(1));
+              !patch_ctrl_pnt_str || !patch_ctrl_pnt_str->getString().equals(
+                                         "air.patch_control_point_input")) {
+            continue;
+          }
+          // op #2: specifies the patch_control_point_function
+          // ops #3 and higher specify all attributes
+          for (auto attr_iter = ctrl_pnt_md->op_begin() + 3;
+               attr_iter != ctrl_pnt_md->op_end(); ++attr_iter) {
+            const auto attr_md = dyn_cast_or_null<MDNode>(*attr_iter);
+            if (!attr_md || attr_md->getNumOperands() < 7) {
+              continue;
+            }
+            auto attr_idx =
+                dyn_cast_or_null<ConstantAsMetadata>(attr_md->getOperand(1));
+            auto attr_type = dyn_cast_or_null<MDString>(attr_md->getOperand(4));
+            auto attr_name = dyn_cast_or_null<MDString>(attr_md->getOperand(6));
+            if (!attr_idx || !attr_type || !attr_name) {
+              continue;
+            }
+            auto attr_idx_int =
+                dyn_cast_or_null<ConstantInt>(attr_idx->getValue());
+            if (!attr_idx_int) {
+              continue;
+            }
+            vertex_attribute vattr{
+                .name = attr_name->getString().str(),
+                .index = (uint32_t)attr_idx_int->getZExtValue(),
+                .type = data_type_from_string(attr_type->getString().str()),
+                .use = VERTEX_USE::CONRTOL_POINT,
+                .active = true, // always flag as active
+            };
+            if (vattr.type == DATA_TYPE::INVALID) {
+              errs() << "invalid data type in control point vertex attribute: "
+                     << vattr.name << ", index " << vattr.index << "\n";
+              continue;
+            }
+            entry.vertex_attributes.emplace_back(std::move(vattr));
+          }
+        }
+      }
+    }
+
     // write module / bitcode
     raw_string_ostream bitcode_stream{entry.bitcode_data};
     WriteBitcode50ToFile(cloned_mod.get(), bitcode_stream);
@@ -871,14 +948,53 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
                                      entry.bitcode_data.size());
 
     // write reflection and debug data (just ENDT right now)
-    static const auto end_tag = metallib_program_info::TAG_TYPE::END;
-    static const auto dbg_tag = metallib_program_info::TAG_TYPE::DEBI;
-    static const auto dep_tag = metallib_program_info::TAG_TYPE::DEPF;
-    static const uint32_t tag_length = sizeof(metallib_program_info::TAG_TYPE);
+    static const auto end_tag = TAG_TYPE::END;
+    static const auto dbg_tag = TAG_TYPE::DEBI;
+    static const auto dep_tag = TAG_TYPE::DEPF;
+    static const uint32_t tag_length = sizeof(TAG_TYPE);
 
     raw_string_ostream refl_stream{entry.reflection_data};
-    const uint32_t refl_length = tag_length + sizeof(uint32_t);
-    refl_stream.write((const char *)&refl_length, sizeof(uint32_t));
+    uint32_t refl_length = tag_length + sizeof(uint32_t);
+    if (!entry.vertex_attributes.empty()) {
+      const auto attr_count = (uint16_t)entry.vertex_attributes.size();
+      refl_length += 2u * (tag_length + sizeof(uint16_t)); // VATT and VATY
+      uint16_t vatt_len = sizeof(uint16_t) /* attr count */ +
+                          2u * attr_count /* per-attr info */;
+      uint16_t vaty_len =
+          sizeof(uint16_t) /* attr count */ + attr_count /* per-attr type */;
+      for (const auto &vattr : entry.vertex_attributes) {
+        vatt_len += vattr.name.size() + 1u;
+      }
+      refl_length += vatt_len + vaty_len;
+      refl_stream.write((const char *)&refl_length, sizeof(uint32_t));
+
+      static const auto vatt_tag = TAG_TYPE::VATT;
+      static const auto vaty_tag = TAG_TYPE::VATY;
+
+      // VATT
+      refl_stream.write((const char *)&vatt_tag, tag_length);
+      refl_stream.write((const char *)&vatt_len, sizeof(vatt_len));
+      refl_stream.write((const char *)&attr_count, sizeof(attr_count));
+      for (const auto &vattr : entry.vertex_attributes) {
+        refl_stream.write(vattr.name.c_str(), vattr.name.size());
+        refl_stream.write('\0');
+
+        uint16_t info = vattr.index & 0x1FFFu;
+        info |= (uint16_t(vattr.use) & 0x3u) << 13u;
+        info |= (vattr.active ? 0x8000u : 0u);
+        refl_stream.write((const char *)&info, sizeof(info));
+      }
+
+      // VATY
+      refl_stream.write((const char *)&vaty_tag, tag_length);
+      refl_stream.write((const char *)&vaty_len, sizeof(vaty_len));
+      refl_stream.write((const char *)&attr_count, sizeof(attr_count));
+      for (const auto &vattr : entry.vertex_attributes) {
+        refl_stream.write((const char *)&vattr.type, sizeof(DATA_TYPE));
+      }
+    } else {
+      refl_stream.write((const char *)&refl_length, sizeof(uint32_t));
+    }
     refl_stream.write((const char *)&end_tag, tag_length);
     refl_stream.flush();
 
@@ -970,8 +1086,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   OS.write((const char *)&header, sizeof(metallib_version));
 
   // file length
-  uint64_t ext_program_md_size =
-      sizeof(metallib_program_info::TAG_TYPE) /* ENDT*/;
+  uint64_t ext_program_md_size = sizeof(TAG_TYPE) /* ENDT */;
   if (target_air_version >= 240) {
     ext_program_md_size += (4 + 2 + 16) /* UUID */;
   }
@@ -985,10 +1100,10 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
            : 0u);
   const uint32_t src_archive_length =
       (emit_debug_info
-           ? (sizeof(metallib_program_info::TAG_TYPE) /* magic/tag */ +
+           ? (sizeof(TAG_TYPE) /* magic/tag */ +
               sizeof(uint32_t) /* archive length */ +
               sizeof(uint16_t) /* "0" */ + source_archive_data.second +
-              sizeof(metallib_program_info::TAG_TYPE) /* end tag */)
+              sizeof(TAG_TYPE) /* end tag */)
            : 0u);
   const uint64_t file_length =
       (sizeof(metallib_header) + sizeof(uint32_t) /* #programs */ +
@@ -1022,9 +1137,8 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   {
     // write embedded source code archive metadata
     if (emit_debug_info) {
-      const auto HSRD_tag = metallib_program_info::TAG_TYPE::HSRD;
-      OS.write((const char *)&HSRD_tag,
-               sizeof(metallib_program_info::TAG_TYPE));
+      const auto HSRD_tag = TAG_TYPE::HSRD;
+      OS.write((const char *)&HSRD_tag, sizeof(TAG_TYPE));
       OS.write(0x10);
       OS.write(0x0);
       const uint64_t src_archives_offset =
@@ -1050,9 +1164,8 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       program_uuid[8] = (0b10 /* variant */ << 6u) | (program_uuid[8] & 0x3Fu);
 
       // write
-      const auto UUID_tag = metallib_program_info::TAG_TYPE::UUID;
-      OS.write((const char *)&UUID_tag,
-               sizeof(metallib_program_info::TAG_TYPE));
+      const auto UUID_tag = TAG_TYPE::UUID;
+      OS.write((const char *)&UUID_tag, sizeof(TAG_TYPE));
       OS.write(0x10);
       OS.write(0x0);
       OS.write((const char *)&program_uuid, sizeof(program_uuid));
@@ -1060,8 +1173,8 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
 
     // write ENDT
     // NOTE: this is not included by the "programs_length"
-    const auto END_tag = metallib_program_info::TAG_TYPE::END;
-    OS.write((const char *)&END_tag, sizeof(metallib_program_info::TAG_TYPE));
+    const auto END_tag = TAG_TYPE::END;
+    OS.write((const char *)&END_tag, sizeof(TAG_TYPE));
   }
 
   // write reflection data
@@ -1092,8 +1205,8 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
 
     OS.write((const char *)&src_archive_length, sizeof(src_archive_length));
 
-    const auto SARC_tag = metallib_program_info::TAG_TYPE::SARC;
-    OS.write((const char *)&SARC_tag, sizeof(metallib_program_info::TAG_TYPE));
+    const auto SARC_tag = TAG_TYPE::SARC;
+    OS.write((const char *)&SARC_tag, sizeof(TAG_TYPE));
 
     const uint32_t source_archive_data_size =
         source_archive_data.second + sizeof(uint16_t);
@@ -1103,7 +1216,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     OS.write((const char *)source_archive_data.first.get(),
              source_archive_data.second);
 
-    const auto END_tag = metallib_program_info::TAG_TYPE::END;
-    OS.write((const char *)&END_tag, sizeof(metallib_program_info::TAG_TYPE));
+    const auto END_tag = TAG_TYPE::END;
+    OS.write((const char *)&END_tag, sizeof(TAG_TYPE));
   }
 }

@@ -10414,7 +10414,9 @@ ABIArgInfo VulkanABIInfo::classifyArgumentType(QualType Ty, unsigned int CC) con
       Ty->isStructureOrClassType() &&
       (CC == llvm::CallingConv::FLOOR_VERTEX ||
        CC == llvm::CallingConv::FLOOR_FRAGMENT ||
-       CC == llvm::CallingConv::FLOOR_KERNEL)) {
+       CC == llvm::CallingConv::FLOOR_KERNEL ||
+       CC == llvm::CallingConv::FLOOR_TESS_CONTROL ||
+       CC == llvm::CallingConv::FLOOR_TESS_EVAL)) {
     return ABIArgInfo::getExpand();
   }
 

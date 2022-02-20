@@ -3124,6 +3124,8 @@ StringRef BuiltinType::getName(const PrintingPolicy &Policy) const {
     return "queue_t";
   case OCLReserveID:
     return "reserve_id_t";
+  case OCLPatchControlPoint:
+    return "__patch_control_point_t";
   case IncompleteMatrixIdx:
     return "<incomplete matrix index type>";
   case OMPArraySection:
@@ -3195,6 +3197,8 @@ StringRef FunctionType::getNameForCallConv(CallingConv CC) {
   case CC_FloorKernel: return "floor_kernel";
   case CC_FloorVertex: return "floor_vertex";
   case CC_FloorFragment: return "floor_fragment";
+  case CC_FloorTessControl: return "floor_tessellation_control";
+  case CC_FloorTessEval: return "floor_tessellation_evaluation";
   case CC_Swift: return "swiftcall";
   case CC_SwiftAsync: return "swiftasynccall";
   case CC_PreserveMost: return "preserve_most";
@@ -3624,6 +3628,8 @@ bool AttributedType::isCallingConv() const {
   case attr::PreserveAll:
   case attr::GraphicsVertexShader:
   case attr::GraphicsFragmentShader:
+  case attr::GraphicsTessellationControlShader:
+  case attr::GraphicsTessellationEvaluationShader:
   case attr::ComputeKernel:
     return true;
   }
@@ -4171,6 +4177,7 @@ bool Type::canHaveNullability(bool ResultIfUnknown) const {
     case BuiltinType::OCLClkEvent:
     case BuiltinType::OCLQueue:
     case BuiltinType::OCLReserveID:
+    case BuiltinType::OCLPatchControlPoint:
 #define SVE_TYPE(Name, Id, SingletonId) \
     case BuiltinType::Id:
 #include "clang/Basic/AArch64SVEACLETypes.def"

@@ -152,6 +152,8 @@ enum Kind {
   kw_floor_kernel,
   kw_floor_vertex,
   kw_floor_fragment,
+  kw_floor_tessellation_control,
+  kw_floor_tessellation_evaluation,
   kw_floor_func,
   kw_x86_64_sysvcc,
   kw_win64cc,

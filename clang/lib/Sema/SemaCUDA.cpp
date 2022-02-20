@@ -67,7 +67,7 @@ ExprResult Sema::ActOnCUDAExecConfigExpr(Scope *S, SourceLocation LLLLoc,
 Sema::CUDAFunctionTarget
 Sema::IdentifyCUDATarget(const ParsedAttributesView &Attrs) {
   bool HasGlobalAttr = false;
-  bool HasInvalidTargetAttr = false;
+  [[maybe_unused]] bool HasInvalidTargetAttr = false;
   for (const ParsedAttr &AL : Attrs) {
     switch (AL.getKind()) {
     case ParsedAttr::AT_ComputeKernel:
@@ -444,7 +444,7 @@ bool Sema::inferCUDATargetForImplicitSpecialMember(CXXRecordDecl *ClassDecl,
 
   // If no target was inferred, mark this member as __host__ __device__;
   // it's the least restrictive option that can be invoked from any target.
-  bool NeedsH = true, NeedsD = true;
+  [[maybe_unused]] bool NeedsH = true, NeedsD = true;
   if (InferredTarget.hasValue()) {
     if (InferredTarget.getValue() == CFT_Device)
       NeedsH = false;

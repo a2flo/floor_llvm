@@ -2169,6 +2169,7 @@ public:
   bool isQueueT() const;                        // OpenCL queue_t
   bool isReserveIDT() const;                    // OpenCL reserve_id_t
   bool isExecType() const;                      // OpenCL 2.0 execution model types
+  bool isPatchControlPointT() const;            // Metal/Vulkan patch control point
 
 #define EXT_OPAQUE_TYPE(ExtType, Id, Ext) \
   bool is##Id##Type() const;
@@ -6931,6 +6932,10 @@ inline bool Type::isExecType() const {
          isSpecificBuiltinType(BuiltinType::OCLClkEvent);
 }
 
+inline bool Type::isPatchControlPointT() const {
+  return isSpecificBuiltinType(BuiltinType::OCLPatchControlPoint);
+}
+
 inline bool Type::isImageType() const {
 #define IMAGE_TYPE(ImgType, Id, SingletonId, Access, Suffix) is##Id##Type() ||
   return
@@ -6970,7 +6975,7 @@ inline bool Type::isOCLExtOpaqueType() const {
 inline bool Type::isOpenCLSpecificType() const {
   return isSamplerT() || isEventT() || isImageType() || isClkEventT() ||
          isQueueT() || isReserveIDT() || isPipeType() || isOCLExtOpaqueType() ||
-         isAggregateImageType();
+         isPatchControlPointT() || isAggregateImageType();
 }
 
 inline bool Type::isTemplateTypeParmType() const {

@@ -368,6 +368,9 @@ def MemFenceFlags         : TypedefType<"cl_mem_fence_flags">;
 def ClkProfilingInfo      : TypedefType<"clk_profiling_info">;
 def NDRange               : TypedefType<"ndrange_t">;
 
+// compiler-internal/opaque Metal/Vulkan patch control point type
+def PatchControlPoint     : Type<"__patch_control_point_t", QualType<"Context.OCLPatchControlPointTy">>;
+
 // OpenCL v2.0 s6.13.11: Atomic integer and floating-point types.
 def AtomicInt             : Type<"atomic_int", QualType<"Context.getAtomicType(Context.IntTy)">>;
 def AtomicUInt            : Type<"atomic_uint", QualType<"Context.getAtomicType(Context.UnsignedIntTy)">>;

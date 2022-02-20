@@ -2415,6 +2415,10 @@ void MicrosoftCXXNameMangler::mangleType(const BuiltinType *T, Qualifiers,
     Out << "PA";
     mangleArtificialTagType(TTK_Struct, "ocl_reserveid");
     break;
+  case BuiltinType::OCLPatchControlPoint:
+    Out << "PA";
+    mangleArtificialTagType(TTK_Struct, "__patch_control_point_t");
+    break;
 #define EXT_OPAQUE_TYPE(ExtType, Id, Ext) \
   case BuiltinType::Id: \
     mangleArtificialTagType(TTK_Struct, "ocl_" #ExtType); \

@@ -2852,8 +2852,7 @@ void Sema::AddGraphicsFBOColorLocationAttr(SourceRange AttrRange, Decl *D, Expr 
 
     llvm::APSInt ColorLoc(32);
     ExprResult ICE
-      = VerifyIntegerConstantExpression(E, &ColorLoc,
-          diag::err_expr_not_ice, AllowFoldKind::AllowFold);
+      = VerifyIntegerConstantExpression(E, &ColorLoc, AllowFoldKind::AllowFold);
     if (ICE.isInvalid())
       return;
 
@@ -2901,6 +2900,61 @@ static void handleGraphicsFBODepthTypeAttr(Sema &S, Decl *D, const ParsedAttr &A
              GraphicsFBODepthTypeAttr(S.Context, Attr, type));
 }
 
+static void handleGraphicsTessellationPatchAttr(Sema &S, Decl *D, const ParsedAttr &Attr) {
+  if (!Attr.checkExactlyNumArgs(S, 2)) {
+    Attr.setInvalid();
+    return;
+  }
+
+  GraphicsTessellationPatchAttr::PatchPrimitiveType type;
+  if (Attr.isArgIdent(0)) {
+    IdentifierLoc *Ident = Attr.getArgAsIdent(0);
+    StringRef TypeString = Ident->Ident->getName();
+
+    if (!GraphicsTessellationPatchAttr::ConvertStrToPatchPrimitiveType(TypeString, type)) {
+      unsigned diagID = S.getDiagnostics().getCustomDiagID(DiagnosticsEngine::Error, "%0");
+      S.Diag(Ident->Loc, diagID) << "invalid primitive type (must be 'triangle' or 'quad')" << TypeString;
+      return;
+    }
+  } else {
+    S.Diag(Attr.getLoc(), diag::err_attribute_argument_type) <<
+      Attr << AANT_ArgumentIdentifier;
+    return;
+  }
+
+  if (!Attr.isArgExpr(1)) {
+    S.Diag(Attr.getLoc(), diag::err_attribute_argument_type) <<
+      Attr << AANT_ArgumentConstantExpr;
+    return;
+  }
+
+  auto control_points_arg = Attr.getArgAsExpr(1);
+  if (!control_points_arg) {
+    S.Diag(Attr.getLoc(), diag::err_attribute_argument_type) <<
+    Attr << AANT_ArgumentConstantExpr;
+    return;
+  }
+
+  llvm::APSInt control_points(32, true /* unsigned */);
+  ExprResult control_points_res
+    = S.VerifyIntegerConstantExpression(control_points_arg, &control_points,
+        clang::Sema::AllowFoldKind::AllowFold);
+  if (control_points_res.isInvalid()) {
+    Attr.setInvalid();
+    return;
+  }
+
+  uint32_t control_point_count = (uint32_t)control_points.getZExtValue();
+  if (control_point_count > 32u) {
+    unsigned diagID = S.getDiagnostics().getCustomDiagID(DiagnosticsEngine::Error, "%0");
+    S.Diag(Attr.getRange().getBegin(), diagID) << "number of control points must be <= 32";
+    return;
+  }
+
+  D->addAttr(::new (S.Context)
+			 GraphicsTessellationPatchAttr(S.Context, Attr, type, control_point_count));
+}
+
 static void handleRangeAttr(Sema &S, Decl *D, const ParsedAttr &Attr) {
   if (!Attr.checkExactlyNumArgs(S, 2)) {
     Attr.setInvalid();
@@ -2910,10 +2964,10 @@ static void handleRangeAttr(Sema &S, Decl *D, const ParsedAttr &Attr) {
   llvm::APSInt lower_bound(64), upper_bound(64);
   ExprResult lower_res
     = S.VerifyIntegerConstantExpression(Attr.getArgAsExpr(0), &lower_bound,
-        diag::err_expr_not_ice, clang::Sema::AllowFoldKind::AllowFold);
+        clang::Sema::AllowFoldKind::AllowFold);
   ExprResult upper_res
     = S.VerifyIntegerConstantExpression(Attr.getArgAsExpr(1), &upper_bound,
-        diag::err_expr_not_ice, clang::Sema::AllowFoldKind::AllowFold);
+        clang::Sema::AllowFoldKind::AllowFold);
   if (lower_res.isInvalid() || upper_res.isInvalid()) return;
 
   if ((lower_bound.isUnsigned() && lower_bound.getZExtValue() > upper_bound.getZExtValue()) ||
@@ -5018,6 +5072,8 @@ bool Sema::CheckCallingConvAttr(const ParsedAttr &Attrs, CallingConv &CC,
     break;
   case ParsedAttr::AT_GraphicsVertexShader: CC = CC_FloorVertex; break;
   case ParsedAttr::AT_GraphicsFragmentShader: CC = CC_FloorFragment; break;
+  case ParsedAttr::AT_GraphicsTessellationControlShader: CC = CC_FloorTessControl; break;
+  case ParsedAttr::AT_GraphicsTessellationEvaluationShader: CC = CC_FloorTessEval; break;
   case ParsedAttr::AT_ComputeKernel: CC = CC_FloorKernel; break;
   default: llvm_unreachable("unexpected attribute kind");
   }
@@ -8330,6 +8386,15 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
   case ParsedAttr::AT_GraphicsFragmentShader:
     handleSimpleAttribute<GraphicsFragmentShaderAttr>(S, D, AL);
     break;
+  case ParsedAttr::AT_GraphicsTessellationControlShader:
+    handleSimpleAttribute<GraphicsTessellationControlShaderAttr>(S, D, AL);
+    break;
+  case ParsedAttr::AT_GraphicsTessellationEvaluationShader:
+    handleSimpleAttribute<GraphicsTessellationEvaluationShaderAttr>(S, D, AL);
+    break;
+  case ParsedAttr::AT_GraphicsTessellationPatch:
+    handleGraphicsTessellationPatchAttr(S, D, AL);
+    break;
   case ParsedAttr::AT_RetRange:
     handleRangeAttr(S, D, AL);
     break;
@@ -8644,7 +8709,7 @@ void Sema::ProcessDeclAttributeList(Scope *S, Decl *D,
   // good to have a way to specify "these attributes must appear as a group",
   // for these. Additionally, it would be good to have a way to specify "these
   // attribute must never appear as a group" for attributes like cold and hot.
-  if (!D->hasAttr<ComputeKernelAttr>()) {
+  if (!D->hasAttr<ComputeKernelAttr>() && !D->hasAttr<GraphicsTessellationControlShaderAttr>()) {
     // These attributes cannot be applied to a non-kernel function.
     if (const auto *A = D->getAttr<ReqdWorkGroupSizeAttr>()) {
       // FIXME: This emits a different error message than

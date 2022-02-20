@@ -281,8 +281,8 @@ public:
   /// yet. These prints as 'opaque' in .ll files.
   bool isOpaque() const { return (getSubclassData() & SCDB_HasBody) == 0; }
 
-  /// isGraphicsIOType - Return true if this type is used as a graphics vertex/fragment
-  /// shader input/output type.
+  /// isGraphicsIOType - Return true if this type is used as a graphics shader
+  /// input/output type.
   bool isGraphicsIOType() const { return (getSubclassData() & SCDB_IsGraphicsIOType) != 0; }
 
   /// setGraphicsIOType - Flags this type as a graphics input/output type.

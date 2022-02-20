@@ -1006,7 +1006,7 @@ CodeGenTypes::ComputeRecordLayout(const RecordDecl *D, llvm::StructType *Ty) {
 }
 
 void CodeGenTypes::create_flattened_cg_layout(const CXXRecordDecl* D, llvm::StructType* Ty,
-											  const std::vector<CodeGenTypes::aggregate_scalar_entry>& fields) {
+											  const std::vector<ASTContext::aggregate_scalar_entry>& fields) {
 	bool zero_init = true;
 	for(const auto& field : fields) {
 		// vector types (or replaced vector types) are always zero initializable

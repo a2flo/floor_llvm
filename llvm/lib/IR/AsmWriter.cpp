@@ -324,6 +324,8 @@ static void PrintCallingConv(unsigned cc, raw_ostream &Out) {
   case CallingConv::FLOOR_FUNC:    Out << "floor_func"; break;
   case CallingConv::FLOOR_VERTEX:  Out << "floor_vertex"; break;
   case CallingConv::FLOOR_FRAGMENT:Out << "floor_fragment"; break;
+  case CallingConv::FLOOR_TESS_CONTROL:  Out << "floor_tessellation_control"; break;
+  case CallingConv::FLOOR_TESS_EVAL:     Out << "floor_tessellation_evaluation"; break;
   case CallingConv::FLOOR_KERNEL:  Out << "floor_kernel"; break;
   case CallingConv::Swift:         Out << "swiftcc"; break;
   case CallingConv::SwiftTail:     Out << "swifttailcc"; break;

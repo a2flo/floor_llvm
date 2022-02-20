@@ -1200,6 +1200,28 @@ def GraphicsFragmentShader : DeclOrTypeAttr {
   let SimpleHandler = 1;
 }
 
+def GraphicsTessellationControlShader : DeclOrTypeAttr {
+  let Spellings = [GNU<"tessellation_control_shader">, CXX11<"","tessellation_control_shader", 200809>];
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+
+def GraphicsTessellationEvaluationShader : DeclOrTypeAttr {
+  let Spellings = [GNU<"tessellation_evaluation_shader">, CXX11<"","tessellation_evaluation_shader", 200809>];
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+
+def GraphicsTessellationPatch : InheritableAttr {
+  let Spellings = [CXX11<"","patch", 200809>];
+  let Args = [EnumArgument<"PatchPrimitive", "PatchPrimitiveType",
+                           ["triangle", "quad"],
+                           ["PatchTriangle", "PatchQuad"]>,
+              UnsignedArgument<"ControlPoints">];
+  let Subjects = SubjectList<[Function], ErrorDiag>;
+  let Documentation = [Undocumented];
+}
+
 def RetRange : InheritableAttr {
   let Spellings = [GNU<"range">, CXX11<"","range", 200809>];
   let Args = [ExprArgument<"LowerBound">, ExprArgument<"UpperBound">];

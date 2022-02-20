@@ -38,6 +38,7 @@
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/ToolOutputFile.h"
 #include "llvm/Support/WithColor.h"
+#include "llvm/Transforms/LibFloor/MetalTypes.h"
 #include <system_error>
 #include <iostream>
 #include <fstream>
@@ -47,6 +48,7 @@
 #include <optional>
 using namespace llvm;
 using namespace std;
+using namespace metal;
 
 static cl::opt<std::string>
 InputFilename(cl::Positional, cl::desc("<input metallib>"), cl::init("-"));
@@ -173,45 +175,10 @@ static_assert(sizeof(metallib_header) == 4 + sizeof(metallib_version) + sizeof(u
 struct metallib_program_info {
 	uint32_t length; // including length itself
 	
-	// NOTE: tag types are always 32-bit
-	// NOTE: tag types are always followed by a uint16_t that specifies the length of the tag data
-#define make_tag_type(a, b, c, d) ((uint32_t(d) << 24u) | (uint32_t(c) << 16u) | (uint32_t(b) << 8u) | uint32_t(a))
-	enum TAG_TYPE : uint32_t {
-		// used in initial header section
-		NAME		= make_tag_type('N', 'A', 'M', 'E'),
-		TYPE		= make_tag_type('T', 'Y', 'P', 'E'),
-		HASH		= make_tag_type('H', 'A', 'S', 'H'),
-		MD_SIZE		= make_tag_type('M', 'D', 'S', 'Z'),
-		OFFSET		= make_tag_type('O', 'F', 'F', 'T'),
-		VERSION		= make_tag_type('V', 'E', 'R', 'S'),
-		SOFF        = make_tag_type('S', 'O', 'F', 'F'),
-		// used in reflection section
-		CNST        = make_tag_type('C', 'N', 'S', 'T'),
-		VATT        = make_tag_type('V', 'A', 'T', 'T'),
-		VATY        = make_tag_type('V', 'A', 'T', 'Y'),
-		RETR        = make_tag_type('R', 'E', 'T', 'R'),
-		ARGR        = make_tag_type('A', 'R', 'G', 'R'),
-		// used in debug section
-		DEBI        = make_tag_type('D', 'E', 'B', 'I'),
-		DEPF        = make_tag_type('D', 'E', 'P', 'F'),
-		// additional metadata
-		HSRD        = make_tag_type('H', 'S', 'R', 'D'),
-		UUID        = make_tag_type('U', 'U', 'I', 'D'),
-		// used for source code/archive
-		SARC        = make_tag_type('S', 'A', 'R', 'C'),
-		// TODO/TBD
-		LAYR        = make_tag_type('L', 'A', 'Y', 'R'),
-		TESS        = make_tag_type('T', 'E', 'S', 'S'),
-		// generic end tag
-		END         = make_tag_type('E', 'N', 'D', 'T'),
-	};
-#undef make_tag_type
-	
 	enum class PROGRAM_TYPE : uint8_t {
 		VERTEX = 0,
 		FRAGMENT = 1,
 		KERNEL = 2,
-		// TODO: tessellation?
 		NONE = 255
 	};
 	
@@ -234,6 +201,10 @@ struct metallib_program_info {
 		std::string dependent_file;
 	};
 	
+	struct reflection_entry {
+		std::vector<vertex_attribute> vertex_attributes;
+	};
+	
 	struct entry {
 		uint32_t length;
 		string name; // NOTE: limited to 65536 - 1 ('\0')
@@ -246,9 +217,16 @@ struct metallib_program_info {
 		uint64_t bitcode_size { 0 }; // always 8 bytes
 		version_info metal_version { 0, 0, 0 };
 		version_info metal_language_version { 0, 0, 0 };
-		uint8_t tess_info { 0 };
+		union tess_data_t {
+			struct tess_info_t {
+				uint8_t primitive_type : 2; // 1 = triangle, 2 = quad
+				uint8_t control_point_count : 6; // hardware limit is 32
+			} info;
+			uint8_t data;
+		} tess;
 		uint64_t source_offset { 0 };
 		std::optional<debug_entry> debug;
+		std::optional<reflection_entry> reflection;
 	};
 	vector<entry> entries;
 };
@@ -475,9 +453,9 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 		
 		bool found_end_tag = false;
 		while(!found_end_tag) {
-			const auto tag = *(const metallib_program_info::TAG_TYPE*)program_ptr; program_ptr += 4;
+			const auto tag = *(const TAG_TYPE*)program_ptr; program_ptr += 4;
 			uint32_t tag_length = 0;
-			if(tag != metallib_program_info::TAG_TYPE::END) {
+			if(tag != TAG_TYPE::END) {
 				tag_length = *(const uint16_t*)program_ptr;
 				program_ptr += 2;
 				
@@ -488,15 +466,15 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 			}
 			
 			switch(tag) {
-				case metallib_program_info::TAG_TYPE::NAME: {
+				case TAG_TYPE::NAME: {
 					entry.name = string((const char*)program_ptr, tag_length - 1u);
 					break;
 				}
-				case metallib_program_info::TAG_TYPE::TYPE: {
+				case TAG_TYPE::TYPE: {
 					entry.type = *(const metallib_program_info::PROGRAM_TYPE*)program_ptr;
 					break;
 				}
-				case metallib_program_info::TAG_TYPE::HASH: {
+				case TAG_TYPE::HASH: {
 					if(tag_length != 32) {
 						return make_error<StringError>("invalid hash size: " + to_string(tag_length),
 													   inconvertibleErrorCode());
@@ -504,24 +482,28 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 					memcpy(entry.sha256_hash, program_ptr, 32u);
 					break;
 				}
-				case metallib_program_info::TAG_TYPE::OFFSET: {
+				case TAG_TYPE::OFFSET: {
 					entry.offset = *(const metallib_program_info::offset_info*)program_ptr;
 					break;
 				}
-				case metallib_program_info::TAG_TYPE::VERSION: {
+				case TAG_TYPE::VERSION: {
 					entry.metal_version = *(const metallib_program_info::version_info*)program_ptr;
 					entry.metal_language_version = *((const metallib_program_info::version_info*)program_ptr + 1u);
 					break;
 				}
-				case metallib_program_info::TAG_TYPE::MD_SIZE: {
+				case TAG_TYPE::MD_SIZE: {
 					entry.bitcode_size = *(const uint64_t*)program_ptr;
 					break;
 				}
-				case metallib_program_info::TAG_TYPE::TESS: {
-					entry.tess_info = *(const uint8_t*)program_ptr;
+				case TAG_TYPE::TESS: {
+					if (tag_length != 1) {
+						return make_error<StringError>("invalid tessellation info length: " + to_string(tag_length) + ", expected 1 byte",
+													   inconvertibleErrorCode());
+					}
+					entry.tess.data = *(const uint8_t*)program_ptr;
 					break;
 				}
-				case metallib_program_info::TAG_TYPE::SOFF: {
+				case TAG_TYPE::SOFF: {
 					if(tag_length != 8) {
 						return make_error<StringError>("invalid SOFF size: " + to_string(tag_length),
 													   inconvertibleErrorCode());
@@ -529,7 +511,7 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 					entry.source_offset = *(const uint64_t*)program_ptr;
 					break;
 				}
-				case metallib_program_info::TAG_TYPE::END: {
+				case TAG_TYPE::END: {
 					found_end_tag = true;
 					break;
 				}
@@ -548,9 +530,9 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	{
 		bool found_end_tag = false;
 		while (!found_end_tag) {
-			const auto tag = *(const metallib_program_info::TAG_TYPE*)add_program_md_ptr; add_program_md_ptr += 4;
+			const auto tag = *(const TAG_TYPE*)add_program_md_ptr; add_program_md_ptr += 4;
 			uint32_t tag_length = 0;
-			if (tag != metallib_program_info::TAG_TYPE::END) {
+			if (tag != TAG_TYPE::END) {
 				tag_length = *(const uint16_t*)add_program_md_ptr;
 				add_program_md_ptr += 2;
 				
@@ -561,13 +543,13 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 			}
 			
 			switch(tag) {
-				case metallib_program_info::TAG_TYPE::HSRD: {
+				case TAG_TYPE::HSRD: {
 					const auto src_archives_offset = *(const uint64_t*)add_program_md_ptr;
 					const auto src_archives_length = *(const uint64_t*)(add_program_md_ptr + 8u);
 					os << "\nembedded source archives:\n\toffset: " << src_archives_offset << "\n\tlength: " << src_archives_length << '\n';
 					break;
 				}
-				case metallib_program_info::TAG_TYPE::UUID: {
+				case TAG_TYPE::UUID: {
 					os << "\nUUID: ";
 					raw_ostream::uuid_t uuid;
 					memcpy(&uuid, add_program_md_ptr, sizeof(uuid));
@@ -575,7 +557,7 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 					os << '\n';
 					break;
 				}
-				case metallib_program_info::TAG_TYPE::END: {
+				case TAG_TYPE::END: {
 					found_end_tag = true;
 					break;
 				}
@@ -597,9 +579,9 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 		
 		bool found_end_tag = false;
 		while (!found_end_tag) {
-			const auto tag = *(const metallib_program_info::TAG_TYPE*)debug_ptr; debug_ptr += 4;
+			const auto tag = *(const TAG_TYPE*)debug_ptr; debug_ptr += 4;
 			uint32_t tag_length = 0;
-			if(tag != metallib_program_info::TAG_TYPE::END) {
+			if(tag != TAG_TYPE::END) {
 				tag_length = *(const uint16_t*)debug_ptr;
 				debug_ptr += 2;
 				
@@ -610,16 +592,16 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 			}
 			
 			switch(tag) {
-				case metallib_program_info::TAG_TYPE::DEBI: {
+				case TAG_TYPE::DEBI: {
 					dbg_entry.function_line = *(const uint32_t*)debug_ptr;
 					dbg_entry.source_file_name = string((const char*)debug_ptr + 4, tag_length - 5u);
 					break;
 				}
-				case metallib_program_info::TAG_TYPE::DEPF: {
+				case TAG_TYPE::DEPF: {
 					dbg_entry.dependent_file = string((const char*)debug_ptr, tag_length - 1u);
 					break;
 				}
-				case metallib_program_info::TAG_TYPE::END: {
+				case TAG_TYPE::END: {
 					found_end_tag = true;
 					break;
 				}
@@ -633,6 +615,106 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 		// only set this debug entry if it actually contains anything
 		if (!dbg_entry.source_file_name.empty() || !dbg_entry.dependent_file.empty()) {
 			entry.debug = move(dbg_entry);
+		}
+	}
+	
+	// parse reflection info
+	for (uint32_t i = 0; i < program_count; ++i) {
+		auto& entry = info.entries[i];
+		
+		metallib_program_info::reflection_entry refl_entry {};
+		refl_ptr += 4;
+		
+		bool found_end_tag = false;
+		while (!found_end_tag) {
+			const auto tag = *(const TAG_TYPE*)refl_ptr; refl_ptr += 4;
+			uint32_t tag_length = 0;
+			if (tag != TAG_TYPE::END) {
+				tag_length = *(const uint16_t*)refl_ptr;
+				refl_ptr += 2;
+				
+				if (tag_length == 0) {
+					return make_error<StringError>("tag " + to_string(uint32_t(tag)) + " should not be empty",
+												   inconvertibleErrorCode());
+				}
+			}
+			
+			switch (tag) {
+				case TAG_TYPE::VATT: {
+					// initial vertex attribute data
+					auto tag_refl_ptr = refl_ptr;
+					const auto vattr_end_ptr = tag_refl_ptr + tag_length;
+					const auto vattr_count = (uint32_t)*(const uint16_t*)tag_refl_ptr; tag_refl_ptr += 2;
+					refl_entry.vertex_attributes.resize(vattr_count);
+					for (auto& vattr : refl_entry.vertex_attributes) {
+						// parse name
+						const auto name_end_ptr = find(tag_refl_ptr, vattr_end_ptr, '\0');
+						if (name_end_ptr == vattr_end_ptr) {
+							return make_error<StringError>("failed to find name end terminator for vertex attribute",
+														   inconvertibleErrorCode());
+						}
+						vattr.name = std::string((const char*)tag_refl_ptr, (const char*)name_end_ptr);
+						tag_refl_ptr = name_end_ptr + 1;
+						
+						// parse other (16-bit)
+						const auto other = *(const uint16_t*)tag_refl_ptr; tag_refl_ptr += 2;
+						vattr.index = other & 0x1FFFu;
+						vattr.use = (VERTEX_USE)((other & 0x6000u) >> 13u);
+						vattr.active = ((other & 0x8000u) != 0u);
+					}
+					break;
+				}
+				case TAG_TYPE::VATY: {
+					// vertex attribute type data
+					if (refl_entry.vertex_attributes.empty()) {
+						return make_error<StringError>("no prior vertex attribute data exists - can't add vertex types",
+													   inconvertibleErrorCode());
+					}
+					if (tag_length - 2 != refl_entry.vertex_attributes.size()) {
+						return make_error<StringError>("vertex attribute count mismatch: got " + to_string(uint32_t(tag_length - 2)) +
+													   ", expected: " + to_string(refl_entry.vertex_attributes.size()),
+													   inconvertibleErrorCode());
+					}
+					
+					auto tag_refl_ptr = refl_ptr;
+					const auto vattr_count = *(const uint16_t*)tag_refl_ptr; tag_refl_ptr += 2;
+					if (vattr_count != refl_entry.vertex_attributes.size()) {
+						return make_error<StringError>("vertex attribute type count mismatch: got " + to_string(uint32_t(vattr_count)) +
+													   ", expected: " + to_string(refl_entry.vertex_attributes.size()),
+													   inconvertibleErrorCode());
+					}
+					
+					for (auto& vattr : refl_entry.vertex_attributes) {
+						vattr.type = *(const DATA_TYPE*)tag_refl_ptr; ++tag_refl_ptr;
+					}
+					break;
+				}
+				case TAG_TYPE::CNST: {
+					// TODO: handle this
+					break;
+				}
+				case TAG_TYPE::RETR: {
+					// TODO: handle this
+					break;
+				}
+				case TAG_TYPE::ARGR: {
+					// TODO: handle this
+					break;
+				}
+				case TAG_TYPE::END: {
+					found_end_tag = true;
+					break;
+				}
+				default:
+					return make_error<StringError>("invalid reflection metadata tag: " + to_string((uint32_t)tag),
+												   inconvertibleErrorCode());
+			}
+			refl_ptr += tag_length;
+		}
+		
+		// only set this reflection entry if it actually contains anything
+		if (!refl_entry.vertex_attributes.empty()) {
+			entry.reflection = move(refl_entry);
 		}
 	}
 	
@@ -674,7 +756,17 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 			hash_hex << uint32_t(prog.sha256_hash[i]);
 		}
 		os << hash_hex.str() << '\n';
-		os << "\ttess info: " << uint32_t(prog.tess_info) << '\n';
+		if (prog.tess.data != 0) {
+			os << "\ttessellation info: ";
+			if (prog.tess.info.primitive_type == 1) {
+				os << "triangle";
+			} else if (prog.tess.info.primitive_type == 2) {
+				os << "quad";
+			} else {
+				os << "<unknown: " << (uint32_t)prog.tess.info.primitive_type << ">";
+			}
+			os << ", " << (uint32_t)prog.tess.info.control_point_count << " control points\n";
+		}
 		os << "\tsource offset: " << uint32_t(prog.source_offset) << '\n';
 		
 		// TODO: could use stringref?
@@ -686,6 +778,31 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 			os << " != expected: " << prog.bitcode_size << " (!!!)";
 		}
 		os << '\n';
+		if (prog.reflection) {
+			if (!prog.reflection->vertex_attributes.empty()) {
+				os << "\tvertex attributes:\n";
+				for (const auto& vattr : prog.reflection->vertex_attributes) {
+					// use: type name @idx
+					os << "\t\t";
+					switch (vattr.use) {
+						case VERTEX_USE::STANDARD:
+							os << "standard-vertex-data";
+							break;
+						case VERTEX_USE::PER_PATCH:
+							os << "per-patch-vertex-data";
+							break;
+						case VERTEX_USE::CONRTOL_POINT:
+							os << "control-point";
+							break;
+						default:
+							os << "<unknown-use>";
+							break;
+					}
+					os << "[" << vattr.index << "]: " << data_type_to_string(vattr.type) << " " << vattr.name;
+					os << (vattr.active ? "" : " (inactive)") << '\n';
+				}
+			}
+		}
 		if (prog.debug) {
 			os << "\tdebug:\n";
 			if (!prog.debug->source_file_name.empty()) {

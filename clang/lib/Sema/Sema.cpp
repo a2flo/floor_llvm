@@ -318,6 +318,10 @@ void Sema::Initialize() {
     addImplicitTypedef("size_t", Context.getSizeType());
   }
 
+  if (getLangOpts().Metal || getLangOpts().Vulkan || getLangOpts().OpenCL) {
+    addImplicitTypedef("__patch_control_point_t", Context.OCLPatchControlPointTy);
+  }
+
   // Initialize predefined OpenCL types and supported extensions and (optional)
   // core features.
   if (getLangOpts().OpenCL) {

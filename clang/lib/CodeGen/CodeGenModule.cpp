@@ -2087,6 +2087,8 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 	const bool is_kernel = FD->hasAttr<ComputeKernelAttr>();
 	const bool is_vertex = FD->hasAttr<GraphicsVertexShaderAttr>();
 	const bool is_fragment = FD->hasAttr<GraphicsFragmentShaderAttr>();
+	[[maybe_unused]] const bool is_tess_control = FD->hasAttr<GraphicsTessellationControlShaderAttr>(); // TODO: implement this!
+	[[maybe_unused]] const bool is_tess_eval = FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>(); // TODO: implement this!
 	
 	SmallVector<llvm::Metadata*, 8> stage_infos;
 	stage_infos.push_back(llvm::MDString::get(VMContext, FD->getName()));
@@ -2097,10 +2099,10 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 	static const std::string prefix_iub = "iub:";
 	
 	//
-	const auto handle_stage_input_output = [this, &stage_infos, &is_vertex, &is_fragment, &Fn](const QualType& clang_type,
-																							   llvm::Type* llvm_type,
-																							   const bool is_return,
-																							   uint32_t* arg_idx) {
+	const auto handle_stage_input_output = [this, &stage_infos, &is_vertex, &is_fragment](const QualType& clang_type,
+																						  llvm::Type* llvm_type,
+																						  const bool is_return,
+																						  uint32_t* arg_idx) {
 		assert((arg_idx != nullptr && !is_return) || (arg_idx == nullptr && is_return) && "invalid args");
 		
 		const bool is_vertex_io = (is_return && is_vertex) || (!is_return && is_fragment);
@@ -2138,8 +2140,10 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 					}
 				}
 				
-				uint32_t struct_arg_idx = 0, fbo_location = 0;
+				//uint32_t struct_arg_idx = 0;
+				uint32_t fbo_location = 0;
 				for (const auto& field : fields) {
+#if 0 // unused?
 					llvm::Type* field_llvm_type = nullptr;
 					// get llvm type from function args (if !return), else get it from the struct type itself
 					if (arg_idx) {
@@ -2147,6 +2151,7 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 					} else {
 						field_llvm_type = llvm_type->getStructElementType(struct_arg_idx++);
 					}
+#endif
 					
 					if (is_vertex_io) {
 						if (field.hasAttr<GraphicsVertexPositionAttr>()) {
@@ -2415,6 +2420,71 @@ static bool is_indirect_buffer(const clang::QualType& type, CodeGenModule &CGM,
 	return false;
 }
 
+struct control_point_info_t {
+	QualType user_type;
+	CXXRecordDecl* rdecl { nullptr };
+	std::vector<RecordDecl::field_iterator> fields;
+};
+static std::optional<control_point_info_t> extract_control_point_info(CodeGenModule& CGM,
+																	  const CXXRecordDecl* parent,
+																	  const FieldDecl* field_decl) {
+	if (!parent || !field_decl) {
+		CGM.Error({}, "invalid parameters for control point type extraction");
+		return {};
+	}
+	
+	auto patch_cp = dyn_cast_or_null<ClassTemplateSpecializationDecl>(parent);
+	if (!patch_cp || patch_cp->getTemplateArgs().size() != 1) {
+		CGM.Error(field_decl->getSourceRange().getBegin(), StringRef("invalid patch control point type"));
+		return {};
+	}
+	const auto& user_cp_type_arg = patch_cp->getTemplateArgs().get(0);
+	if (user_cp_type_arg.getKind() != TemplateArgument::Type) {
+		CGM.Error(field_decl->getSourceRange().getBegin(), StringRef("invalid user-specified control point type"));
+		return {};
+	}
+	auto user_cp_type = user_cp_type_arg.getAsType();
+	auto cp_rdecl = user_cp_type->getAsCXXRecordDecl();
+	if (!cp_rdecl) {
+		CGM.Error(field_decl->getSourceRange().getBegin(), StringRef("user-specified control point type is not a C++ class"));
+		return {};
+	}
+	
+	auto cp_fields = get_aggregate_fields(cp_rdecl);
+	if (cp_fields.empty()) {
+		CGM.Error(field_decl->getSourceRange().getBegin(), StringRef("no fields in user-specified control point type"));
+		return {};
+	}
+	// validate field types, these must be representable in the backend
+	for (const auto& cp_field : cp_fields) {
+		QualType scalar_type = cp_field->getType();
+		// vector compat struct/class -> vector type
+		if (auto cxx_rdecl = scalar_type->getAsCXXRecordDecl(); cxx_rdecl && cxx_rdecl->hasAttr<VectorCompatAttr>()) {
+			scalar_type = CGM.getContext().get_compat_vector_type(cxx_rdecl);
+		}
+		// vector type -> scalar type
+		if (isa<VectorType>(scalar_type)) {
+			auto vec_type = cast<VectorType>(scalar_type);
+			if (vec_type->getNumElements() < 1u || vec_type->getNumElements() > 4u) {
+				CGM.Error(cp_field->getSourceRange().getBegin(),
+						  StringRef("vector type with #elements < 1 or > 4 not supported as a control point type"));
+				return {};
+			}
+			scalar_type = vec_type->getElementType();
+		}
+		// scalar type must be int/uint/float
+		if (!scalar_type->isBooleanType() &&
+			!(scalar_type->isIntegerType() && !isa<EnumType>(scalar_type)) &&
+			!scalar_type->isFloatingType()) {
+			CGM.Error(cp_field->getSourceRange().getBegin(),
+					  StringRef("type is not supported in a control point"));
+			return {};
+		}
+	}
+	
+	return control_point_info_t { user_cp_type, cp_rdecl, std::move(cp_fields) };
+}
+
 void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 								   const CGFunctionInfo &FnInfo,
 								   SmallVector <llvm::Metadata*, 5> &kernelMDArgs,
@@ -2422,10 +2492,13 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 	const bool is_kernel = FD->hasAttr<ComputeKernelAttr>();
 	const bool is_vertex = FD->hasAttr<GraphicsVertexShaderAttr>();
 	const bool is_fragment = FD->hasAttr<GraphicsFragmentShaderAttr>();
+	const bool is_tess_control = FD->hasAttr<GraphicsTessellationControlShaderAttr>();
+	const bool is_tess_eval = FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>();
 	
 	//
 	SmallVector<llvm::Metadata*, 4> stage_infos;
 	SmallVector<llvm::Metadata*, 8> arg_infos;
+	SmallVector<llvm::Metadata*, 4> patch_infos;
 	
 	//
 	const PrintingPolicy &Policy = Context.getPrintingPolicy();
@@ -2622,7 +2695,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 	
 	//
 	auto abi_arg_info_iter = FnInfo.arg_begin();
-	unsigned int arg_idx = 0, buffer_idx = 0, tex_idx = 0;
+	unsigned int arg_idx = 0, buffer_idx = 0u, tex_idx = 0;
 	for (const auto& parm : FD->parameters()) {
 		const auto clang_type = parm->getType();
 		const auto cxx_rdecl = clang_type->getAsCXXRecordDecl();
@@ -3086,11 +3159,90 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 					// #1: type
 					// TODO: handle perspective/center correctly
 					const auto type_name = make_type_name(field.type);
+					bool has_name_and_type = true;
 					if (field.hasAttr<GraphicsVertexPositionAttr>()) {
 						arg_info.push_back(llvm::MDString::get(VMContext, "air.position"));
 						arg_info.push_back(llvm::MDString::get(VMContext, "air.center"));
 						arg_info.push_back(llvm::MDString::get(VMContext, "air.no_perspective"));
+					} else if (field.type->isPatchControlPointT()) {
+						if (!is_tess_eval) {
+							Error(field.field_decl->getSourceRange().getBegin(),
+								  StringRef("patch control points may only be used as an input in tessellation evaluation shaders"));
+							return;
+						}
+						has_name_and_type = false;
+						
+						arg_info.push_back(llvm::MDString::get(VMContext, "air.patch_control_point_input"));
+						
+						// extract the user specified control point info
+						auto cp = extract_control_point_info(*this, field.parents[0], field.field_decl);
+						if (!cp) {
+							return;
+						}
+						
+						// get the control point function
+						llvm::Function* cp_func = nullptr;
+						{
+							std::string gen_type_name = "";
+							llvm::raw_string_ostream gen_type_name_stream(gen_type_name);
+							getCXXABI().getMangleContext().mangleMetalGeneric("", cp->user_type, nullptr, gen_type_name_stream);
+							std::string cp_func_name = "_Z" + gen_type_name_stream.str() + ".MTL_CONTROL_POINT_FN";
+							
+							cp_func = TheModule.getFunction(cp_func_name);
+							if (!cp_func) {
+								// doesn't exist yet -> create it
+								auto user_llvm_type = getTypes().ConvertTypeForMem(cp->user_type);
+								if (auto user_llvm_st_type = dyn_cast_or_null<llvm::StructType>(user_llvm_type);
+									user_llvm_st_type && user_llvm_st_type->getNumElements() != cp->fields.size()) {
+									Error(cp->rdecl->getSourceRange().getBegin(),
+										  StringRef("control point type must not have any padding"));
+									return;
+								}
+								auto cp_ret_gio_type = GraphicsExpandIOType(cp->user_type,
+																			user_llvm_type,
+																			getTypes(), false /* not packed */, true /* always create unnamed */);
+								auto cp_func_type = llvm::FunctionType::get(cp_ret_gio_type,
+																			{ Builder.getInt32Ty(), getTypes().ConvertType(Context.OCLPatchControlPointTy) },
+																			false);
+								auto cp_func_callee = CreateRuntimeFunction(cp_func_type, cp_func_name, {}, false, true);
+								cp_func = dyn_cast_or_null<llvm::Function>(cp_func_callee.getCallee());
+								cp_func->setOnlyReadsMemory();
+								cp_func->setDoesNotThrow();
+								cp_func->setSection("air.externally_defined");
+							}
+						}
+						if (!cp_func) {
+							Error(field.field_decl->getSourceRange().getBegin(), StringRef("failed to get or create control point getter function"));
+							return;
+						}
+						if (buffer_idx != 0) {
+							Error(field.field_decl->getSourceRange().getBegin(), StringRef("stage input must be defined prior to all other buffers"));
+							return;
+						}
+						
+						SmallVector<llvm::Metadata*, 8> cp_func_info;
+						cp_func_info.push_back(llvm::MDString::get(VMContext, "air.patch_control_point_function"));
+						cp_func_info.push_back(llvm::ConstantAsMetadata::get(cp_func));
+						arg_info.emplace_back(llvm::MDNode::get(VMContext, cp_func_info));
+						
+						// add all fields
+						for (const auto& cp_field : cp->fields) {
+							SmallVector<llvm::Metadata*, 8> cp_field_info;
+							cp_field_info.push_back(llvm::MDString::get(VMContext, "air.location_index"));
+							cp_field_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(buffer_idx++)));
+							cp_field_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(1))); // no arrays for now
+							cp_field_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+							cp_field_info.push_back(llvm::MDString::get(VMContext, make_type_name(cp_field->getType())));
+							cp_field_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+							cp_field_info.push_back(llvm::MDString::get(VMContext, cp_field->getName()));
+							arg_info.emplace_back(llvm::MDNode::get(VMContext, cp_field_info));
+						}
 					} else {
+						if (!is_fragment) {
+							Error(field.field_decl->getSourceRange().getBegin(),
+								  StringRef("specified stage input may only be used as an input in fragment shaders"));
+							return;
+						}
 						arg_info.push_back(llvm::MDString::get(VMContext, "air.fragment_input"));
 						arg_info.push_back(llvm::MDString::get(VMContext, StringRef(field.mangled_name)));
 						bool is_int_type = field.type->isIntegerType();
@@ -3109,13 +3261,16 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 						}
 					}
 					
-					// type name
-					arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
-					arg_info.push_back(llvm::MDString::get(VMContext, type_name));
+					if (has_name_and_type) {
+						// type name
+						arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+						arg_info.push_back(llvm::MDString::get(VMContext, type_name));
+						
+						// arg name
+						arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+						arg_info.push_back(llvm::MDString::get(VMContext, field.name));
+					}
 					
-					// arg name
-					arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
-					arg_info.push_back(llvm::MDString::get(VMContext, field.name));
 					arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
 					
 					// next
@@ -3186,7 +3341,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 	}
 	
 	//
-	if (is_kernel) {
+	if (is_kernel || is_tess_control) {
 		// add id handling arg metadata
 		// NOTE: the actual args are added by handleMetalVulkanEntryFunction + the order in here must match the order in there
 		const auto add_id_arg = [this, &arg_idx, &arg_infos, &Builder](const char* name, const char* air_name, const char* air_type) {
@@ -3216,8 +3371,8 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			add_id_arg("__metal__sub_group_size__", "air.threads_per_simdgroup", "uint");
 			add_id_arg("__metal__num_sub_groups__", "air.simdgroups_per_threadgroup", "uint");
 		}
-	} else if (is_vertex) {
-		{
+	} else if (is_vertex || is_tess_eval) {
+		if (is_vertex) {
 			SmallVector<llvm::Metadata*, 6> arg_info;
 			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.vertex_id"));
@@ -3225,6 +3380,16 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			arg_info.push_back(llvm::MDString::get(VMContext, "uint"));
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
 			arg_info.push_back(llvm::MDString::get(VMContext, "__metal__vertex_id__"));
+			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+			++arg_idx; // next llvm arg
+		} else if (is_tess_eval) {
+			SmallVector<llvm::Metadata*, 6> arg_info;
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.patch_id"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "uint"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "__metal__patch_id__"));
 			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
 			++arg_idx; // next llvm arg
 		}
@@ -3241,7 +3406,19 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			++arg_idx; // next llvm arg
 		}
 		
-		const auto add_vs_output = [this, &stage_infos, &make_type_name](const CodeGenTypes::aggregate_scalar_entry& entry,
+		if (is_tess_eval) {
+			SmallVector<llvm::Metadata*, 6> arg_info;
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.position_in_patch"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "float3")); // TODO: quad support (need float2)
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "__metal__position_in_patch__"));
+			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+			++arg_idx; // next llvm arg
+		}
+		
+		const auto add_vs_output = [this, &stage_infos, &make_type_name](const ASTContext::aggregate_scalar_entry& entry,
 																		 const bool force_position = false) {
 			SmallVector<llvm::Metadata*, 6> ret_info;
 			
@@ -3273,9 +3450,9 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			}
 		} else if (!ret_type->isVoidType()) {
 			// direct output: always vertex position, no mangled name
-			add_vs_output(CodeGenTypes::aggregate_scalar_entry {
+			add_vs_output(ASTContext::aggregate_scalar_entry {
 				(cxx_rdecl && cxx_rdecl->hasAttr<VectorCompatAttr>() ?
-				 getTypes().get_compat_vector_type(cxx_rdecl) : ret_type),
+				 Context.get_compat_vector_type(cxx_rdecl) : ret_type),
 				FD->getName().str(), // func name if direct
 				"",
 				nullptr,
@@ -3284,6 +3461,23 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				(cxx_rdecl && cxx_rdecl->hasAttr<VectorCompatAttr>()),
 				false
 			}, true);
+		}
+		
+		// add patch info
+		if (is_tess_eval) {
+			auto patch_attr = FD->getAttr<GraphicsTessellationPatchAttr>();
+			if (!patch_attr) {
+				Error(FD->getSourceRange().getBegin(),
+					  StringRef("missing patch attribute in tessellation evaluation shader"));
+				return;
+			}
+			
+			patch_infos.push_back(llvm::MDString::get(VMContext, "air.patch"));
+			patch_infos.push_back(llvm::MDString::get(VMContext, (patch_attr->getPatchPrimitive() ==
+																 GraphicsTessellationPatchAttr::PatchPrimitiveType::PatchTriangle ?
+																 "triangle" : "quad")));
+			patch_infos.push_back(llvm::MDString::get(VMContext, "air.patch_control_point"));
+			patch_infos.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(patch_attr->getControlPoints())));
 		}
 	} else if (is_fragment) {
 		if (getCodeGenOpts().GraphicsPrimitiveID) {
@@ -3324,7 +3518,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			++arg_idx; // next llvm arg
 		}
 		
-		const auto add_fs_output = [this, &Builder, &stage_infos, &make_type_name](const CodeGenTypes::aggregate_scalar_entry& entry,
+		const auto add_fs_output = [this, &Builder, &stage_infos, &make_type_name](const ASTContext::aggregate_scalar_entry& entry,
 																				   const unsigned int& location) {
 			SmallVector<llvm::Metadata*, 6> rtt_info;
 			
@@ -3416,9 +3610,9 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				}
 			}
 		} else if (!ret_type->isVoidType()) {
-			add_fs_output(CodeGenTypes::aggregate_scalar_entry {
+			add_fs_output(ASTContext::aggregate_scalar_entry {
 				(cxx_rdecl && cxx_rdecl->hasAttr<VectorCompatAttr>() ?
-				 getTypes().get_compat_vector_type(cxx_rdecl) : ret_type),
+				 Context.get_compat_vector_type(cxx_rdecl) : ret_type),
 				FD->getName().str(), // func name if direct
 				"",
 				nullptr,
@@ -3433,6 +3627,9 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 	// insert into kernel metadata
 	kernelMDArgs.push_back(llvm::MDNode::get(VMContext, stage_infos));
 	kernelMDArgs.push_back(llvm::MDNode::get(VMContext, arg_infos));
+	if (!patch_infos.empty()) {
+		kernelMDArgs.push_back(llvm::MDNode::get(VMContext, patch_infos));
+	}
 	
 	// Metal 2.1+ supports defining a max work-group size via max_total_threads_per_threadgroup/air.max_work_group_size
 	if (const ReqdWorkGroupSizeAttr *reg_local_size = FD->getAttr<ReqdWorkGroupSizeAttr>()) {
@@ -3461,7 +3658,9 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 	const bool is_kernel = FD->hasAttr<ComputeKernelAttr>();
 	const bool is_vertex = FD->hasAttr<GraphicsVertexShaderAttr>();
 	const bool is_fragment = FD->hasAttr<GraphicsFragmentShaderAttr>();
-	if (!is_kernel && !is_vertex && !is_fragment) {
+	const bool is_tess_control = FD->hasAttr<GraphicsTessellationControlShaderAttr>();
+	const bool is_tess_eval = FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>();
+	if (!is_kernel && !is_vertex && !is_fragment && !is_tess_control && !is_tess_eval) {
 		return;
 	}
 	
@@ -3480,7 +3679,20 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 	// #1: function name
 	info << Fn->getName().str() << ",";
 	// #2: function type
-	info << (is_kernel ? "1" : (is_vertex ? "2" : "3")) << ",";
+	if (is_kernel) {
+		info << "1";
+	} else if (is_vertex) {
+		info << "2";
+	} else if (is_fragment) {
+		info << "3";
+	} else if (is_tess_control) {
+		info << "4";
+	} else if (is_tess_eval) {
+		info << "5";
+	} else {
+		LLVM_BUILTIN_UNREACHABLE;
+	}
+	info << ",";
 	// #3: function flags
 	if ((getLangOpts().Metal && CGM.getCodeGenOpts().MetalSoftPrintf > 0) ||
 		(getLangOpts().Vulkan && CGM.getCodeGenOpts().VulkanSoftPrintf > 0)) {
@@ -3735,13 +3947,24 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 			return aggregate_image_ret_t { arg_info, arg_index_bias };
 		};
 		// anything that isn't a pointer or special type
-		const auto add_normal_arg = [&compute_type_size](llvm::Type* llvm_type,
-														 const clang::QualType& clang_type,
-														 const FLOOR_ARG_INFO init_info = FLOOR_ARG_INFO::NONE) -> uint64_t /* arg info */ {
+		const auto add_normal_arg = [&compute_type_size, &CGM](llvm::Type* llvm_type,
+															   const clang::QualType& clang_type,
+															   const CXXRecordDecl* parent,
+															   const FieldDecl* field_decl,
+															   const FLOOR_ARG_INFO init_info = FLOOR_ARG_INFO::NONE) -> uint64_t /* arg info */ {
 			// for now: just use the direct type size + no address space
 			uint64_t arg_info = (uint64_t)init_info;
 			// handle some llvm weirdness? why can this be a pointer still?
-			if (llvm_type->isPointerTy()) {
+			if (init_info == FLOOR_ARG_INFO::STAGE_INPUT && clang_type->isPatchControlPointT()) {
+				// NOTE: if this is a tessellation evaluation shader, we know that this must be a control point (no additional special type needed)
+				
+				// extract the user specified control point info (we need to store the #fields)
+				auto cp = extract_control_point_info(CGM, parent, field_decl);
+				if (!cp) {
+					return 0u;
+				}
+				arg_info |= cp->fields.size();
+			} else if (llvm_type->isPointerTy()) {
 				arg_info |= compute_type_size(llvm_type->getPointerElementType());
 			} else {
 				arg_info |= compute_type_size(llvm_type);
@@ -3873,7 +4096,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 									return {};
 								} else {
 									// value / "indirect constant"
-									const auto field_arg_info = add_normal_arg(llvm_field_type, field_type);
+									const auto field_arg_info = add_normal_arg(llvm_field_type, field_type, nullptr, nullptr);
 									this_arg_buf_info << field_arg_info << ",";
 								}
 							}
@@ -3960,10 +4183,10 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 				info << arg_info << ",";
 			}
 		} else if (parm->hasAttr<GraphicsStageInputAttr>()) { // stage input
-			if (!is_vertex && !is_fragment) {
+			if (!is_vertex && !is_fragment && !is_tess_eval) {
 				// TODO: should check this in sema
 				// TODO: should also make sure that only 1 exists
-				CGM.Error(FD->getSourceRange().getBegin(), "[[stage_input]] only allowed on vertex and fragment functions");
+				CGM.Error(FD->getSourceRange().getBegin(), "[[stage_input]] only allowed on vertex, fragment and tessellation-evaluation functions");
 			}
 			
 			if (cxx_rdecl) {
@@ -3972,7 +4195,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 				for (const auto& field : fields) {
 					// TODO: check if field type is int or float!
 					const auto field_llvm_type = std::next(Fn->arg_begin(), arg_idx)->getType();
-					const auto arg_info = add_normal_arg(field_llvm_type, field.type, FLOOR_ARG_INFO::STAGE_INPUT);
+					const auto arg_info = add_normal_arg(field_llvm_type, field.type, field.parents[0], field.field_decl, FLOOR_ARG_INFO::STAGE_INPUT);
 					info << arg_info << ",";
 					++arg_idx;
 				}
@@ -3980,11 +4203,11 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 			} else {
 				// add as-is
 				// TODO: check if type is int or float!
-				const auto arg_info = add_normal_arg(llvm_type, clang_type, FLOOR_ARG_INFO::STAGE_INPUT);
+				const auto arg_info = add_normal_arg(llvm_type, clang_type, nullptr, nullptr, FLOOR_ARG_INFO::STAGE_INPUT);
 				info << arg_info << ",";
 			}
 		} else {
-			const auto arg_info = add_normal_arg(llvm_type, clang_type);
+			const auto arg_info = add_normal_arg(llvm_type, clang_type, nullptr, nullptr);
 			info << arg_info << ",";
 		}
 		
@@ -7275,10 +7498,11 @@ void CodeGenModule::HandleCXXStaticMemberVarInstantiation(VarDecl *VD) {
   EmitTopLevelDecl(VD);
 }
 
-static llvm::Type* GraphicsExpandIOType(const QualType& type,
-										llvm::Type* llvm_type,
-										CodeGenTypes& CGT,
-										const bool is_metal_2_3) {
+llvm::Type* CodeGenModule::GraphicsExpandIOType(const QualType& type,
+												llvm::Type* llvm_type,
+												CodeGenTypes& CGT,
+												const bool create_packed,
+												const bool create_unnamed) {
 	const llvm::StructType* ST = dyn_cast<llvm::StructType>(llvm_type);
 	if(!ST) return llvm_type;
 	
@@ -7286,7 +7510,7 @@ static llvm::Type* GraphicsExpandIOType(const QualType& type,
 	
 	// if the top decl already is a compat vector, return it directly
 	if(cxx_rdecl->hasAttr<VectorCompatAttr>()) {
-		return CGT.ConvertType(CGT.get_compat_vector_type(cxx_rdecl));
+		return CGT.ConvertType(Context.get_compat_vector_type(cxx_rdecl));
 	}
 	
 	// check if we already handled this
@@ -7303,13 +7527,12 @@ static llvm::Type* GraphicsExpandIOType(const QualType& type,
 	}
 	
 	llvm::StructType* ret = nullptr;
-	if (!is_metal_2_3) {
-		const std::string name = "struct.floor.flat." + cxx_rdecl->getName().str() + ".packed";
-		ret = llvm::StructType::create(llvm_fields, name, true); // always make this packed
+	if (!create_unnamed) {
+		const std::string name = "struct.floor.flat." + cxx_rdecl->getName().str() + (create_packed ? ".packed" : "");
+		ret = llvm::StructType::create(llvm_fields, name, create_packed);
 	} else {
-		// TODO/NOTE: this is disabled for now, since it can't handle complex types (but note that this isn't required anyways)
-		// Metal 2.3+: make this an unnamed struct
-		ret = llvm::StructType::get(CGT.getLLVMContext(), llvm_fields, true); // always make this packed
+		// TODO/NOTE: this can't handle complex types yet!
+		ret = llvm::StructType::get(CGT.getLLVMContext(), llvm_fields, create_packed);
 	}
 	ret->setGraphicsIOType(); // fix up alignment/sizes/offsets
 	CGT.create_flattened_cg_layout(cxx_rdecl, ret, fields); // create corresponding flattend CGRecordLayout
@@ -7324,14 +7547,15 @@ void CodeGenModule::EmitGlobalFunctionDefinition(GlobalDecl GD,
   const CGFunctionInfo &FI = getTypes().arrangeGlobalDeclaration(GD);
   if (D && (getLangOpts().Metal || getLangOpts().Vulkan)) {
     // TODO: do this properly in CGCall
-    // if this is a vertex/fragment shader function and we have an I/O type that is a struct/aggregate,
+    // if this is a shader function and we have an I/O type that is a struct/aggregate,
     // fully expand/flatten all types within (i.e. structs and arrays to scalars, keep existing scalars)
-    if (D->hasAttr<GraphicsVertexShaderAttr>() || D->hasAttr<GraphicsFragmentShaderAttr>()) {
+    if (D->hasAttr<GraphicsVertexShaderAttr>() || D->hasAttr<GraphicsFragmentShaderAttr>() ||
+        D->hasAttr<GraphicsTessellationControlShaderAttr>() || D->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
 		//const bool is_metal_2_3 = (getLangOpts().MetalVersion >= 230); // TODO/NOTE: disabled for now, see above
 		const bool is_metal_2_3 = false;
 		if (FI.getReturnType()->isStructureOrClassType()) {
 			auto& retInfo = const_cast<ABIArgInfo&>(FI.getReturnInfo());
-			retInfo.setCoerceToType(GraphicsExpandIOType(FI.getReturnType(), retInfo.getCoerceToType(), getTypes(), is_metal_2_3));
+			retInfo.setCoerceToType(GraphicsExpandIOType(FI.getReturnType(), retInfo.getCoerceToType(), getTypes(), true, is_metal_2_3));
 		}
 		for (const auto& param : D->parameters()) {
 			const auto param_type = param->getType();

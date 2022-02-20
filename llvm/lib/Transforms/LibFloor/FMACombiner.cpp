@@ -92,6 +92,8 @@ namespace {
 		bool is_kernel_func { false };
 		bool is_vertex_func { false };
 		bool is_fragment_func { false };
+		bool is_tess_control_func { false };
+		bool is_tess_eval_func { false };
 		
 		std::unordered_set<Instruction*> unreachable_kill_list;
 		
@@ -107,7 +109,15 @@ namespace {
 			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
 			is_vertex_func = F.getCallingConv() == CallingConv::FLOOR_VERTEX;
 			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
-			if(!is_kernel_func && !is_vertex_func && !is_fragment_func) return false;
+			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
+			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
+			if (!is_kernel_func &&
+				!is_vertex_func &&
+				!is_fragment_func &&
+				!is_tess_control_func &&
+				!is_tess_eval_func) {
+				return false;
+			}
 			
 			DBG(errs() << "> FMA combiner: "; errs().write_escaped(F.getName()) << '\n';)
 			

@@ -134,17 +134,23 @@ namespace CallingConv {
     PTX_Device = 72,
 
     /// AIR/Metal and SPIR-V/Vulkan vertex shader function calling convention
-    /// NOTE: for metal this is entirely virtual and will be stripped in the end
+    /// NOTE: for Metal this is entirely virtual and will be stripped in the end
     FLOOR_VERTEX = 73,
     /// AIR/Metal and SPIR-V/Vulkan fragment shader function calling convention
-    /// NOTE: for metal this is entirely virtual and will be stripped in the end
+    /// NOTE: for Metal this is entirely virtual and will be stripped in the end
     FLOOR_FRAGMENT = 74,
+    /// AIR/Metal and SPIR-V/Vulkan tessellation control shader function calling convention
+    /// NOTE: for Metal this is entirely virtual and will be stripped in the end
+    FLOOR_TESS_CONTROL = 200,
+    /// AIR/Metal and SPIR-V/Vulkan tessellation evaluation shader function calling convention
+    /// NOTE: for Metal this is entirely virtual and will be stripped in the end
+    FLOOR_TESS_EVAL = 201,
     /// OpenCL/SPIR/SPIR-V, AIR/Metal, CUDA and SPIR-V/Vulkan normal function calling convention (not an entry point)
-    /// NOTE: for metal this is entirely virtual and will be stripped in the end
+    /// NOTE: for Metal this is entirely virtual and will be stripped in the end
     /// NOTE: used to be SPIR_FUNC, must be 75 for binary compat
     FLOOR_FUNC = 75,
     /// OpenCL/SPIR/SPIR-V, AIR/Metal, CUDA and SPIR-V/Vulkan compute kernel function calling convention
-    /// NOTE: for metal this is entirely virtual and will be stripped in the end
+    /// NOTE: for Metal this is entirely virtual and will be stripped in the end
     /// NOTE: used to be SPIR_KERNEL, must be 76 for binary compat
     FLOOR_KERNEL = 76,
 

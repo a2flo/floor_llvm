@@ -62,6 +62,9 @@ llvm::Type *CGOpenCLRuntime::convertOpenCLSpecificType(const Type *T) {
     case BuiltinType::OCLReserveID:
       return llvm::PointerType::get(
           llvm::StructType::create(Ctx, "opencl.reserve_id_t"), AddrSpc);
+    case BuiltinType::OCLPatchControlPoint:
+      return llvm::PointerType::get(
+          llvm::StructType::create(Ctx, "struct._patch_control_point_t"), AddrSpc);
 #define EXT_OPAQUE_TYPE(ExtType, Id, Ext) \
     case BuiltinType::Id: \
       return llvm::PointerType::get( \
@@ -117,6 +120,8 @@ llvm::Type *CGOpenCLRuntime::convertOpenCLSpecificType(const Type *T) {
         return get_or_create_opaque_ptr_type("struct._sampler_t", CGM.getContext().getTargetAddressSpace(LangAS::opencl_constant));
       case BuiltinType::OCLEvent:
         return get_or_create_opaque_ptr_type("struct._event_t", 0);
+      case BuiltinType::OCLPatchControlPoint:
+        return get_or_create_opaque_ptr_type("struct._patch_control_point_t", AddrSpc);
     }
   }
   llvm_unreachable("Unexpected builtin type!");

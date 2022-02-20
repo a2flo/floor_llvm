@@ -129,7 +129,9 @@ static void diagnoseBadTypeAttribute(Sema &S, const ParsedAttr &attr,
   case ParsedAttr::AT_PreserveAll:                                             \
   case ParsedAttr::AT_ComputeKernel:                                           \
   case ParsedAttr::AT_GraphicsVertexShader:                                    \
-  case ParsedAttr::AT_GraphicsFragmentShader
+  case ParsedAttr::AT_GraphicsFragmentShader:                                  \
+  case ParsedAttr::AT_GraphicsTessellationControlShader:                       \
+  case ParsedAttr::AT_GraphicsTessellationEvaluationShader
 
 // Function type attributes.
 #define FUNCTION_TYPE_ATTRS_CASELIST                                           \
@@ -1723,6 +1725,9 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
     break;
   case DeclSpec::TST_reserve_id_t:
     Result = Context.OCLReserveIDTy;
+    break;
+  case DeclSpec::TST_patch_control_point_t:
+    Result = Context.OCLPatchControlPointTy;
     break;
 
 #define GENERIC_IMAGE_TYPE(ImgType, Id)                                        \
@@ -3951,22 +3956,26 @@ static CallingConv getCCForDeclaratorChunk(
   CallingConv CC = S.Context.getDefaultCallingConvention(FTI.isVariadic,
                                                          IsCXXInstanceMethod);
 
-  // Attributes AT_ComputeKernel, AT_GraphicsVertexShader, AT_GraphicsFragmentShader
+  // Attributes AT_ComputeKernel and AT_Graphics*
   // affect the calling convention only on SPIR, AIR and CUDA targets, hence they cannot
   // be treated as calling convention attributes. This is the simplest place to infer
-  // "floor_kernel"/"floor_vertex"/"floor_fragment".
+  // "floor_kernel"/"floor_vertex"/"floor_fragment"/"floor_tess*".
   if (CC == CC_FloorFunction) {
     for (const ParsedAttr &AL : D.getDeclSpec().getAttributes()) {
       if (AL.getKind() == ParsedAttr::AT_ComputeKernel) {
         CC = CC_FloorKernel;
         break;
-      }
-      if (AL.getKind() == ParsedAttr::AT_GraphicsVertexShader) {
+      } else if (AL.getKind() == ParsedAttr::AT_GraphicsVertexShader) {
         CC = CC_FloorVertex;
         break;
-      }
-      if (AL.getKind() == ParsedAttr::AT_GraphicsFragmentShader) {
+      } else if (AL.getKind() == ParsedAttr::AT_GraphicsFragmentShader) {
         CC = CC_FloorFragment;
+        break;
+      } else if (AL.getKind() == ParsedAttr::AT_GraphicsTessellationControlShader) {
+        CC = CC_FloorTessControl;
+        break;
+      } else if (AL.getKind() == ParsedAttr::AT_GraphicsTessellationEvaluationShader) {
+        CC = CC_FloorTessEval;
         break;
       }
     }
@@ -7449,6 +7458,10 @@ static Attr *getCCTypeAttr(ASTContext &Ctx, ParsedAttr &Attr) {
     return createSimpleAttr<GraphicsVertexShaderAttr>(Ctx, Attr);
   case ParsedAttr::AT_GraphicsFragmentShader:
     return createSimpleAttr<GraphicsFragmentShaderAttr>(Ctx, Attr);
+  case ParsedAttr::AT_GraphicsTessellationControlShader:
+    return createSimpleAttr<GraphicsTessellationControlShaderAttr>(Ctx, Attr);
+  case ParsedAttr::AT_GraphicsTessellationEvaluationShader:
+    return createSimpleAttr<GraphicsTessellationEvaluationShaderAttr>(Ctx, Attr);
   case ParsedAttr::AT_ComputeKernel:
     return createSimpleAttr<ComputeKernelAttr>(Ctx, Attr);
   }
@@ -8270,6 +8283,7 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
     case ParsedAttr::AT_GraphicsVertexPosition:
     case ParsedAttr::AT_GraphicsPointSize:
     case ParsedAttr::AT_GraphicsStageInput:
+    case ParsedAttr::AT_GraphicsTessellationPatch:
       attr.setUsedAsTypeAttr();
       break;
     case ParsedAttr::AT_LifetimeBound:

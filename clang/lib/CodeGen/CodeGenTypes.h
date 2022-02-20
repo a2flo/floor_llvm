@@ -297,48 +297,21 @@ public:
   void addRecordTypeName(const RecordDecl *RD, llvm::StructType *Ty,
                          StringRef suffix);
 
-  //
-  struct aggregate_scalar_entry {
-	clang::QualType type;
-	std::string name;
-	std::string mangled_name;
-    const AttrVec* attrs;
-	// NOTE: this is nullptr for non-fields!
-    const FieldDecl* field_decl;
-    std::vector<const CXXRecordDecl*> parents;
-    bool compat_vector;
-    bool is_in_base;
-	
-	template <typename SpecificAttr>
-	bool hasAttr() const {
-		if(attrs == nullptr) return false;
-		return hasSpecificAttr<SpecificAttr>(*attrs);
-	}
-	
-	template <typename SpecificAttr>
-	SpecificAttr* getAttr() const {
-		if(attrs == nullptr) return nullptr;
-		return getSpecificAttr<SpecificAttr>(*attrs);
-	}
-  };
-
   // will recurse through the specified class/struct decl, its base classes,
   // all its contained class/struct/union decls, all its contained arrays,
   // returning a vector of all contained/scalarized fields + info
   // NOTE: for unions, only the first field will be considered
   // NOTE: this also transform/converts [[vector_compat]] types to clang vector types
-  std::vector<aggregate_scalar_entry> get_aggregate_scalar_fields(const CXXRecordDecl* root_decl,
-                                                                  const CXXRecordDecl* decl,
-																  const bool ignore_root_vec_compat = false,
-																  const bool ignore_bases = false,
-																  const bool expand_array_image = true) const;
-
-  // returns the corresponding clang vector type for a [[vector_compat]] aggregate
-  clang::QualType get_compat_vector_type(const CXXRecordDecl* decl) const;
+  std::vector<ASTContext::aggregate_scalar_entry>
+  get_aggregate_scalar_fields(const CXXRecordDecl* root_decl,
+                              const CXXRecordDecl* decl,
+                              const bool ignore_root_vec_compat = false,
+                              const bool ignore_bases = false,
+                              const bool expand_array_image = true) const;
 
   //
   void create_flattened_cg_layout(const CXXRecordDecl* decl, llvm::StructType* type,
-								  const std::vector<aggregate_scalar_entry>& fields);
+								  const std::vector<ASTContext::aggregate_scalar_entry>& fields);
 
   // for all entry functions/points: handle the function type -> add implicit internal args
   // "FTy" is optional and if specified will update the function type
@@ -352,17 +325,6 @@ public:
   bool is_flattened_struct_type(llvm::Type* Ty) const {
     return FlattenedCGRecordLayouts.count(Ty) > 0;
   }
-
-private:
-  // helper function for get_aggregate_scalar_fields
-  void aggregate_scalar_fields_add_array(const CXXRecordDecl* root_decl,
-										 const CXXRecordDecl* parent_decl,
-                                         const ConstantArrayType* CAT,
-                                         const AttrVec* attrs,
-										 const FieldDecl* parent_field_decl,
-                                         const std::string& name,
-										 const bool expand_array_image,
-                                         std::vector<CodeGenTypes::aggregate_scalar_entry>& ret) const;
 
 
 public:  // These are internal details of CGT that shouldn't be used externally.

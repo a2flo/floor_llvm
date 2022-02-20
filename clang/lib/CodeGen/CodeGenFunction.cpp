@@ -600,7 +600,9 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
 {
   if (!FD->hasAttr<ComputeKernelAttr>() &&
       !FD->hasAttr<GraphicsVertexShaderAttr>() &&
-	  !FD->hasAttr<GraphicsFragmentShaderAttr>()) {
+	  !FD->hasAttr<GraphicsFragmentShaderAttr>() &&
+	  !FD->hasAttr<GraphicsTessellationControlShaderAttr>() &&
+	  !FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
     return;
   }
 
@@ -662,8 +664,10 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
   if (!CGM.getLangOpts().Metal) {
     MainMetadataNode = CGM.getModule().getOrInsertNamedMetadata("opencl.kernels");
   } else {
+    // NOTE: tess control acts as a kernel, tess eval as a vertex shader
     MainMetadataNode = CGM.getModule().getOrInsertNamedMetadata(
-      (FD->hasAttr<GraphicsVertexShaderAttr>() ? "air.vertex" :
+      (FD->hasAttr<GraphicsVertexShaderAttr>() ||
+       FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>() ? "air.vertex" :
        (FD->hasAttr<GraphicsFragmentShaderAttr>() ? "air.fragment" : "air.kernel")));
   }
   MainMetadataNode->addOperand(kernelMDNode);
@@ -1246,11 +1250,12 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
     Addr = Builder.CreateAlignedLoad(Ty, Addr, getPointerAlign(), "agg.result");
     ReturnValue = Address(Addr, CGM.getNaturalTypeAlignment(RetTy));
   } else {
-    // fix retval allocation for vertex/fragment shader return values (use the computed coerce type)
+    // fix retval allocation for shader return values (use the computed coerce type)
     const FunctionDecl *FD = dyn_cast_or_null<FunctionDecl>(D);
     if (FD &&
         (FD->hasAttr<GraphicsVertexShaderAttr>() ||
-         FD->hasAttr<GraphicsFragmentShaderAttr>())) {
+         FD->hasAttr<GraphicsFragmentShaderAttr>() ||
+         FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>())) {
       auto RetAlloc = CreateTempAlloca(FnInfo.getReturnInfo().getCoerceToType(), "retval");
       CharUnits Align = getContext().getTypeAlignInChars(RetTy);
       RetAlloc->setAlignment(Align.getAsAlign());
