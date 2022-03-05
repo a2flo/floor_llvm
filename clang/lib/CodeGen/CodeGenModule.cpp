@@ -2238,6 +2238,7 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 			const auto canon_data_type = data_type->getImageDataType().getCanonicalType();
 			if (canon_data_type->isIntegerType()) sample_type_str = "int";
 			if (canon_data_type->isUnsignedIntegerType()) sample_type_str = "uint";
+			if (canon_data_type->isHalfType()) sample_type_str = "half";
 			// else: just assume float
 		}
 		

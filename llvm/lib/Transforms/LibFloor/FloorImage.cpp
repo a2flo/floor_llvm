@@ -451,14 +451,15 @@ void FloorImageBasePass::handle_image(CallBase& CB, const StringRef& func_name) 
 				return;
 			}
 			if(!data_vec_type->getElementType()->isFloatTy() &&
+			   !data_vec_type->getElementType()->isHalfTy() &&
 			   !data_vec_type->getElementType()->isIntegerTy()) {
-				ctx->emitError(&CB, "invalid image data type (must be a float or integer vector)");
+				ctx->emitError(&CB, "invalid image data type (must be a float, half or integer vector)");
 				return;
 			}
 		} else {
 			const auto data_type = data_arg->getType();
-			if (!data_type->isFloatTy()) {
-				ctx->emitError(&CB, "invalid image data type (must be a single float when writing depth)");
+			if (!data_type->isFloatTy() && !data_type->isHalfTy()) {
+				ctx->emitError(&CB, "invalid image data type (must be a single float or half when writing depth)");
 				return;
 			}
 		}

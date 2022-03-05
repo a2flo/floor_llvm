@@ -902,6 +902,7 @@ void VerifyMetadataCoreFeatures::execute(const llvm::Module *M) {
     return;
   }
 
+#if 0 // don't/can't check this here
   // Optional core features MetaData structure:
   // !opencl.used.optional.core.features  = {!8}
   // ...
@@ -944,6 +945,7 @@ void VerifyMetadataCoreFeatures::execute(const llvm::Module *M) {
       assert(false && "Unhandled core feature");
     }
   }
+#endif
 }
 
 
@@ -955,6 +957,7 @@ void VerifyMetadataKHRExtensions::execute(const llvm::Module *M) {
     return;
   }
 
+#if 0 // don't/can't check this here
   // KHR extensions MetaData structure:
   // !opencl.used.extensions = !{!6}
   // ...
@@ -990,6 +993,7 @@ void VerifyMetadataKHRExtensions::execute(const llvm::Module *M) {
       //assert(false && "Unhandled KHR extension");
     }
   }
+#endif
 }
 
 void VerifyMetadataCompilerOptions::execute(const llvm::Module *M) {

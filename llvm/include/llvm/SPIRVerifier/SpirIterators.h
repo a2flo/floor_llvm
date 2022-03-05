@@ -174,9 +174,9 @@ private:
 
 struct DataHolder {
   DataHolder() :
-    Is32Bit(true),
-    HasDoubleFeature(false), HasImageFeature(false),
-    HASFp16Extension(false) {
+    Is32Bit(false),
+    HasDoubleFeature(true), HasImageFeature(true),
+    HASFp16Extension(true) {
   }
 
   /// @brief Sizeof pointer indectaor
@@ -429,7 +429,7 @@ struct VerifyMetadataCoreFeatures : public ModuleExecutor {
 
 private:
   ErrorCreator *ErrCreator;
-  DataHolder *Data;
+  [[maybe_unused]] DataHolder *Data;
 };
 
 struct VerifyMetadataKHRExtensions : public ModuleExecutor {
@@ -444,7 +444,7 @@ struct VerifyMetadataKHRExtensions : public ModuleExecutor {
 
 private:
   ErrorCreator *ErrCreator;
-  DataHolder *Data;
+  [[maybe_unused]] DataHolder *Data;
 };
 
 struct VerifyMetadataCompilerOptions : public ModuleExecutor {

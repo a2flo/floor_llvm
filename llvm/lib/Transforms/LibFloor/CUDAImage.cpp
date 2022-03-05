@@ -152,7 +152,7 @@ namespace {
 			// -> return data
 			std::string dtype;
 			llvm::Type* ret_type, *ret_vec_type;
-			if(func_name == "floor.cuda.read_image.float") {
+			if (func_name == "floor.cuda.read_image.float") {
 				dtype = "f32";
 				constraints_str = "=f,=f,=f,=f";
 				ret_type = llvm::StructType::get(*ctx, std::vector<llvm::Type*> {{
@@ -162,8 +162,17 @@ namespace {
 					llvm::Type::getFloatTy(*ctx)
 				}});
 				ret_vec_type = llvm::FixedVectorType::get(llvm::Type::getFloatTy(*ctx), 4);
-			}
-			else if(func_name == "floor.cuda.read_image.int") {
+			} else if (func_name == "floor.cuda.read_image.half") {
+				dtype = "f16";
+				constraints_str = "=h,=h,=h,=h";
+				ret_type = llvm::StructType::get(*ctx, std::vector<llvm::Type*> {{
+					llvm::Type::getHalfTy(*ctx),
+					llvm::Type::getHalfTy(*ctx),
+					llvm::Type::getHalfTy(*ctx),
+					llvm::Type::getHalfTy(*ctx)
+				}});
+				ret_vec_type = llvm::FixedVectorType::get(llvm::Type::getHalfTy(*ctx), 4);
+			} else if (func_name == "floor.cuda.read_image.int") {
 				dtype = "s32";
 				constraints_str = "=r,=r,=r,=r";
 				ret_type = llvm::StructType::get(*ctx, std::vector<llvm::Type*> {{
@@ -173,8 +182,7 @@ namespace {
 					llvm::Type::getInt32Ty(*ctx)
 				}});
 				ret_vec_type = llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*ctx), 4);
-			}
-			else if(func_name == "floor.cuda.read_image.uint") {
+			} else if (func_name == "floor.cuda.read_image.uint") {
 				dtype = "u32";
 				constraints_str = "=r,=r,=r,=r";
 				ret_type = llvm::StructType::get(*ctx, std::vector<llvm::Type*> {{
@@ -460,6 +468,7 @@ namespace {
 								   const std::string& geom,
 								   const bool is_array,
 								   const bool is_float,
+								   const bool is_half,
 								   const bool is_int,
 								   const DebugLoc& debug_loc) {
 			SmallVector<llvm::Type*, 16> asm_arg_types;
@@ -522,6 +531,10 @@ namespace {
 				rtype = "h"; // can't go lower than 16-bit
 				
 				for (uint32_t i = 0; i < write_channel_count; ++i) {
+					if (data_args[i]->getType()->isHalfTy()) {
+						// using half precision for normalization here would lose precision -> cast to float first
+						data_args[i] = builder->CreateFPCast(data_args[i], builder->getFloatTy());
+					}
 					data_args[i] = builder->CreateFMul(data_args[i],
 													   ConstantFP::get(builder->getFloatTy(),
 																	   is_int ?
@@ -538,13 +551,13 @@ namespace {
 						break;
 					case COMPUTE_IMAGE_TYPE::FORMAT_16:
 						dtype = "b16";
-						rtype = (is_float ? "f" : "h");
+						rtype = (is_float && !is_half ? "f" : "h");
 						break;
 					case COMPUTE_IMAGE_TYPE::FORMAT_24:
 					case COMPUTE_IMAGE_TYPE::FORMAT_32_8:
 					case COMPUTE_IMAGE_TYPE::FORMAT_32:
 						dtype = "b32";
-						rtype = (is_float ? "f" : "r");
+						rtype = (is_float || is_half ? "f" : "r");
 						break;
 					default:
 						assert(false && "invalid write format - should not be here!");
@@ -553,7 +566,7 @@ namespace {
 				}
 				
 				// need to trunc 32-bit data to 16-bit (for 8-bit/16-bit int/uint writes)
-				if (rtype == "h") {
+				if (rtype == "h" && !is_half) {
 					for (uint32_t i = 0; i < write_channel_count; ++i) {
 						builder->CreateTrunc(data_args[i], builder->getInt16Ty());
 					}
@@ -631,9 +644,10 @@ namespace {
 			}
 			
 			const auto is_float = (func_name == "floor.cuda.write_image.float");
+			const auto is_half = (func_name == "floor.cuda.write_image.half");
 			const auto is_int = (func_name == "floor.cuda.write_image.int");
 			const auto is_uint = (func_name == "floor.cuda.write_image.uint");
-			if (!is_float && !is_int && !is_uint) {
+			if (!is_float && !is_half && !is_int && !is_uint) {
 				return; // unknown -> ignore
 			}
 			
@@ -677,7 +691,7 @@ namespace {
 				auto start_block = I.getParent();
 				auto end_block = start_block->splitBasicBlock(&I, "write_end");
 				builder->SetInsertPoint(start_block->getTerminator());
-				llvm::SwitchInst* sw = builder->CreateSwitch(rt_cmp_val, def_unreachable_block, is_float ? 7 : 4);
+				llvm::SwitchInst* sw = builder->CreateSwitch(rt_cmp_val, def_unreachable_block, is_float || is_half ? 7 : 4);
 				start_block->getTerminator()->eraseFromParent();
 				
 				const bool is_fixed_channel_count = image_channel_count.has_value();
@@ -686,36 +700,36 @@ namespace {
 							COMPUTE_IMAGE_TYPE(uint64_t(channel_count - 1u) << uint64_t(COMPUTE_IMAGE_TYPE::__CHANNELS_SHIFT)));
 				};
 				const auto emit_block = [&](const std::string& name, COMPUTE_IMAGE_TYPE base_format, COMPUTE_IMAGE_TYPE case_rt_type, const uint32_t channel_count,
-											const bool is_float, const bool is_int) {
+											const bool is_float, const bool is_half, const bool is_int) {
 					auto block = BasicBlock::Create(*ctx, "write_" + name, func);
 					sw->addCase(ConstantInt::get(img_type_int_type, uint64_t(case_rt_type | channel_bit(channel_count))), block);
 					builder->SetInsertPoint(block);
 					emit_write_image(img_handle_arg, base_format, has_flag<COMPUTE_IMAGE_TYPE::FLAG_NORMALIZED>(case_rt_type), channel_count,
-									 coord_arg, coord_type, coord_vec_type, layer_arg, data_args, geom, is_array, is_float, is_int, debug_loc);
+									 coord_arg, coord_type, coord_vec_type, layer_arg, data_args, geom, is_array, is_float, is_half, is_int, debug_loc);
 					BranchInst::Create(end_block, block);
 					return block;
 				};
 				
 				for (uint32_t channel_count = (image_channel_count ? *image_channel_count : 1); channel_count <= (image_channel_count ? *image_channel_count : 4); ++channel_count) {
-					if (is_float) {
-						emit_block("unorm8", COMPUTE_IMAGE_TYPE::FORMAT_8, COMPUTE_IMAGE_TYPE::FORMAT_8 | COMPUTE_IMAGE_TYPE::UINT | COMPUTE_IMAGE_TYPE::FLAG_NORMALIZED, channel_count, false, false);
-						emit_block("snorm8", COMPUTE_IMAGE_TYPE::FORMAT_8, COMPUTE_IMAGE_TYPE::FORMAT_8 | COMPUTE_IMAGE_TYPE::INT | COMPUTE_IMAGE_TYPE::FLAG_NORMALIZED, channel_count, false, true);
-						emit_block("unorm16", COMPUTE_IMAGE_TYPE::FORMAT_16, COMPUTE_IMAGE_TYPE::FORMAT_16 | COMPUTE_IMAGE_TYPE::UINT | COMPUTE_IMAGE_TYPE::FLAG_NORMALIZED, channel_count, false, false);
-						emit_block("snorm16", COMPUTE_IMAGE_TYPE::FORMAT_16, COMPUTE_IMAGE_TYPE::FORMAT_16 | COMPUTE_IMAGE_TYPE::INT | COMPUTE_IMAGE_TYPE::FLAG_NORMALIZED, channel_count, false, true);
-						emit_block("f16", COMPUTE_IMAGE_TYPE::FORMAT_16, COMPUTE_IMAGE_TYPE::FORMAT_16 | COMPUTE_IMAGE_TYPE::FLOAT, channel_count, true, false);
-						auto f32_block = emit_block("f32", COMPUTE_IMAGE_TYPE::FORMAT_32, COMPUTE_IMAGE_TYPE::FORMAT_32 | COMPUTE_IMAGE_TYPE::FLOAT, channel_count, true, false);
+					if (is_float || is_half) {
+						emit_block("unorm8", COMPUTE_IMAGE_TYPE::FORMAT_8, COMPUTE_IMAGE_TYPE::FORMAT_8 | COMPUTE_IMAGE_TYPE::UINT | COMPUTE_IMAGE_TYPE::FLAG_NORMALIZED, channel_count, false, false, false);
+						emit_block("snorm8", COMPUTE_IMAGE_TYPE::FORMAT_8, COMPUTE_IMAGE_TYPE::FORMAT_8 | COMPUTE_IMAGE_TYPE::INT | COMPUTE_IMAGE_TYPE::FLAG_NORMALIZED, channel_count, false, false, true);
+						emit_block("unorm16", COMPUTE_IMAGE_TYPE::FORMAT_16, COMPUTE_IMAGE_TYPE::FORMAT_16 | COMPUTE_IMAGE_TYPE::UINT | COMPUTE_IMAGE_TYPE::FLAG_NORMALIZED, channel_count, false, false, false);
+						emit_block("snorm16", COMPUTE_IMAGE_TYPE::FORMAT_16, COMPUTE_IMAGE_TYPE::FORMAT_16 | COMPUTE_IMAGE_TYPE::INT | COMPUTE_IMAGE_TYPE::FLAG_NORMALIZED, channel_count, false, false, true);
+						emit_block("f16", COMPUTE_IMAGE_TYPE::FORMAT_16, COMPUTE_IMAGE_TYPE::FORMAT_16 | COMPUTE_IMAGE_TYPE::FLOAT, channel_count, is_float, is_half, false);
+						auto f32_block = emit_block("f32", COMPUTE_IMAGE_TYPE::FORMAT_32, COMPUTE_IMAGE_TYPE::FORMAT_32 | COMPUTE_IMAGE_TYPE::FLOAT, channel_count, is_float, is_half, false);
 						// NOTE: 32-bit float + 8-bit stencil contains exactly the same code as only 32-bit float -> reuse "f32"
 						sw->addCase(ConstantInt::get(img_type_int_type, uint64_t(COMPUTE_IMAGE_TYPE::FORMAT_32_8 | COMPUTE_IMAGE_TYPE::FLOAT | channel_bit(channel_count))), f32_block);
 					} else if (is_uint) {
-						emit_block("ui8", COMPUTE_IMAGE_TYPE::FORMAT_8, COMPUTE_IMAGE_TYPE::FORMAT_8 | COMPUTE_IMAGE_TYPE::UINT, channel_count, false, false);
-						emit_block("ui16", COMPUTE_IMAGE_TYPE::FORMAT_16, COMPUTE_IMAGE_TYPE::FORMAT_16 | COMPUTE_IMAGE_TYPE::UINT, channel_count, false, false);
-						emit_block("ui24", COMPUTE_IMAGE_TYPE::FORMAT_24, COMPUTE_IMAGE_TYPE::FORMAT_24 | COMPUTE_IMAGE_TYPE::UINT, channel_count, false, false);
-						emit_block("ui32", COMPUTE_IMAGE_TYPE::FORMAT_32, COMPUTE_IMAGE_TYPE::FORMAT_32 | COMPUTE_IMAGE_TYPE::UINT, channel_count, false, false);
+						emit_block("ui8", COMPUTE_IMAGE_TYPE::FORMAT_8, COMPUTE_IMAGE_TYPE::FORMAT_8 | COMPUTE_IMAGE_TYPE::UINT, channel_count, false, false, false);
+						emit_block("ui16", COMPUTE_IMAGE_TYPE::FORMAT_16, COMPUTE_IMAGE_TYPE::FORMAT_16 | COMPUTE_IMAGE_TYPE::UINT, channel_count, false, false, false);
+						emit_block("ui24", COMPUTE_IMAGE_TYPE::FORMAT_24, COMPUTE_IMAGE_TYPE::FORMAT_24 | COMPUTE_IMAGE_TYPE::UINT, channel_count, false, false, false);
+						emit_block("ui32", COMPUTE_IMAGE_TYPE::FORMAT_32, COMPUTE_IMAGE_TYPE::FORMAT_32 | COMPUTE_IMAGE_TYPE::UINT, channel_count, false, false, false);
 					} else if (is_int) {
-						emit_block("i8", COMPUTE_IMAGE_TYPE::FORMAT_8, COMPUTE_IMAGE_TYPE::FORMAT_8 | COMPUTE_IMAGE_TYPE::INT, channel_count, false, true);
-						emit_block("i16", COMPUTE_IMAGE_TYPE::FORMAT_16, COMPUTE_IMAGE_TYPE::FORMAT_16 | COMPUTE_IMAGE_TYPE::INT, channel_count, false, true);
-						emit_block("i24", COMPUTE_IMAGE_TYPE::FORMAT_24, COMPUTE_IMAGE_TYPE::FORMAT_24 | COMPUTE_IMAGE_TYPE::INT, channel_count, false, true);
-						emit_block("i32", COMPUTE_IMAGE_TYPE::FORMAT_32, COMPUTE_IMAGE_TYPE::FORMAT_32 | COMPUTE_IMAGE_TYPE::INT, channel_count, false, true);
+						emit_block("i8", COMPUTE_IMAGE_TYPE::FORMAT_8, COMPUTE_IMAGE_TYPE::FORMAT_8 | COMPUTE_IMAGE_TYPE::INT, channel_count, false, false, true);
+						emit_block("i16", COMPUTE_IMAGE_TYPE::FORMAT_16, COMPUTE_IMAGE_TYPE::FORMAT_16 | COMPUTE_IMAGE_TYPE::INT, channel_count, false, false, true);
+						emit_block("i24", COMPUTE_IMAGE_TYPE::FORMAT_24, COMPUTE_IMAGE_TYPE::FORMAT_24 | COMPUTE_IMAGE_TYPE::INT, channel_count, false, false, true);
+						emit_block("i32", COMPUTE_IMAGE_TYPE::FORMAT_32, COMPUTE_IMAGE_TYPE::FORMAT_32 | COMPUTE_IMAGE_TYPE::INT, channel_count, false, false, true);
 					}
 				}
 			};

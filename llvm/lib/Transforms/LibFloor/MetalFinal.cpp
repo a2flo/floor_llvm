@@ -864,7 +864,7 @@ namespace {
 		
 		//
 		void visitCallInst(CallInst &I) {
-			// if this isn't a kernel function we don't need to do anything here (yet)
+			// if this isn't a kernel/shader function we don't need to do anything here (yet)
 			if (!is_kernel_func &&
 				!is_vertex_func &&
 				!is_fragment_func &&
@@ -874,9 +874,13 @@ namespace {
 			}
 			
 			const auto func = I.getCalledFunction();
-			if(!func) return;
+			if (!func) return;
 			const auto func_name = func->getName();
-			if(!func_name.startswith("floor.")) return;
+			if (func_name.startswith("air.")) {
+				check_air_call(I);
+				return;
+			}
+			if (!func_name.startswith("floor.")) return;
 			
 			builder->SetInsertPoint(&I);
 			
@@ -1031,6 +1035,20 @@ namespace {
 			// replace call with vector load / elem extraction from the appropriate vector
 			I.replaceAllUsesWith(get_from_vector ? builder->CreateExtractElement(id, I.getOperand(0)) : id);
 			I.eraseFromParent();
+		}
+		
+		// performs some simple air.* call checks (e.g. if the call is valid in the current function type)
+		void check_air_call(CallInst& CI) {
+			const auto air_func = CI.getCalledFunction();
+			const auto air_func_name = air_func->getName();
+			if (air_func_name == "air.dfdx.f32" || air_func_name == "air.dfdy.f32" || air_func_name == "air.fwidth.f32" ||
+				air_func_name == "air.discard_fragment") {
+				if (!is_fragment_func) {
+					llvm::errs() << "in " << func->getName() << ": calling '" << air_func_name << "' is only allowed inside a fragment shader\n";
+					llvm::errs() << CI << "\n";
+					llvm::errs().flush();
+				}
+			}
 		}
 		
 		// like SPIR, Metal only supports scalar conversion ops ->
