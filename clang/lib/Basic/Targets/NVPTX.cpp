@@ -44,6 +44,7 @@ NVPTXTargetInfo::NVPTXTargetInfo(const llvm::Triple &Triple,
     if (!Feature.startswith("+ptx"))
       continue;
     PTXVersion = llvm::StringSwitch<unsigned>(Feature)
+                     .Case("+ptx77", 77)
                      .Case("+ptx76", 76)
                      .Case("+ptx75", 75)
                      .Case("+ptx74", 74)
@@ -265,6 +266,8 @@ void NVPTXTargetInfo::getTargetDefines(const LangOptions &Opts,
         return "870";
       case CudaArch::SM_88:
         return "880";
+      case CudaArch::SM_90:
+        return "900";
       }
       llvm_unreachable("unhandled CudaArch");
     }();

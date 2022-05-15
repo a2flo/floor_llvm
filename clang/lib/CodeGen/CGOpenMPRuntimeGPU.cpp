@@ -3873,6 +3873,7 @@ void CGOpenMPRuntimeGPU::processRequiresDirective(
       case CudaArch::SM_86:
       case CudaArch::SM_87:
       case CudaArch::SM_88:
+      case CudaArch::SM_90:
       case CudaArch::GFX600:
       case CudaArch::GFX601:
       case CudaArch::GFX602:
