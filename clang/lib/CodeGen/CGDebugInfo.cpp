@@ -572,10 +572,17 @@ void CGDebugInfo::CreateCompileUnit() {
     Producer = getClangFullVersion();
   } else {
     // override producer when targeting Metal
-    if (CGM.getLangOpts().MetalVersion < 240) {
-      Producer = "Apple LLVM version 31001.143 (metalfe-31001.143)";
-    } else {
-      Producer = "Apple metal version 31001.363 (metalfe-31001.363)";
+    switch (CGM.getLangOpts().MetalVersion) {
+      default:
+      case 230:
+        Producer = "Apple LLVM version 31001.143 (metalfe-31001.143)";
+        break;
+      case 240:
+        Producer = "Apple metal version 31001.363 (metalfe-31001.363)";
+        break;
+      case 300:
+        Producer = "Apple metal version 31001.638 (metalfe-31001.638.1)";
+        break;
     }
   }
 

@@ -88,8 +88,8 @@ static cl::opt<bool> PreserveAssemblyUseListOrder(
  header:
  [program metadata offset: uint64_t]
  [program metadata length: uint64_t]
- [reflection metadata offset: uint64_t]
- [reflection metadata length: uint64_t]
+ [extended metadata offset: uint64_t]
+ [extended metadata length: uint64_t]
  [debug metadata offset: uint64_t]
  [debug metadata length: uint64_t]
  [bitcode offset: uint64_t]
@@ -109,7 +109,7 @@ static cl::opt<bool> PreserveAssemblyUseListOrder(
     [UUID: uint8_t[16]]
  [additional program metadata terminator: char[4] = "ENDT"]
  
- [reflection metadata ...]
+ [extended metadata ...]
  [debug metadata ...]
  
  bitcode:
@@ -120,13 +120,21 @@ static cl::opt<bool> PreserveAssemblyUseListOrder(
  [linker command line info: \0-terminated string]
  [working direction: \0-terminated string]
  source archives:
- 	[source archive length: uint32_t]
+    [source archive length: uint32_t]
     [source archive...]
         [magic: char[4] = SARC] // NOTE: program source offsets point here (+"embedded source code offset")
         [archive length: uint32_t]
         [archive number in ASCII: uint16_t = 0x30/'0'...]
         [bzip2 compressed .a archive]
  
+ (opt) reflection list:
+ [reflection list entry count: uint32_t]
+ reflection list:
+    [reflection list entry length: uint32_t]
+    [reflection list entry...]
+        [tag: char[4] = RBUF]
+        [tag length: uint32_t]
+        [RBUF data...]
  */
 
 //
@@ -155,8 +163,8 @@ static_assert(sizeof(metallib_version) == 12, "invalid version header length");
 struct __attribute__((packed)) metallib_header_control {
 	uint64_t programs_offset;
 	uint64_t programs_length;
-	uint64_t reflection_offset;
-	uint64_t reflection_length;
+	uint64_t extended_md_offset;
+	uint64_t extended_md_length;
 	uint64_t debug_offset;
 	uint64_t debug_length;
 	uint64_t bitcode_offset;
@@ -190,7 +198,7 @@ struct metallib_program_info {
 	
 	struct offset_info {
 		// NOTE: these are all relative offsets -> add to metallib_header_control offsets to get absolute offsets
-		uint64_t reflection_offset;
+		uint64_t extended_md_offset;
 		uint64_t debug_offset;
 		uint64_t bitcode_offset;
 	};
@@ -201,8 +209,12 @@ struct metallib_program_info {
 		std::string dependent_file;
 	};
 	
-	struct reflection_entry {
+	struct extended_md_entry {
 		std::vector<vertex_attribute> vertex_attributes;
+	};
+	
+	struct reflection_entry {
+		int _not_implemented_yet = 0;
 	};
 	
 	struct entry {
@@ -226,6 +238,8 @@ struct metallib_program_info {
 		} tess;
 		uint64_t source_offset { 0 };
 		std::optional<debug_entry> debug;
+		std::optional<extended_md_entry> extended_md;
+		std::optional<uint64_t> reflection_offset;
 		std::optional<reflection_entry> reflection;
 	};
 	vector<entry> entries;
@@ -413,8 +427,8 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	os << '\n';
 	os << "programs_offset: " << header.header_control.programs_offset << '\n';
 	os << "programs_length: " << header.header_control.programs_length << '\n';
-	os << "reflection_offset: " << header.header_control.reflection_offset << '\n';
-	os << "reflection_length: " << header.header_control.reflection_length << '\n';
+	os << "extended_md_offset: " << header.header_control.extended_md_offset << '\n';
+	os << "extended_md_length: " << header.header_control.extended_md_length << '\n';
 	os << "debug_offset: " << header.header_control.debug_offset << '\n';
 	os << "debug_length: " << header.header_control.debug_length << '\n';
 	os << "bitcode_offset: " << header.header_control.bitcode_offset << '\n';
@@ -430,11 +444,11 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	const auto add_program_md_offset = header.header_control.programs_offset + 4 + header.header_control.programs_length;
 	auto add_program_md_ptr = &data[add_program_md_offset];
 	const auto add_program_md_end = find((const uint32_t*)add_program_md_ptr,
-										 (const uint32_t*)add_program_md_ptr + (header.header_control.reflection_offset -
+										 (const uint32_t*)add_program_md_ptr + (header.header_control.extended_md_offset -
 																				add_program_md_offset) / 4u,
 										 0x54444E45u /* rev(ENDT) */) + 1;
 	const auto add_program_md_length = std::distance(add_program_md_ptr, (const char*)add_program_md_end);
-	auto refl_ptr = &data[header.header_control.reflection_offset];
+	auto extended_md_ptr = &data[header.header_control.extended_md_offset];
 	auto debug_ptr = &data[header.header_control.debug_offset];
 	
 	const auto program_count = *(const uint32_t*)program_ptr; program_ptr += 4;
@@ -443,7 +457,7 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	
 	hex_dump(os, program_ptr, header.header_control.programs_length, "program metadata");
 	hex_dump(os, add_program_md_ptr, add_program_md_length, "additional program metadata");
-	hex_dump(os, refl_ptr, header.header_control.reflection_length, "reflection metadata");
+	hex_dump(os, extended_md_ptr, header.header_control.extended_md_length, "extended metadata");
 	hex_dump(os, debug_ptr, header.header_control.debug_length, "debug metadata");
 	
 	for(uint32_t i = 0; i < program_count; ++i) {
@@ -511,6 +525,14 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 					entry.source_offset = *(const uint64_t*)program_ptr;
 					break;
 				}
+				case TAG_TYPE::RFLT: {
+					if (tag_length != 8) {
+						return make_error<StringError>("invalid RFLT size: " + to_string(tag_length),
+													   inconvertibleErrorCode());
+					}
+					entry.reflection_offset = *(const uint64_t*)program_ptr;
+					break;
+				}
 				case TAG_TYPE::END: {
 					found_end_tag = true;
 					break;
@@ -527,6 +549,8 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 	}
 	
 	// parse additional metadata
+	std::optional<uint64_t> refl_list_offset;
+	std::optional<uint64_t> refl_list_length;
 	{
 		bool found_end_tag = false;
 		while (!found_end_tag) {
@@ -555,6 +579,12 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 					memcpy(&uuid, add_program_md_ptr, sizeof(uuid));
 					os.write_uuid(uuid);
 					os << '\n';
+					break;
+				}
+				case TAG_TYPE::RLST: {
+					refl_list_offset = *(const uint64_t*)add_program_md_ptr;
+					refl_list_length = *(const uint64_t*)(add_program_md_ptr + 8u);
+					os << "\nreflection list:\n\toffset: " << *refl_list_offset << "\n\tlength: " << *refl_list_length << '\n';
 					break;
 				}
 				case TAG_TYPE::END: {
@@ -618,20 +648,20 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 		}
 	}
 	
-	// parse reflection info
+	// parse extended md info
 	for (uint32_t i = 0; i < program_count; ++i) {
 		auto& entry = info.entries[i];
 		
-		metallib_program_info::reflection_entry refl_entry {};
-		refl_ptr += 4;
+		metallib_program_info::extended_md_entry ext_md_entry {};
+		extended_md_ptr += 4;
 		
 		bool found_end_tag = false;
 		while (!found_end_tag) {
-			const auto tag = *(const TAG_TYPE*)refl_ptr; refl_ptr += 4;
+			const auto tag = *(const TAG_TYPE*)extended_md_ptr; extended_md_ptr += 4;
 			uint32_t tag_length = 0;
 			if (tag != TAG_TYPE::END) {
-				tag_length = *(const uint16_t*)refl_ptr;
-				refl_ptr += 2;
+				tag_length = *(const uint16_t*)extended_md_ptr;
+				extended_md_ptr += 2;
 				
 				if (tag_length == 0) {
 					return make_error<StringError>("tag " + to_string(uint32_t(tag)) + " should not be empty",
@@ -642,22 +672,22 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 			switch (tag) {
 				case TAG_TYPE::VATT: {
 					// initial vertex attribute data
-					auto tag_refl_ptr = refl_ptr;
-					const auto vattr_end_ptr = tag_refl_ptr + tag_length;
-					const auto vattr_count = (uint32_t)*(const uint16_t*)tag_refl_ptr; tag_refl_ptr += 2;
-					refl_entry.vertex_attributes.resize(vattr_count);
-					for (auto& vattr : refl_entry.vertex_attributes) {
+					auto tag_extended_md_ptr = extended_md_ptr;
+					const auto vattr_end_ptr = tag_extended_md_ptr + tag_length;
+					const auto vattr_count = (uint32_t)*(const uint16_t*)tag_extended_md_ptr; tag_extended_md_ptr += 2;
+					ext_md_entry.vertex_attributes.resize(vattr_count);
+					for (auto& vattr : ext_md_entry.vertex_attributes) {
 						// parse name
-						const auto name_end_ptr = find(tag_refl_ptr, vattr_end_ptr, '\0');
+						const auto name_end_ptr = find(tag_extended_md_ptr, vattr_end_ptr, '\0');
 						if (name_end_ptr == vattr_end_ptr) {
 							return make_error<StringError>("failed to find name end terminator for vertex attribute",
 														   inconvertibleErrorCode());
 						}
-						vattr.name = std::string((const char*)tag_refl_ptr, (const char*)name_end_ptr);
-						tag_refl_ptr = name_end_ptr + 1;
+						vattr.name = std::string((const char*)tag_extended_md_ptr, (const char*)name_end_ptr);
+						tag_extended_md_ptr = name_end_ptr + 1;
 						
 						// parse other (16-bit)
-						const auto other = *(const uint16_t*)tag_refl_ptr; tag_refl_ptr += 2;
+						const auto other = *(const uint16_t*)tag_extended_md_ptr; tag_extended_md_ptr += 2;
 						vattr.index = other & 0x1FFFu;
 						vattr.use = (VERTEX_USE)((other & 0x6000u) >> 13u);
 						vattr.active = ((other & 0x8000u) != 0u);
@@ -666,26 +696,26 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 				}
 				case TAG_TYPE::VATY: {
 					// vertex attribute type data
-					if (refl_entry.vertex_attributes.empty()) {
+					if (ext_md_entry.vertex_attributes.empty()) {
 						return make_error<StringError>("no prior vertex attribute data exists - can't add vertex types",
 													   inconvertibleErrorCode());
 					}
-					if (tag_length - 2 != refl_entry.vertex_attributes.size()) {
+					if (tag_length - 2 != ext_md_entry.vertex_attributes.size()) {
 						return make_error<StringError>("vertex attribute count mismatch: got " + to_string(uint32_t(tag_length - 2)) +
-													   ", expected: " + to_string(refl_entry.vertex_attributes.size()),
+													   ", expected: " + to_string(ext_md_entry.vertex_attributes.size()),
 													   inconvertibleErrorCode());
 					}
 					
-					auto tag_refl_ptr = refl_ptr;
-					const auto vattr_count = *(const uint16_t*)tag_refl_ptr; tag_refl_ptr += 2;
-					if (vattr_count != refl_entry.vertex_attributes.size()) {
+					auto tag_extended_md_ptr = extended_md_ptr;
+					const auto vattr_count = *(const uint16_t*)tag_extended_md_ptr; tag_extended_md_ptr += 2;
+					if (vattr_count != ext_md_entry.vertex_attributes.size()) {
 						return make_error<StringError>("vertex attribute type count mismatch: got " + to_string(uint32_t(vattr_count)) +
-													   ", expected: " + to_string(refl_entry.vertex_attributes.size()),
+													   ", expected: " + to_string(ext_md_entry.vertex_attributes.size()),
 													   inconvertibleErrorCode());
 					}
 					
-					for (auto& vattr : refl_entry.vertex_attributes) {
-						vattr.type = *(const DATA_TYPE*)tag_refl_ptr; ++tag_refl_ptr;
+					for (auto& vattr : ext_md_entry.vertex_attributes) {
+						vattr.type = *(const DATA_TYPE*)tag_extended_md_ptr; ++tag_extended_md_ptr;
 					}
 					break;
 				}
@@ -706,15 +736,86 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 					break;
 				}
 				default:
-					return make_error<StringError>("invalid reflection metadata tag: " + to_string((uint32_t)tag),
+					return make_error<StringError>("invalid extended metadata tag: " + to_string((uint32_t)tag),
 												   inconvertibleErrorCode());
 			}
-			refl_ptr += tag_length;
+			extended_md_ptr += tag_length;
 		}
 		
-		// only set this reflection entry if it actually contains anything
-		if (!refl_entry.vertex_attributes.empty()) {
-			entry.reflection = move(refl_entry);
+		// only set this extended md entry if it actually contains anything
+		if (!ext_md_entry.vertex_attributes.empty()) {
+			entry.extended_md = move(ext_md_entry);
+		}
+	}
+	
+	// parse reflection list
+	if (refl_list_offset && refl_list_length) {
+		if (*refl_list_offset + *refl_list_length > buffer.size()) {
+			return make_error<StringError>("reflection list data goes out-of-bounds: " +
+										   to_string(*refl_list_offset + *refl_list_length) + " > " + to_string(buffer.size()),
+										   inconvertibleErrorCode());
+		}
+		for (uint32_t i = 0; i < program_count; ++i) {
+			auto& entry = info.entries[i];
+			if (!entry.reflection_offset) {
+				continue;
+			}
+			if (*entry.reflection_offset >= *refl_list_length) {
+				return make_error<StringError>("reflection offset is out-of-bounds: " + to_string(*entry.reflection_offset),
+											   inconvertibleErrorCode());
+			}
+			
+			metallib_program_info::reflection_entry refl_entry {};
+			auto refl_ptr = &data[*refl_list_offset + *entry.reflection_offset];
+			const auto refl_len = *(const uint32_t*)refl_ptr;
+			const auto refl_end_ptr = refl_ptr + refl_len;
+			refl_ptr += 4;
+			if (*entry.reflection_offset + refl_len > *refl_list_length) {
+				return make_error<StringError>("reflection length is out-of-bounds: " +
+											   to_string(*entry.reflection_offset + refl_len) + " > " + to_string(*refl_list_length),
+											   inconvertibleErrorCode());
+			}
+			
+			bool found_end_tag = false;
+			while (!found_end_tag && refl_ptr < refl_end_ptr) {
+				const auto tag = *(const TAG_TYPE*)refl_ptr; refl_ptr += 4;
+				uint32_t tag_length = 0;
+				if (tag != TAG_TYPE::END) {
+					// NOTE: tag length is 32-bit here
+					tag_length = *(const uint32_t*)refl_ptr;
+					refl_ptr += 4;
+					
+					if (tag_length == 0) {
+						return make_error<StringError>("tag " + to_string(uint32_t(tag)) + " should not be empty",
+													   inconvertibleErrorCode());
+					}
+				}
+				
+				switch (tag) {
+					case TAG_TYPE::RBUF: {
+						// TODO: handle this
+						// NOTE: this contains AIRR and the actual reflection data
+						break;
+					}
+					case TAG_TYPE::END: {
+						found_end_tag = true;
+						break;
+					}
+					default:
+						return make_error<StringError>("invalid reflection list tag: " + to_string((uint32_t)tag),
+													   inconvertibleErrorCode());
+				}
+				refl_ptr += tag_length;
+			}
+			if (!found_end_tag) {
+				return make_error<StringError>("reached the end of the reflection list data, but no end tag was found",
+											   inconvertibleErrorCode());
+			}
+			
+			// only set this reflection list entry if it actually contains anything
+			if (refl_entry._not_implemented_yet) {
+				entry.reflection = move(refl_entry);
+			}
 		}
 	}
 	
@@ -743,7 +844,7 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 		os << '\n';
 		os << "\tversion: " << prog.metal_version.major << "." << prog.metal_version.minor << "." << prog.metal_version.rev << '\n';
 		os << "\tlanguage: " << prog.metal_language_version.major << "." << prog.metal_language_version.minor << "." << prog.metal_language_version.rev << '\n';
-		os << "\trel offsets (refl, dbg, bc): " << prog.offset.reflection_offset << ", " << prog.offset.debug_offset << ", " << prog.offset.bitcode_offset << '\n';
+		os << "\trel offsets (ext, dbg, bc): " << prog.offset.extended_md_offset << ", " << prog.offset.debug_offset << ", " << prog.offset.bitcode_offset << '\n';
 		os << "\tbitcode size: " << prog.bitcode_size << '\n';
 		os << "\thash: ";
 		
@@ -778,10 +879,10 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 			os << " != expected: " << prog.bitcode_size << " (!!!)";
 		}
 		os << '\n';
-		if (prog.reflection) {
-			if (!prog.reflection->vertex_attributes.empty()) {
+		if (prog.extended_md) {
+			if (!prog.extended_md->vertex_attributes.empty()) {
 				os << "\tvertex attributes:\n";
-				for (const auto& vattr : prog.reflection->vertex_attributes) {
+				for (const auto& vattr : prog.extended_md->vertex_attributes) {
 					// use: type name @idx
 					os << "\t\t";
 					switch (vattr.use) {
@@ -802,6 +903,9 @@ static Expected<bool> openInputFile(char** argv, std::unique_ptr<ToolOutputFile>
 					os << (vattr.active ? "" : " (inactive)") << '\n';
 				}
 			}
+		}
+		if (prog.reflection_offset) {
+			os << "\treflection offset: " << *prog.reflection_offset << '\n';
 		}
 		if (prog.debug) {
 			os << "\tdebug:\n";

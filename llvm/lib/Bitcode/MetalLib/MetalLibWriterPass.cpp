@@ -98,8 +98,8 @@ static_assert(sizeof(metallib_version) == 12, "invalid version header length");
 struct __attribute__((packed)) metallib_header_control {
   uint64_t programs_offset;
   uint64_t programs_length;
-  uint64_t reflection_offset;
-  uint64_t reflection_length;
+  uint64_t extended_md_offset;
+  uint64_t extended_md_length;
   uint64_t debug_offset;
   uint64_t debug_length;
   uint64_t bitcode_offset;
@@ -138,7 +138,7 @@ struct metallib_program_info {
   struct offset_info {
     // NOTE: these are all relative offsets -> add to metallib_header_control
     // offsets to get absolute offsets
-    uint64_t reflection_offset;
+    uint64_t extended_md_offset;
     uint64_t debug_offset;
     uint64_t bitcode_offset;
   };
@@ -162,9 +162,9 @@ struct metallib_program_info {
     string bitcode_data{""}; // -> used via raw_string_ostream later on
     uint64_t bitcode_size{0};
 
-    // same for reflection and debug data
-    string reflection_data{""};
-    uint64_t reflection_size{0};
+    // same for extended metadata and debug data
+    string extended_md_data{""};
+    uint64_t extended_md_size{0};
     string debug_data{""};
     uint64_t debug_size{0};
 
@@ -217,16 +217,16 @@ struct metallib_program_info {
       }
 
       bitcode_size = bitcode_data.size();
-      reflection_size = reflection_data.size();
+      extended_md_size = extended_md_data.size();
       debug_size = debug_data.size();
     }
-    void update_offsets(uint64_t &running_refl_size, uint64_t &running_dbg_size,
+    void update_offsets(uint64_t &running_ext_md_size, uint64_t &running_dbg_size,
                         uint64_t &running_bc_size) {
-      offset.reflection_offset = running_refl_size;
+      offset.extended_md_offset = running_ext_md_size;
       offset.debug_offset = running_dbg_size;
       offset.bitcode_offset = running_bc_size;
 
-      running_refl_size += reflection_size;
+      running_ext_md_size += extended_md_size;
       running_dbg_size += debug_size;
       running_bc_size += bitcode_size;
     }
@@ -257,7 +257,7 @@ struct metallib_program_info {
       // OFFT
       write_value(OS, TAG_TYPE::OFFSET);
       write_value(OS, uint16_t(sizeof(offset_info)));
-      write_value(OS, offset.reflection_offset);
+      write_value(OS, offset.extended_md_offset);
       write_value(OS, offset.debug_offset);
       write_value(OS, offset.bitcode_offset);
 
@@ -294,8 +294,8 @@ struct metallib_program_info {
       OS.write(bitcode_data.data(), bitcode_data.size());
     }
 
-    void write_reflection(raw_ostream &OS) const {
-      OS.write(reflection_data.data(), reflection_data.size());
+    void write_extended_md(raw_ostream &OS) const {
+      OS.write(extended_md_data.data(), extended_md_data.size());
     }
 
     void write_debug(raw_ostream &OS) const {
@@ -332,6 +332,8 @@ static const unordered_map<uint32_t,
         {200, {{{2, 0, 0}}, {{2, 0, 0}}}}, {210, {{{2, 1, 0}}, {{2, 1, 0}}}},
         {220, {{{2, 2, 0}}, {{2, 2, 0}}}}, {230, {{{2, 3, 0}}, {{2, 3, 0}}}},
         {240, {{{2, 4, 0}}, {{2, 4, 0}}}},
+        // Metal 3.0 uses AIR 2.5
+        {250, {{{2, 5, 0}}, {{3, 0, 0}}}},
     };
 
 static std::string make_abs_file_name(const std::string &file_name_in) {
@@ -426,10 +428,12 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       target_air_version = 210;
     } else if (ios_major == 13) {
       target_air_version = 220;
-    } else if (ios_major >= 14) {
+    } else if (ios_major == 14) {
       target_air_version = 230;
-    } else if (ios_major >= 15) {
+    } else if (ios_major == 15) {
       target_air_version = 240;
+    } else if (ios_major >= 16) {
+      target_air_version = 250;
     }
 
     M.setSDKVersion(VersionTuple{ios_major, ios_minor});
@@ -445,8 +449,10 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     } else if ((osx_major == 11 && osx_minor >= 0) ||
                (osx_major == 10 && osx_minor >= 16)) {
       target_air_version = 230;
-    } else if ((osx_major == 12 && osx_minor >= 0) || osx_major > 12) {
+    } else if (osx_major == 12 && osx_minor >= 0) {
       target_air_version = 240;
+    } else if ((osx_major == 13 && osx_minor >= 0) || osx_major > 13) {
+      target_air_version = 250;
     }
 
     M.setSDKVersion(VersionTuple{osx_major, osx_minor});
@@ -675,7 +681,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
 
   // create per-function modules and fill entries
   uint64_t entries_size = 0;
-  uint64_t reflection_data_size = 0;
+  uint64_t extended_md_data_size = 0;
   uint64_t debug_data_size = 0;
   uint64_t bitcode_data_size = 0;
   for (uint32_t i = 0; i < function_count; ++i) {
@@ -811,6 +817,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
               ident_versions{
                   {230, "Apple LLVM version 31001.143 (metalfe-31001.143)"},
                   {240, "Apple metal version 31001.363 (metalfe-31001.363)"},
+                  {250, "Apple metal version 31001.638 (metalfe-31001.638.1)"},
               };
           ident_op->replaceOperandWith(
               0, llvm::MDString::get(cloned_mod->getContext(),
@@ -947,17 +954,17 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     entry.hash = compute_sha256_hash((const uint8_t *)entry.bitcode_data.data(),
                                      entry.bitcode_data.size());
 
-    // write reflection and debug data (just ENDT right now)
+    // write extended metadata and debug data (just ENDT right now)
     static const auto end_tag = TAG_TYPE::END;
     static const auto dbg_tag = TAG_TYPE::DEBI;
     static const auto dep_tag = TAG_TYPE::DEPF;
     static const uint32_t tag_length = sizeof(TAG_TYPE);
 
-    raw_string_ostream refl_stream{entry.reflection_data};
-    uint32_t refl_length = tag_length + sizeof(uint32_t);
+    raw_string_ostream ext_md_stream{entry.extended_md_data};
+    uint32_t ext_md_length = tag_length + sizeof(uint32_t);
     if (!entry.vertex_attributes.empty()) {
       const auto attr_count = (uint16_t)entry.vertex_attributes.size();
-      refl_length += 2u * (tag_length + sizeof(uint16_t)); // VATT and VATY
+      ext_md_length += 2u * (tag_length + sizeof(uint16_t)); // VATT and VATY
       uint16_t vatt_len = sizeof(uint16_t) /* attr count */ +
                           2u * attr_count /* per-attr info */;
       uint16_t vaty_len =
@@ -965,38 +972,38 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       for (const auto &vattr : entry.vertex_attributes) {
         vatt_len += vattr.name.size() + 1u;
       }
-      refl_length += vatt_len + vaty_len;
-      refl_stream.write((const char *)&refl_length, sizeof(uint32_t));
+      ext_md_length += vatt_len + vaty_len;
+      ext_md_stream.write((const char *)&ext_md_length, sizeof(uint32_t));
 
       static const auto vatt_tag = TAG_TYPE::VATT;
       static const auto vaty_tag = TAG_TYPE::VATY;
 
       // VATT
-      refl_stream.write((const char *)&vatt_tag, tag_length);
-      refl_stream.write((const char *)&vatt_len, sizeof(vatt_len));
-      refl_stream.write((const char *)&attr_count, sizeof(attr_count));
+      ext_md_stream.write((const char *)&vatt_tag, tag_length);
+      ext_md_stream.write((const char *)&vatt_len, sizeof(vatt_len));
+      ext_md_stream.write((const char *)&attr_count, sizeof(attr_count));
       for (const auto &vattr : entry.vertex_attributes) {
-        refl_stream.write(vattr.name.c_str(), vattr.name.size());
-        refl_stream.write('\0');
+        ext_md_stream.write(vattr.name.c_str(), vattr.name.size());
+        ext_md_stream.write('\0');
 
         uint16_t info = vattr.index & 0x1FFFu;
         info |= (uint16_t(vattr.use) & 0x3u) << 13u;
         info |= (vattr.active ? 0x8000u : 0u);
-        refl_stream.write((const char *)&info, sizeof(info));
+        ext_md_stream.write((const char *)&info, sizeof(info));
       }
 
       // VATY
-      refl_stream.write((const char *)&vaty_tag, tag_length);
-      refl_stream.write((const char *)&vaty_len, sizeof(vaty_len));
-      refl_stream.write((const char *)&attr_count, sizeof(attr_count));
+      ext_md_stream.write((const char *)&vaty_tag, tag_length);
+      ext_md_stream.write((const char *)&vaty_len, sizeof(vaty_len));
+      ext_md_stream.write((const char *)&attr_count, sizeof(attr_count));
       for (const auto &vattr : entry.vertex_attributes) {
-        refl_stream.write((const char *)&vattr.type, sizeof(DATA_TYPE));
+        ext_md_stream.write((const char *)&vattr.type, sizeof(DATA_TYPE));
       }
     } else {
-      refl_stream.write((const char *)&refl_length, sizeof(uint32_t));
+      ext_md_stream.write((const char *)&ext_md_length, sizeof(uint32_t));
     }
-    refl_stream.write((const char *)&end_tag, tag_length);
-    refl_stream.flush();
+    ext_md_stream.write((const char *)&end_tag, tag_length);
+    ext_md_stream.flush();
 
     raw_string_ostream dbg_stream{entry.debug_data};
     if (emit_debug_info) {
@@ -1038,16 +1045,16 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     // finish
     entry.update_length();
     entries_size += entry.length;
-    reflection_data_size += entry.reflection_size;
+    extended_md_data_size += entry.extended_md_size;
     debug_data_size += entry.debug_size;
     bitcode_data_size += entry.bitcode_size;
   }
 
   // now that we have created all data/info, update all offsets
-  uint64_t running_refl_size = 0, running_dbg_size = 0, running_bc_size = 0;
+  uint64_t running_ext_md_size = 0, running_dbg_size = 0, running_bc_size = 0;
   for (uint32_t i = 0; i < function_count; ++i) {
     auto &entry = prog_info.entries[i];
-    entry.update_offsets(running_refl_size, running_dbg_size, running_bc_size);
+    entry.update_offsets(running_ext_md_size, running_dbg_size, running_bc_size);
   }
 
   //// start writing
@@ -1058,7 +1065,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       .container_version_major = 1,
       .is_macos_target = TT.isMacOSX(),
       .container_version_minor = 2,
-      .container_version_bugfix = 6,
+	  .container_version_bugfix = uint16_t(target_air_version < 250 ? 6u : 7u),
       .file_type = 0,    // always "execute"
       .is_stub = false,  // never stub
       .is_64_bit = true, // always 64-bit
@@ -1107,7 +1114,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
            : 0u);
   const uint64_t file_length =
       (sizeof(metallib_header) + sizeof(uint32_t) /* #programs */ +
-       entries_size + ext_program_md_size + reflection_data_size +
+       entries_size + ext_program_md_size + extended_md_data_size +
        debug_data_size + bitcode_data_size + src_archive_header_length +
        src_archive_length);
   OS.write((const char *)&file_length, sizeof(uint64_t));
@@ -1115,10 +1122,10 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   // header control
   ctrl.programs_offset = sizeof(metallib_header);
   ctrl.programs_length = entries_size;
-  ctrl.reflection_offset = ctrl.programs_offset + sizeof(uint32_t) +
-                           ctrl.programs_length + ext_program_md_size;
-  ctrl.reflection_length = reflection_data_size;
-  ctrl.debug_offset = ctrl.reflection_offset + ctrl.reflection_length;
+  ctrl.extended_md_offset = ctrl.programs_offset + sizeof(uint32_t) +
+                            ctrl.programs_length + ext_program_md_size;
+  ctrl.extended_md_length = extended_md_data_size;
+  ctrl.debug_offset = ctrl.extended_md_offset + ctrl.extended_md_length;
   ctrl.debug_length = debug_data_size;
   ctrl.bitcode_offset = ctrl.debug_offset + ctrl.debug_length;
   ctrl.bitcode_length = bitcode_data_size;
@@ -1177,9 +1184,9 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     OS.write((const char *)&END_tag, sizeof(TAG_TYPE));
   }
 
-  // write reflection data
+  // write extended metadata
   for (const auto &entry : prog_info.entries) {
-    entry.write_reflection(OS);
+    entry.write_extended_md(OS);
   }
 
   // write debug data

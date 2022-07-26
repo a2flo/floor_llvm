@@ -698,8 +698,13 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
 	  std::array<uint32_t, 3> metal_version;
 	  std::array<uint32_t, 3> metal_language_version;
 	  const auto full_version = CGM.getLangOpts().MetalVersion;
-	  metal_version = {{ full_version / 100u, (full_version % 100u) / 10u, full_version % 10u }};
-	  metal_language_version = metal_version;
+	  metal_language_version = {{ full_version / 100u, (full_version % 100u) / 10u, full_version % 10u }};
+	  if (full_version == 300) {
+		  // Metal 3.0 uses an "air.version" of 2.5.0
+		  metal_version = {{ 2u, 5u, 0u }};
+	  } else {
+		  metal_version = metal_language_version;
+	  }
 	  
 	  SmallVector <llvm::Metadata*, 3> air_version;
 	  air_version.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(metal_version[0])));

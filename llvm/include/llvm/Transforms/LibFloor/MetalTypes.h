@@ -47,7 +47,13 @@ enum TAG_TYPE : uint32_t {
 	OFFSET		= make_tag_type('O', 'F', 'F', 'T'),
 	VERSION		= make_tag_type('V', 'E', 'R', 'S'),
 	SOFF        = make_tag_type('S', 'O', 'F', 'F'),
-	// used in reflection section
+	TESS        = make_tag_type('T', 'E', 'S', 'S'),
+	RFLT		= make_tag_type('R', 'F', 'L', 'T'),
+	// additional metadata
+	HSRD        = make_tag_type('H', 'S', 'R', 'D'),
+	UUID        = make_tag_type('U', 'U', 'I', 'D'),
+	RLST		= make_tag_type('R', 'L', 'S', 'T'),
+	// used in extended metadata section
 	CNST        = make_tag_type('C', 'N', 'S', 'T'),
 	VATT        = make_tag_type('V', 'A', 'T', 'T'),
 	VATY        = make_tag_type('V', 'A', 'T', 'Y'),
@@ -56,14 +62,13 @@ enum TAG_TYPE : uint32_t {
 	// used in debug section
 	DEBI        = make_tag_type('D', 'E', 'B', 'I'),
 	DEPF        = make_tag_type('D', 'E', 'P', 'F'),
-	// additional metadata
-	HSRD        = make_tag_type('H', 'S', 'R', 'D'),
-	UUID        = make_tag_type('U', 'U', 'I', 'D'),
+	// used in reflection list section
+	RBUF        = make_tag_type('R', 'B', 'U', 'F'),
+	AIRR        = make_tag_type('A', 'I', 'R', 'R'),
 	// used for source code/archive
 	SARC        = make_tag_type('S', 'A', 'R', 'C'),
 	// TODO/TBD
 	LAYR        = make_tag_type('L', 'A', 'Y', 'R'),
-	TESS        = make_tag_type('T', 'E', 'S', 'S'),
 	// generic end tag
 	END         = make_tag_type('E', 'N', 'D', 'T'),
 };

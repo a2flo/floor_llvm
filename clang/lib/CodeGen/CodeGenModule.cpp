@@ -3063,6 +3063,12 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				arg_info.push_back(llvm::MDString::get(VMContext, "air.read_write"));
 			}
 			
+			// Metal 3.0+: address space
+			if (getLangOpts().MetalVersion >= 300) {
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.address_space"));
+				arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(llvm_type->getPointerAddressSpace())));
+			}
+			
 			// #6/#7: struct info
 			if (const auto pointee_rdecl = clang_pointee_type->getAsCXXRecordDecl()) {
 				uint32_t arg_idx_child = 0, buffer_or_tex_idx_child = 0; // for indirect/arg buffers
@@ -3308,6 +3314,11 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(1)));
 		// #5: access
 		arg_info.push_back(llvm::MDString::get(VMContext, "air.read_write"));
+		// Metal 3.0+: address space
+		if (getLangOpts().MetalVersion >= 300) {
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.address_space"));
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(1)));
+		}
 		// #8/#9: type size
 		arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_size"));
 		arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(4)));
