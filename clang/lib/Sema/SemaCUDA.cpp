@@ -462,6 +462,20 @@ bool Sema::inferCUDATargetForImplicitSpecialMember(CXXRecordDecl *ClassDecl,
   return false;
 }
 
+static bool IsZeroInitializer(Expr *Initializer, Sema &S) {
+  if (Initializer->isIntegerConstantExpr(S.getASTContext()) &&
+      Initializer->EvaluateKnownConstInt(S.getASTContext()) == 0) {
+    return true;
+  } else if (Initializer->isEvaluatable(S.getASTContext(),
+                                        Expr::SideEffectsKind::SE_NoSideEffects)) {
+    llvm::APFloat result { -1.0 };
+    if (Initializer->EvaluateAsFloat(result, S.getASTContext())) {
+      return result.isZero();
+    }
+  }
+  return false;
+}
+
 bool Sema::isEmptyCudaConstructor(SourceLocation Loc, CXXConstructorDecl *CD) {
   if (!CD->isDefined() && CD->isTemplateInstantiation())
     InstantiateFunctionDefinition(Loc, CD->getFirstDecl());
@@ -489,13 +503,18 @@ bool Sema::isEmptyCudaConstructor(SourceLocation Loc, CXXConstructorDecl *CD) {
 
   // The only form of initializer allowed is an empty constructor.
   // This will recursively check all base classes and member initializers
+  // NOTE: will now also allow zero-init (which are later turned into undef)
   if (!llvm::all_of(CD->inits(), [&](const CXXCtorInitializer *CI) {
-        if (const CXXConstructExpr *CE =
-                dyn_cast<CXXConstructExpr>(CI->getInit()))
-          return isEmptyCudaConstructor(Loc, CE->getConstructor());
-        return false;
-      }))
+    if (IsZeroInitializer(CI->getInit(), *this)) {
+      return true;
+    }
+    if (const CXXConstructExpr *CE = dyn_cast<CXXConstructExpr>(CI->getInit())) {
+      return isEmptyCudaConstructor(Loc, CE->getConstructor());
+    }
     return false;
+  })) {
+    return false;
+  }
 
   return true;
 }
