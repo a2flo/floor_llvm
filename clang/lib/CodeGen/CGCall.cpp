@@ -1745,7 +1745,17 @@ void CodeGenFunction::EmitAggregateStore(llvm::Value *Val, Address Dest,
                                          bool DestIsVolatile) {
   // Prefer scalar stores to first-class aggregate stores.
   if (llvm::StructType *STy = dyn_cast<llvm::StructType>(Val->getType())) {
-    for (unsigned i = 0, e = STy->getNumElements(); i != e; ++i) {
+    // if the destination is a graphics I/O type, it might have a different element count than the source struct element count,
+    // e.g. the source type is not packed and has padding, but the graphics I/O type is packed and has no padding
+    // -> iterate over the graphics I/O struct type instead
+    auto iter_struct_type = STy;
+    if (auto dst_struct_type = dyn_cast_or_null<llvm::StructType>(Dest.getElementType());
+		dst_struct_type && dst_struct_type->isGraphicsIOType()) {
+      iter_struct_type = dst_struct_type;
+      assert(iter_struct_type->getNumElements() <= STy->getNumElements());
+    }
+
+    for (unsigned i = 0, e = iter_struct_type->getNumElements(); i != e; ++i) {
       Address EltPtr = Builder.CreateStructGEP(Dest, i);
       llvm::Value *Elt = Builder.CreateExtractValue(Val, i);
 
