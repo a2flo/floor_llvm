@@ -12,6 +12,7 @@ set(LLVM_LINK_COMPONENTS
   LibFloor
   MC
   MIRParser
+  Passes
   Remarks
   ScalarOpts
   SelectionDAG
