@@ -1129,6 +1129,7 @@ void PassManagerBuilder::populateModulePassManager(
     MPM.add(createVulkanFinalModuleCleanupPass());
   }
   if (EnableMetalPasses) {
+    MPM.add(createFMACombinerPass());
     MPM.add(createMetalFinalPass(EnableMetalIntelWorkarounds));
     MPM.add(createMetalFinalModuleCleanupPass());
   }

@@ -550,6 +550,34 @@ namespace {
 					break;
 				}
 					
+				// three arguments cases
+				case Intrinsic::fma: {
+					auto op_0 = I.getOperand(0);
+					auto op_1 = I.getOperand(1);
+					auto op_2 = I.getOperand(2);
+					
+					// create AIR function name
+					auto suffix = get_suffix_for_type(op_0->getType(), true);
+					if (!suffix) {
+						ctx->emitError(&I, "unexpected type in intrinsic:\n" + print_instr(I));
+						return;
+					}
+					std::string func_name = "air.fma" + *suffix;
+					
+					// create the new call
+					SmallVector<llvm::Type*, 3> param_types { op_0->getType(), op_1->getType(), op_2->getType() };
+					const auto func_type = llvm::FunctionType::get(I.getType(), param_types, false);
+					builder->SetInsertPoint(&I);
+					
+					auto call = builder->CreateCall(M->getOrInsertFunction(func_name, func_type), { op_0, op_1, op_2 });
+					call->setDebugLoc(I.getDebugLoc());
+					
+					I.replaceAllUsesWith(call);
+					I.eraseFromParent();
+					was_modified = true;
+					break;
+				}
+					
 #if 0 // TODO: implement these
 				case Intrinsic::vector_reduce_fadd: {
 					auto init = I.getOperand(0);
