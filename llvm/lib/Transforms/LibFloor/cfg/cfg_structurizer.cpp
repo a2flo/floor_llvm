@@ -29,6 +29,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#define _LIBCPP_HARDENING_MODE (1 << 1) /* none */
+
 #include "llvm/Transforms/LibFloor/cfg/cfg_structurizer.hpp"
 #include "llvm/Transforms/LibFloor/cfg/node.hpp"
 #include "llvm/Transforms/LibFloor/VulkanSampling.h"
