@@ -63,6 +63,9 @@ public:
 
   bool rewrite_rov_lock_region();
 
+  // For esoteric CFG workarounds.
+  void set_driver_version(uint32_t driver_id, uint32_t driver_version);
+
 private:
   CFGNode *entry_block;
   CFGNode *exit_block;
@@ -89,8 +92,10 @@ private:
   void build_reachability();
   void visit_reachability(const CFGNode &node);
   bool query_reachability(const CFGNode &from, const CFGNode &to) const;
-  void structurize(unsigned pass);
-  void find_loops();
+  bool structurize(unsigned pass);
+  bool find_loops(unsigned pass);
+  bool rewrite_complex_loop_exits(CFGNode *node, CFGNode *merge,
+                                  std::vector<CFGNode *> &dominated_exits);
   bool rewrite_transposed_loops();
 
   struct LoopAnalysis {
@@ -120,6 +125,7 @@ private:
   static bool is_ordered(const CFGNode *a, const CFGNode *b, const CFGNode *c);
   bool serialize_interleaved_merge_scopes();
   void split_merge_scopes();
+  static CFGNode *rewind_candidate_split_node(CFGNode *node);
   void eliminate_degenerate_blocks();
   static bool ladder_chain_has_phi_dependencies(const CFGNode *chain,
                                                 const CFGNode *incoming);
@@ -238,6 +244,7 @@ private:
   void insert_phi(PHINode &node);
   void fixup_phi(PHINode &node);
   void cleanup_breaking_phi_constructs();
+  bool block_is_breaking_phi_construct(const CFGNode *node) const;
   bool cleanup_breaking_return_constructs();
   void eliminate_node_link_preds_to_succ(CFGNode *node);
   void prune_dead_preds();
@@ -280,5 +287,19 @@ private:
       const std::string &name);
 
   void propagate_branch_control_hints();
+
+  uint32_t driver_id{0u};
+  uint32_t driver_version{0u};
+
+  bool
+  find_single_entry_exit_lock_region(CFGNode *&idom, CFGNode *&pdom,
+                                     const std::vector<CFGNode *> &rov_blocks);
+  bool execution_path_is_single_entry_and_dominates_exit(CFGNode *idom,
+                                                         CFGNode *pdom);
+
+  void
+  collect_and_dispatch_control_flow(CFGNode *common_idom, CFGNode *common_pdom,
+                                    const std::vector<CFGNode *> &constructs,
+                                    bool collect_all_code_paths_to_pdom);
 };
 } // namespace llvm
