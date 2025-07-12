@@ -2582,7 +2582,7 @@ namespace {
 		
 		VulkanPreFinalPointerBCFixup() :
 		FunctionPass(ID) {
-			initializeVulkanPreFinalPass(*PassRegistry::getPassRegistry());
+			initializeVulkanPreFinalPointerBCFixupPass(*PassRegistry::getPassRegistry());
 		}
 		
 		void getAnalysisUsage(AnalysisUsage &AU) const override {

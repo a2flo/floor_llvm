@@ -1691,7 +1691,9 @@ static unsigned ArgInfoAddressSpace(LangAS AS) {
 
 // will recurse through the specified class/struct decl and its base classes,
 // returning a vector containing all iterators to all contained fields
-static std::vector<RecordDecl::field_iterator> get_aggregate_fields(const CXXRecordDecl* decl) {
+static std::vector<RecordDecl::field_iterator> get_aggregate_fields(const CXXRecordDecl* decl,
+																	CodeGenTypes& CGT,
+																	const llvm::DataLayout& DL) {
 	if (decl == nullptr) return {};
 	
 	// must have definition
@@ -1702,15 +1704,37 @@ static std::vector<RecordDecl::field_iterator> get_aggregate_fields(const CXXRec
 	
 	// iterate over / recurse into all bases
 	for (const auto& base : decl->bases()) {
-		const auto base_ret = get_aggregate_fields(base.getType()->getAsCXXRecordDecl());
+		const auto base_ret = get_aggregate_fields(base.getType()->getAsCXXRecordDecl(), CGT, DL);
 		if (!base_ret.empty()) {
 			ret.insert(ret.end(), base_ret.begin(), base_ret.end());
 		}
 	}
 	
 	// iterate over all fields/members
-	for (auto iter = decl->field_begin(); iter != decl->field_end(); ++iter) {
-		ret.push_back(iter);
+	for (auto iter = decl->field_begin(); iter != decl->field_end(); ) {
+		if (iter->isBitField()) {
+			// only add the first field of a (contiguous) bitfield
+			ret.push_back(iter);
+			
+			const auto bitfield_clang_type = iter->getType();
+			const auto bitfield_llvm_type = CGT.ConvertTypeForMem(bitfield_clang_type);
+			const auto bitfield_size_bits = uint32_t(DL.getTypeStoreSize(bitfield_llvm_type)) * 8u;
+			const auto first_bit_width = iter->getBitWidthValue(decl->getASTContext());
+			assert(first_bit_width <= bitfield_size_bits);
+			auto bitfield_size_rem = bitfield_size_bits - first_bit_width;
+			++iter;
+			while (bitfield_size_rem > 0) {
+				if (iter == decl->field_end() || !iter->isBitField()) {
+					break;
+				}
+				const auto sec_bit_width = iter->getBitWidthValue(decl->getASTContext());
+				assert(sec_bit_width <= bitfield_size_rem);
+				bitfield_size_rem -= sec_bit_width;
+				++iter;
+			}
+			continue;
+		}
+		ret.push_back(iter++);
 	}
 	
 	return ret;
@@ -1720,11 +1744,14 @@ struct array_buffer_info_t {
 	QualType element_type;
 	uint32_t element_count { 0u };
 };
-static std::optional<array_buffer_info_t> get_array_buffer_info(QualType& type, const CXXRecordDecl* decl, const ASTContext& ASTCtx) {
+static std::optional<array_buffer_info_t> get_array_buffer_info(QualType& type, const CXXRecordDecl* decl,
+																const ASTContext& ASTCtx,
+																CodeGenTypes& CGT,
+																const llvm::DataLayout& DL) {
 	const ConstantArrayType *CAT = nullptr;
 	if (!type->isArrayType()) {
 		assert(decl);
-		const auto ret = get_aggregate_fields(decl);
+		const auto ret = get_aggregate_fields(decl, CGT, DL);
 		if (ret.size() != 1) return {};
 		
 		FieldDecl* arr_field_decl = *ret[0];
@@ -1744,9 +1771,11 @@ static std::optional<array_buffer_info_t> get_array_buffer_info(QualType& type, 
 // will recurse through the specified class/struct decl and its base classes,
 // returning a vector containing all iterators to all contained image types
 // NOTE: will return an empty vector if not a proper aggregate image
-static std::vector<RecordDecl::field_iterator> get_aggregate_image_fields(const CXXRecordDecl* decl) {
+static std::vector<RecordDecl::field_iterator> get_aggregate_image_fields(const CXXRecordDecl* decl,
+																		  CodeGenTypes& CGT,
+																		  const llvm::DataLayout& DL) {
 	// extract all fields, then check if all are image types (if one isn't, fail)
-	auto ret = get_aggregate_fields(decl);
+	auto ret = get_aggregate_fields(decl, CGT, DL);
 	for (auto iter = ret.begin(); iter != ret.end(); ) {
 		if (!(*iter)->getType()->isImageType() &&
 			!(*iter)->getType()->isArrayImageType(false)) {
@@ -1768,8 +1797,11 @@ struct array_image_info_t {
 	FloorImageDataTypeAttr* data_type { nullptr };
 	uint32_t element_count { 0u };
 };
-static std::optional<array_image_info_t> get_array_image_info(const CXXRecordDecl* decl, const ASTContext& ASTCtx) {
-	const auto ret = get_aggregate_fields(decl);
+static std::optional<array_image_info_t> get_array_image_info(const CXXRecordDecl* decl,
+															  const ASTContext& ASTCtx,
+															  CodeGenTypes& CGT,
+															  const llvm::DataLayout& DL) {
+	const auto ret = get_aggregate_fields(decl, CGT, DL);
 	if (ret.size() != 1) return {};
 	
 	FieldDecl* arr_field_decl = *ret[0];
@@ -1782,7 +1814,7 @@ static std::optional<array_image_info_t> get_array_image_info(const CXXRecordDec
 	// handle nested/2D image arrays (Vulkan)
 	// NOTE: expecting a single field (write-only) or two fields (read-write) here,
 	// with the writable image consisting of a pointer to another array
-	const auto inner = get_aggregate_image_fields(img_cxx_rdecl);
+	const auto inner = get_aggregate_image_fields(img_cxx_rdecl, CGT, DL);
 	if (inner.size() == 1 || inner.size() == 2) {
 		const auto writable_img_idx = inner.size() - 1;
 		if ((*inner[writable_img_idx])->getType()->isPointerType()) {
@@ -1802,7 +1834,7 @@ static std::optional<array_image_info_t> get_array_image_info(const CXXRecordDec
 		}
 	}
 	
-	auto img_fields = get_aggregate_image_fields(img_cxx_rdecl);
+	auto img_fields = get_aggregate_image_fields(img_cxx_rdecl, CGT, DL);
 	if (img_fields.size() != 1) return {};
 	
 	return array_image_info_t {
@@ -2117,7 +2149,7 @@ void CodeGenModule::GenOpenCLArgMetadata(llvm::Function *Fn,
 			add_image_arg(clang_type, getFloorImageFlagsAttribute(parm, &clang_type, VMContext), parm->getName().str());
 		} else if (clang_type->isAggregateImageType()) { // aggregate image
 			const auto decl = clang_type->getAsCXXRecordDecl();
-			const auto agg_images = get_aggregate_image_fields(decl);
+			const auto agg_images = get_aggregate_image_fields(decl, Types, getDataLayout());
 			
 			const std::string base_name = parm->getName().str() + ".";
 			unsigned int img_idx = 0;
@@ -2465,7 +2497,7 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 			++arg_buffer_count;
 			
 			// get argument buffer class/struct fields and check for forbidden types
-			const auto fields = get_aggregate_fields(cxx_rdecl);
+			const auto fields = get_aggregate_fields(cxx_rdecl, Types, getDataLayout());
 			for (const auto& field : fields) {
 				if (field->isAnonymousStructOrUnion()) {
 					Error(parm->getSourceRange().getBegin(), "argument buffer may not contain anonymous structs/unions");
@@ -2486,7 +2518,8 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 				arg_iter->addAttr(llvm::Attribute::get(getLLVMContext(), "vulkan_arg_buffer"));
 				
 				if (field_type->isArrayImageType(true)) {
-					const auto array_image_info = get_array_image_info(field_type->getAsCXXRecordDecl(), getContext());
+					const auto array_image_info = get_array_image_info(field_type->getAsCXXRecordDecl(), getContext(),
+																	   Types, getDataLayout());
 					if (array_image_info) {
 						add_image_arg(array_image_info->flags,
 									  array_image_info->data_type,
@@ -2499,7 +2532,7 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 						return;
 					}
 				} else if (field_type->isAggregateImageType()) {
-					const auto agg_images = get_aggregate_image_fields(field_type->getAsCXXRecordDecl());
+					const auto agg_images = get_aggregate_image_fields(field_type->getAsCXXRecordDecl(), Types, getDataLayout());
 					for (const auto& img : agg_images) {
 						uint32_t elem_count = 1;
 						bool is_array = false;
@@ -2515,7 +2548,8 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 									  this_arg_buf_prefix + prefix_arg);
 					}
 				} else if (field_type->isArrayBufferType()) {
-					const auto array_buffer_info = get_array_buffer_info(field_type, field_type->getAsCXXRecordDecl(), getContext());
+					const auto array_buffer_info = get_array_buffer_info(field_type, field_type->getAsCXXRecordDecl(), getContext(),
+																		 Types, getDataLayout());
 					if (array_buffer_info) {
 						stage_infos.push_back(llvm::MDString::get(VMContext, this_arg_buf_prefix + prefix_ssbo_array +
 																  std::to_string(array_buffer_info->element_count) + ":none"));
@@ -2561,7 +2595,7 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 			}
 			arg_idx.inc_llvm_arg_idx(arg_buffer_arg_idx - 1u /* -1, b/c arg itself is inc'ed later */);
 		} else if (clang_type->isArrayImageType(true)) { // image array
-			const auto array_image_info = get_array_image_info(cxx_rdecl, Context);
+			const auto array_image_info = get_array_image_info(cxx_rdecl, Context, Types, getDataLayout());
 			if (array_image_info) {
 				add_image_arg(array_image_info->flags,
 							  array_image_info->data_type,
@@ -2571,7 +2605,7 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 							  prefix_arg);
 			}
 		} else if (clang_type->isAggregateImageType()) { // aggregate image
-			const auto agg_images = get_aggregate_image_fields(clang_type->getAsCXXRecordDecl());
+			const auto agg_images = get_aggregate_image_fields(clang_type->getAsCXXRecordDecl(), Types, getDataLayout());
 			for (const auto& img : agg_images) {
 				uint32_t elem_count = 1;
 				bool is_array = false;
@@ -2681,7 +2715,7 @@ static bool is_indirect_buffer(const clang::QualType& type, CodeGenModule &CGM,
 		llvm_pointee_type->isStructTy() && is_arg_buffer) {
 		// initial requirements are fulfilled
 		// -> need to recursively check for any pointers/buffers/images now (if none are found, this is a normal struct/param)
-		const std::function<bool(const clang::QualType&)> indirect_checker = [&indirect_checker](const clang::QualType& type) {
+		const std::function<bool(const clang::QualType&)> indirect_checker = [&indirect_checker, &CGM](const clang::QualType& type) {
 			if (type->isPointerType() ||
 				type->isReferenceType() ||
 				type->isImageType() ||
@@ -2691,7 +2725,7 @@ static bool is_indirect_buffer(const clang::QualType& type, CodeGenModule &CGM,
 				return true;
 			} else if (const auto type_rdecl = type->getAsCXXRecordDecl()) {
 				// struct -> recursively check fields
-				const auto fields = get_aggregate_fields(type_rdecl);
+				const auto fields = get_aggregate_fields(type_rdecl, CGM.getTypes(), CGM.getDataLayout());
 				for (const auto& field : fields) {
 					auto field_type = field->getType();
 					if (field_type->isArrayType()) {
@@ -2740,7 +2774,7 @@ static std::optional<control_point_info_t> extract_control_point_info(CodeGenMod
 		return {};
 	}
 	
-	auto cp_fields = get_aggregate_fields(cp_rdecl);
+	auto cp_fields = get_aggregate_fields(cp_rdecl, CGM.getTypes(), CGM.getDataLayout());
 	if (cp_fields.empty()) {
 		CGM.Error(field_decl->getSourceRange().getBegin(), StringRef("no fields in user-specified control point type"));
 		return {};
@@ -2994,7 +3028,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 	};
 	
 	//
-	auto abi_arg_info_iter = FnInfo.arg_begin();
+	[[maybe_unused]] auto abi_arg_info_iter = FnInfo.arg_begin();
 	unsigned int arg_idx = 0, buffer_idx = 0u, tex_idx = 0;
 	for (const auto& parm : FD->parameters()) {
 		const auto clang_type = parm->getType();
@@ -3196,21 +3230,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 						 uint32_t& arg_idx_child,
 						 // NOTE: buffer and texture location indices use the same space
 						 uint32_t& buffer_or_tex_idx_child) -> SmallVector<llvm::Metadata*, 16> {
-			// TODO: this is not ideal and doesn't properly handle unions
-			const auto fields = get_aggregate_fields(&struct_rdecl);
-			bool ignore = false;
-			for (const auto& field : fields) {
-				if (field->isAnonymousStructOrUnion() ||
-					field->isBitField()) {
-					ignore = true;
-					break;
-				}
-			}
-			// TODO/NOTE: ignore anonymous structs/unions and bitfields for now
-			if (ignore) {
-				return {};
-			}
-			
+			const auto fields = get_aggregate_fields(&struct_rdecl, Types, getDataLayout());
 			SmallVector<llvm::Metadata*, 16> struct_info;
 			uint32_t offset = 0;
 			for (const auto& field : fields) {
@@ -3286,7 +3306,8 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 						}
 						struct_info.push_back(llvm::MDNode::get(VMContext, field_arg_info));
 					} else if (field_type->isArrayImageType(true)) {
-						const auto array_image_info = get_array_image_info(field_type->getAsCXXRecordDecl(), Context);
+						const auto array_image_info = get_array_image_info(field_type->getAsCXXRecordDecl(), Context,
+																		   Types, getDataLayout());
 						if (array_image_info) {
 							auto arg_info = add_image_arg(array_image_info->image_type,
 														  array_image_info->flags,
@@ -3303,7 +3324,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 							return {};
 						}
 					} else if (field_type->isAggregateImageType()) {
-						const auto agg_images = get_aggregate_image_fields(field_type->getAsCXXRecordDecl());
+						const auto agg_images = get_aggregate_image_fields(field_type->getAsCXXRecordDecl(), Types, getDataLayout());
 						const std::string base_name = field->getName().str() + ".";
 						unsigned int img_idx = 0;
 						for (const auto& img : agg_images) {
@@ -3437,7 +3458,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			}
 			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
 		} else if (clang_type->isArrayImageType(true)) { // image array
-			const auto array_image_info = get_array_image_info(cxx_rdecl, Context);
+			const auto array_image_info = get_array_image_info(cxx_rdecl, Context, Types, getDataLayout());
 			if (array_image_info) {
 				auto arg_info = add_image_arg(array_image_info->image_type,
 											  array_image_info->flags,
@@ -3454,7 +3475,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				return;
 			}
 		} else if (clang_type->isAggregateImageType()) { // aggregate image
-			const auto agg_images = get_aggregate_image_fields(cxx_rdecl);
+			const auto agg_images = get_aggregate_image_fields(cxx_rdecl, Types, getDataLayout());
 			
 			const std::string base_name = parm->getName().str() + ".";
 			unsigned int img_idx = 0;
@@ -4313,7 +4334,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 		};
 		const auto add_aggregate_image_arg = [&CGM, &add_image_arg](const CXXRecordDecl* cxx_rdecl,
 																	const bool allow_multi_image) -> std::optional<aggregate_image_ret_t> {
-			const auto agg_images = get_aggregate_image_fields(cxx_rdecl);
+			const auto agg_images = get_aggregate_image_fields(cxx_rdecl, CGM.getTypes(), CGM.getDataLayout());
 			
 			// image count must either be 1 (for single read or write images) or 2 (one read, one write image)
 			const auto field_count = agg_images.size();
@@ -4491,7 +4512,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 			if (indirect_buffer || is_indirect) {
 				if (const auto pointee_rdecl = clang_pointee_type->getAsCXXRecordDecl()) {
 					// TODO: this is not ideal and doesn't handle properly handle unions
-					const auto fields = get_aggregate_fields(pointee_rdecl);
+					const auto fields = get_aggregate_fields(pointee_rdecl, getTypes(), CGM.getDataLayout());
 					bool ignore = false;
 					for (const auto& field : fields) {
 						if (field->isAnonymousStructOrUnion() ||
@@ -4557,7 +4578,8 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 																			  get_image_access(decl.getAttr<FloorImageFlagsAttr>()));
 									this_arg_buf_info << field_arg_info << ",";
 								} else if (field_type->isArrayImageType(true)) {
-									const auto array_image_info = get_array_image_info(field_type->getAsCXXRecordDecl(), getContext());
+									const auto array_image_info = get_array_image_info(field_type->getAsCXXRecordDecl(), getContext(),
+																					   CGM.getTypes(), CGM.getDataLayout());
 									if (array_image_info) {
 										const auto field_arg_info = add_image_arg(img_type_to_floor_type(array_image_info->image_type.getTypePtr()),
 																				  get_image_access(array_image_info->flags),
@@ -4576,7 +4598,8 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 									assert(agg_img_ret->arg_index_bias == 0); // this is the case when only have read-only or write-only
 									this_arg_buf_info << agg_img_ret->arg_info << ",";
 								} else if ((CGM.getLangOpts().Vulkan || CGM.getLangOpts().Metal) && field_type->isArrayBufferType()) {
-									const auto array_buffer_info = get_array_buffer_info(field_type, field_type->getAsCXXRecordDecl(), getContext());
+									const auto array_buffer_info = get_array_buffer_info(field_type, field_type->getAsCXXRecordDecl(),
+																						 getContext(), CGM.getTypes(), CGM.getDataLayout());
 									if (array_buffer_info) {
 										const auto elem_pointee_type = array_buffer_info->element_type->getPointeeType();
 										argument_info_t field_arg_info {
@@ -4652,7 +4675,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 		// image array (std::array<*image_*<type>, extent>)
 		// NOTE: check before "isAggregateImageType()", because this is essentially a sub-type of it
 		else if (clang_type->isArrayImageType(true)) {
-			const auto array_image_info = get_array_image_info(cxx_rdecl, getContext());
+			const auto array_image_info = get_array_image_info(cxx_rdecl, getContext(), CGM.getTypes(), CGM.getDataLayout());
 			if (array_image_info) {
 				const auto arg_info = add_image_arg(img_type_to_floor_type(array_image_info->image_type.getTypePtr()),
 													get_image_access(array_image_info->flags),
@@ -4694,7 +4717,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 						.size = 0u, // sizes will be accumulated
 						.address_space = ARG_ADDRESS_SPACE::CONSTANT,
 					};
-					const auto fields = get_aggregate_fields(cxx_rdecl);
+					const auto fields = get_aggregate_fields(cxx_rdecl, getTypes(), CGM.getDataLayout());
 					for (size_t i = 0; i < fields.size(); ++i) {
 						const auto field_llvm_type = std::next(Fn->arg_begin(), arg_idx.get_llvm_arg_idx())->getType();
 						arg_info.size += compute_type_size(field_llvm_type);

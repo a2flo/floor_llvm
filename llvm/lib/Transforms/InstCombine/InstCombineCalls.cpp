@@ -177,9 +177,16 @@ Instruction *InstCombinerImpl::SimplifyAnyMemTransfer(AnyMemTransferInst *MI) {
     auto src_op = libfloor_utils::get_underlying_bitcast_operand_or_null(MI->getArgOperand(1));
     if (src_op && src_op->getType()->getPointerElementType()->isStructTy()) {
       return nullptr;
+    } else if (auto src_gep = dyn_cast_or_null<GetElementPtrInst>(MI->getArgOperand(1));
+      src_gep && src_gep->getSourceElementType()->isStructTy()) {
+      return nullptr;
     }
+
     auto dst_op = libfloor_utils::get_underlying_bitcast_operand_or_null(MI->getArgOperand(0));
     if (dst_op && dst_op->getType()->getPointerElementType()->isStructTy()) {
+      return nullptr;
+    } else if (auto dst_gep = dyn_cast_or_null<GetElementPtrInst>(MI->getArgOperand(0));
+      dst_gep && dst_gep->getSourceElementType()->isStructTy()) {
       return nullptr;
     }
   }
