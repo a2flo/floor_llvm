@@ -4167,7 +4167,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 	const PrintingPolicy &Policy = getContext().getPrintingPolicy();
 	
 	// #0: info version
-	constexpr const uint32_t floor_info_version { 5u };
+	constexpr const uint32_t floor_info_version { 6u };
 	info << floor_info_version << ",";
 	// #1: function name
 	info << Fn->getName().str() << ",";
@@ -4192,16 +4192,24 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 		(getLangOpts().Vulkan && CGM.getCodeGenOpts().VulkanSoftPrintf > 0)) {
 		func_flags |= (1u << 0u);
 	}
-	if (getLangOpts().Vulkan) {
-		func_flags |= (1u << 1u);
-	}
 	if (is_kernel || is_tess_control) {
 		uint32_t kernel_dim = 1;
 		if (const auto kernel_dim_attr = FD->getAttr<ComputeKernelDimAttr>(); kernel_dim_attr) {
 			kernel_dim = kernel_dim_attr->getDim();
 		}
 		assert(kernel_dim >= 1 && kernel_dim <= 3);
-		func_flags |= (1u << (1u + kernel_dim));
+		switch (kernel_dim) {
+			default:
+			case 1:
+				func_flags |= (1u << 1u);
+				break;
+			case 2:
+				func_flags |= (1u << 2u);
+				break;
+			case 3:
+				func_flags |= (1u << 3u);
+				break;
+		}
 	}
 	info << func_flags << ",";
 	// #4,5,6: required local size/dim

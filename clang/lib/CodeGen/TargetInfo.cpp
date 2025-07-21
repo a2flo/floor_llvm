@@ -10531,7 +10531,7 @@ public:
   AIRABIInfo(CodeGenTypes &CGT) : ABIInfo(CGT) {}
 
   ABIArgInfo classifyReturnType(QualType RetTy) const;
-  ABIArgInfo classifyArgumentType(QualType Ty) const;
+  ABIArgInfo classifyArgumentType(QualType Ty, unsigned int CC) const;
 
   void computeInfo(CGFunctionInfo &FI) const override;
   Address EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
@@ -10560,15 +10560,30 @@ ABIArgInfo AIRABIInfo::classifyReturnType(QualType RetTy) const {
           ABIArgInfo::getExtend(RetTy) : ABIArgInfo::getDirect());
 }
 
-ABIArgInfo AIRABIInfo::classifyArgumentType(QualType Ty) const {
-  // CGT.getTarget() // TODO: native array image test
+ABIArgInfo AIRABIInfo::classifyArgumentType(QualType Ty, unsigned int CC) const {
   // direct array of images (not writable)
   if (Ty->isArrayImageType(true))
     return getNaturalAlignIndirect(Ty);
 
+  // all shader inputs must either be scalar or vector types, or arrays thereof
+  // -> expand all aggregates
   if (CodeGenFunction::hasAggregateEvaluationKind(Ty) &&
-      Ty->isStructureOrClassType()) {
+      Ty->isStructureOrClassType() &&
+      (CC == llvm::CallingConv::FLOOR_VERTEX ||
+       CC == llvm::CallingConv::FLOOR_FRAGMENT ||
+       CC == llvm::CallingConv::FLOOR_KERNEL ||
+       CC == llvm::CallingConv::FLOOR_TESS_CONTROL ||
+       CC == llvm::CallingConv::FLOOR_TESS_EVAL)) {
     return ABIArgInfo::getExpand();
+  }
+
+  if (isAggregateTypeForABI(Ty)) {
+    // Records with non-trivial destructors/copy-constructors should not be
+    // passed by value.
+    if (CGCXXABI::RecordArgABI RAA = getRecordArgABI(Ty, getCXXABI()))
+      return getNaturalAlignIndirect(Ty, RAA == CGCXXABI::RAA_DirectInMemory);
+
+    return getNaturalAlignIndirect(Ty);
   }
 
   // Treat an enum type as its underlying type.
@@ -10581,11 +10596,12 @@ ABIArgInfo AIRABIInfo::classifyArgumentType(QualType Ty) const {
 
 void AIRABIInfo::computeInfo(CGFunctionInfo &FI) const {
   // return type should never be indirect
-  // TODO: ... if the function is a kernel/vs/fs
   FI.getReturnInfo() = classifyReturnType(FI.getReturnType());
 
-  for (auto &I : FI.arguments())
-    I.info = classifyArgumentType(I.type);
+  for (uint32_t arg_idx = 0, arg_count = FI.arg_size(); arg_idx < arg_count; ++arg_idx) {
+    auto& I = FI.arguments()[arg_idx];
+    I.info = classifyArgumentType(I.type, FI.getCallingConvention());
+  }
 
   // Always honor user-specified calling convention.
   if (FI.getCallingConvention() != llvm::CallingConv::C)

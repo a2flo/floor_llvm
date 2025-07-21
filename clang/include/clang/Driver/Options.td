@@ -6000,8 +6000,6 @@ def vulkan_llvm_pre_structurization_pass : Flag<["-"], "vulkan-llvm-pre-structur
   HelpText<"Enable LLVM CFG structurization pass prior to actual structurization">;
 def vulkan_soft_printf : Flag<["-"], "vulkan-soft-printf">,
   HelpText<"Enables support of software printf emulation">;
-def vulkan_descriptor_buffer_support : Flag<["-"], "vulkan-descriptor-buffer-support">,
-  HelpText<"Enable Vulkan descriptor buffer specific code generation">;
 
 //===----------------------------------------------------------------------===//
 // Graphics Options
