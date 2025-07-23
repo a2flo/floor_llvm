@@ -2686,6 +2686,10 @@ namespace {
 		}
 		
 		std::optional<bool> fix_pointer_bitcast_with_loads(BitCastInst& BC, Function& F, const std::vector<LoadInst*>& loads) {
+			if (!isa<Instruction>(BC.getOperand(0))) {
+				return {};
+			}
+			
 			const auto dst_type = cast<PointerType>(BC.getDestTy())->getPointerElementType();
 			const auto dst_size = DL->getTypeStoreSize(dst_type).getFixedSize();
 			
