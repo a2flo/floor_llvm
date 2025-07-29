@@ -481,6 +481,8 @@ namespace {
 				case Intrinsic::memcpy:
 				case Intrinsic::memset:
 				case Intrinsic::memmove:
+				case Intrinsic::fshl:
+				case Intrinsic::fshr:
 				case Intrinsic::dbg_addr:
 				case Intrinsic::dbg_label:
 				case Intrinsic::dbg_value:
