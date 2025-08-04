@@ -44,6 +44,7 @@ NVPTXTargetInfo::NVPTXTargetInfo(const llvm::Triple &Triple,
     if (!Feature.startswith("+ptx"))
       continue;
     PTXVersion = llvm::StringSwitch<unsigned>(Feature)
+                     .Case("+ptx90", 90)
                      .Case("+ptx88", 88)
                      .Case("+ptx87", 87)
                      .Case("+ptx86", 86)
@@ -295,6 +296,10 @@ void NVPTXTargetInfo::getTargetDefines(const LangOptions &Opts,
         return "1030";
       case CudaArch::SM_103a:
         return "103a0";
+      case CudaArch::SM_110:
+        return "1100";
+      case CudaArch::SM_110a:
+        return "110a0";
       case CudaArch::SM_120:
         return "1200";
       case CudaArch::SM_120a:
@@ -315,6 +320,8 @@ void NVPTXTargetInfo::getTargetDefines(const LangOptions &Opts,
       Builder.defineMacro("__CUDA_ARCH_FEAT_SM101_ALL", "1");
     if (GPU == CudaArch::SM_103a)
       Builder.defineMacro("__CUDA_ARCH_FEAT_SM103_ALL", "1");
+    if (GPU == CudaArch::SM_110a)
+      Builder.defineMacro("__CUDA_ARCH_FEAT_SM110_ALL", "1");
     if (GPU == CudaArch::SM_120a)
       Builder.defineMacro("__CUDA_ARCH_FEAT_SM120_ALL", "1");
     if (GPU == CudaArch::SM_121a)

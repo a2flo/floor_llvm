@@ -47,10 +47,11 @@ enum class CudaVersion {
   CUDA_127,
   CUDA_128,
   CUDA_129,
-  FULLY_SUPPORTED = CUDA_129,
+  CUDA_130,
+  FULLY_SUPPORTED = CUDA_130,
   PARTIALLY_SUPPORTED =
-      CUDA_129, // Partially supported. Proceed with a warning.
-  NEW = 13000,  // Too new. Issue a warning, but allow using it.
+      CUDA_130, // Partially supported. Proceed with a warning.
+  NEW = 14000,  // Too new. Issue a warning, but allow using it.
 };
 const char *CudaVersionToString(CudaVersion V);
 // Input is "Major.Minor"
@@ -89,6 +90,8 @@ enum class CudaArch {
   SM_101a,
   SM_103,
   SM_103a,
+  SM_110,
+  SM_110a,
   SM_120,
   SM_120a,
   SM_121,
