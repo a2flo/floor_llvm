@@ -639,6 +639,8 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       // TODO: !
     } else if (FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
       // TODO: !
+      //auto float3_type = Ctx.getExtVectorType(Ctx.FloatTy, 3);
+      //add_arg(float3_type, "vulkan.position_in_patch");
     }
   }
 

@@ -6000,6 +6000,10 @@ def vulkan_llvm_pre_structurization_pass : Flag<["-"], "vulkan-llvm-pre-structur
   HelpText<"Enable LLVM CFG structurization pass prior to actual structurization">;
 def vulkan_soft_printf : Flag<["-"], "vulkan-soft-printf">,
   HelpText<"Enables support of software printf emulation">;
+def vulkan_subgroup_uniform_cf : Flag<["-"], "vulkan-subgroup-uniform-cf">,
+  HelpText<"Enables support of SPV_KHR_subgroup_uniform_control_flow">;
+def vulkan_low_descriptor_set_count : Flag<["-"], "vulkan-low-descriptor-set-count">,
+  HelpText<"Enables low descriptor set count handling">;
 
 //===----------------------------------------------------------------------===//
 // Graphics Options

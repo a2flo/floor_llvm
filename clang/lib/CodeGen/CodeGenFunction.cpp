@@ -735,6 +735,16 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
     CGM.getModule().getOrInsertNamedMetadata("floor.barycentric_coord");
   }
 
+  // add Vulkan subgroup uniform control flow info
+  if (CGM.getCodeGenOpts().VulkanSubgroupUniformCF) {
+    CGM.getModule().getOrInsertNamedMetadata("floor.vulkan_subgroup_uniform_cf");
+  }
+
+  // add Vulkan low descriptor set count info
+  if (CGM.getCodeGenOpts().VulkanLowDescriptorSetCount) {
+    CGM.getModule().getOrInsertNamedMetadata("floor.vulkan_low_descriptor_set_count");
+  }
+
   // signal that we're generating SPIR-V in the end
   if (CGM.getCodeGenOpts().floor_generating_spirv > 0) {
     CGM.getModule().getOrInsertNamedMetadata("floor.generating_spirv");

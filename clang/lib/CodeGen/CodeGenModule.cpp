@@ -2244,19 +2244,23 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 	[[maybe_unused]] const bool is_tess_control = FD->hasAttr<GraphicsTessellationControlShaderAttr>(); // TODO: implement this!
 	[[maybe_unused]] const bool is_tess_eval = FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>(); // TODO: implement this!
 	
-	// define max argument buffer limits per stage
-	// NOTE: we require a minimum of 16 descriptor sets for argument buffer support (in kernels and shaders)
+	// define max argument buffer / descriptor set limits per stage
+	// NOTE: we require a minimum of 16 (high) or 7 (low) descriptor sets for argument buffer support (in kernels and shaders)
 	//! kernels only use 2 fixed sets
-	static constexpr const uint32_t max_argument_buffers_kernel { 14u };
-	//! with vertex, fragment, tess-control and tess-eval we a maximum of 4 shader stages that can be used simultaneously
-	//! -> 4 sets + immutable samplers set = 5 fixed sets
-	//! -> can use 16 - 5 = 11 sets by the use for argument buffers
-	//! -> allow 4 each for vertex and fragment, but only 3 for tess-eval (tess-control can not be user-defined)
-	static constexpr const uint32_t max_argument_buffers_vertex_fragment_shader { 4u };
-	static constexpr const uint32_t max_argument_buffers_tess_eval_shader { 3u };
-	const auto max_argument_buffers = (is_kernel ? max_argument_buffers_kernel :
-									   (is_vertex || is_fragment ? max_argument_buffers_vertex_fragment_shader :
-										max_argument_buffers_tess_eval_shader));
+	static constexpr const uint32_t max_argument_buffers_kernel_high { 14u };
+	static constexpr const uint32_t max_argument_buffers_kernel_low { 5u };
+	//! with vertex/tess-eval and fragment we have a maximum of 2 shader stages that can be used simultaneously
+	//! -> 2 sets + immutable samplers set = 3 fixed sets
+	//! -> can use 16 - 3 = 13 (high) or 7 - 3 = 4 (low) sets for argument buffer use
+	//! -> allow 6 (high) or 2 (low) each for vertex/tess-eval and fragment
+	static constexpr const uint32_t max_argument_buffers_shader_high { 6u };
+	static constexpr const uint32_t max_argument_buffers_shader_low { 2u };
+	uint32_t max_argument_buffers = 0u;
+	if (getCodeGenOpts().VulkanLowDescriptorSetCount) {
+		max_argument_buffers = (is_kernel ? max_argument_buffers_kernel_low : max_argument_buffers_shader_low);
+	} else {
+		max_argument_buffers = (is_kernel ? max_argument_buffers_kernel_high : max_argument_buffers_shader_high);
+	}
 	
 	SmallVector<llvm::Metadata*, 8> stage_infos;
 	stage_infos.push_back(llvm::MDString::get(VMContext, FD->getName()));
@@ -4167,7 +4171,7 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 	const PrintingPolicy &Policy = getContext().getPrintingPolicy();
 	
 	// #0: info version
-	constexpr const uint32_t floor_info_version { 6u };
+	constexpr const uint32_t floor_info_version { 7u };
 	info << floor_info_version << ",";
 	// #1: function name
 	info << Fn->getName().str() << ",";
@@ -4210,6 +4214,12 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 				func_flags |= (1u << 3u);
 				break;
 		}
+	}
+	if (CGM.getCodeGenOpts().VulkanIUBCount < 16) {
+		func_flags |= (1u << 4u); // VULKAN_LOW_IUB
+	}
+	if (CGM.getCodeGenOpts().VulkanLowDescriptorSetCount) {
+		func_flags |= (1u << 5u); // VULKAN_LOW_DS
 	}
 	info << func_flags << ",";
 	// #4,5,6: required local size/dim
