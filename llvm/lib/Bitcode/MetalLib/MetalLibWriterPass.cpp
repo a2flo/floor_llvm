@@ -841,7 +841,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
             {250, "Apple metal version 31001.638 (metalfe-31001.638.1)"},
             {260, "Apple metal version 32023.155 (metalfe-32023.155)"},
             {270, "Apple metal version 32023.620 (metalfe-32023.620)"},
-            {280, "Apple metal version 32023.821 (metalfe-32023.821)"},
+            {280, "Apple metal version 32023.830 (metalfe-32023.830.2)"},
         };
         ident_op->replaceOperandWith(
             0, llvm::MDString::get(cloned_mod->getContext(),

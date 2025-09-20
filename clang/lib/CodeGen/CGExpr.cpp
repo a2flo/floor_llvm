@@ -4719,18 +4719,74 @@ EmitConditionalOperatorLValue(const AbstractConditionalOperator *expr) {
   if (lhs && rhs) {
     Address lhsAddr = lhs->getAddress(*this);
     Address rhsAddr = rhs->getAddress(*this);
-    llvm::PHINode *phi = Builder.CreatePHI(lhsAddr.getType(), 2, "cond-lvalue");
-    phi->addIncoming(lhsAddr.getPointer(), lhsBlock);
-    phi->addIncoming(rhsAddr.getPointer(), rhsBlock);
-    Address result(phi, lhsAddr.getElementType(),
-                   std::min(lhsAddr.getAlignment(), rhsAddr.getAlignment()));
-    AlignmentSource alignSource =
-      std::max(lhs->getBaseInfo().getAlignmentSource(),
-               rhs->getBaseInfo().getAlignmentSource());
-    TBAAAccessInfo TBAAInfo = CGM.mergeTBAAInfoForConditionalOperator(
-        lhs->getTBAAInfo(), rhs->getTBAAInfo());
-    return MakeAddrLValue(result, expr->getType(), LValueBaseInfo(alignSource),
-                          TBAAInfo);
+    auto lhs_ptr = lhsAddr.getPointer();
+    auto rhs_ptr = rhsAddr.getPointer();
+    if (lhs_ptr->getType()->getPointerAddressSpace() !=
+            rhs_ptr->getType()->getPointerAddressSpace() &&
+        (CGM.getLangOpts().OpenCL || getLangOpts().Vulkan ||
+         getLangOpts().Metal)) {
+      // pointer address spaces don't match: if we run into this situation, we
+      // have a big problem, since we can't have a PHI (or later users) with
+      // more than one address space (also: AddressSpaceFix can't run at this
+      // point in time yet)
+      // -> work around this by emitting loads from both addresses, storing it
+      // into a tmp alloca, then using the alloca as a new pointer/lvalue (and
+      // hope this gets cleaned up during optimization)
+      assert(lhsAddr.getElementType() == rhsAddr.getElementType());
+      auto ld_type = lhsAddr.getElementType();
+
+      llvm::Instruction *ld_lhs = nullptr;
+      if (isa<llvm::Instruction>(lhs_ptr)) {
+        ld_lhs = new llvm::LoadInst(
+            ld_type, lhs_ptr, "phi_ld_lhs",
+            cast<llvm::Instruction>(lhs_ptr)->getNextNonDebugInstruction());
+      } else {
+        ld_lhs = new llvm::LoadInst(ld_type, lhs_ptr, "phi_ld_lhs",
+                                    lhsBlock->getTerminator());
+      }
+
+      llvm::Instruction *ld_rhs = nullptr;
+      if (isa<llvm::Instruction>(rhs_ptr)) {
+        ld_rhs = new llvm::LoadInst(
+            ld_type, rhs_ptr, "phi_ld_rhs",
+            cast<llvm::Instruction>(rhs_ptr)->getNextNonDebugInstruction());
+      } else {
+        ld_rhs = new llvm::LoadInst(ld_type, rhs_ptr, "phi_ld_rhs",
+                                    rhsBlock->getTerminator());
+      }
+
+      llvm::PHINode *phi = Builder.CreatePHI(ld_type, 2, "cond-lvalue");
+      phi->addIncoming(ld_lhs, lhsBlock);
+      phi->addIncoming(ld_rhs, rhsBlock);
+
+      Address tmp_alloca =
+          CreateDefaultAlignTempAlloca(ld_type, "phi_as_fixup");
+      Builder.CreateStore(phi, tmp_alloca, false);
+
+      Address result(tmp_alloca.getPointer(), ld_type,
+                     std::min(lhsAddr.getAlignment(), rhsAddr.getAlignment()));
+      AlignmentSource alignSource =
+          std::max(lhs->getBaseInfo().getAlignmentSource(),
+                   rhs->getBaseInfo().getAlignmentSource());
+      TBAAAccessInfo TBAAInfo = CGM.mergeTBAAInfoForConditionalOperator(
+          lhs->getTBAAInfo(), rhs->getTBAAInfo());
+      return MakeAddrLValue(result, expr->getType(),
+                            LValueBaseInfo(alignSource), TBAAInfo);
+    } else {
+      llvm::PHINode *phi =
+          Builder.CreatePHI(lhsAddr.getType(), 2, "cond-lvalue");
+      phi->addIncoming(lhsAddr.getPointer(), lhsBlock);
+      phi->addIncoming(rhsAddr.getPointer(), rhsBlock);
+      Address result(phi, lhsAddr.getElementType(),
+                     std::min(lhsAddr.getAlignment(), rhsAddr.getAlignment()));
+      AlignmentSource alignSource =
+          std::max(lhs->getBaseInfo().getAlignmentSource(),
+                   rhs->getBaseInfo().getAlignmentSource());
+      TBAAAccessInfo TBAAInfo = CGM.mergeTBAAInfoForConditionalOperator(
+          lhs->getTBAAInfo(), rhs->getTBAAInfo());
+      return MakeAddrLValue(result, expr->getType(),
+                            LValueBaseInfo(alignSource), TBAAInfo);
+    }
   } else {
     assert((lhs || rhs) &&
            "both operands of glvalue conditional are throw-expressions?");

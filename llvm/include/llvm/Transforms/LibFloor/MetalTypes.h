@@ -236,6 +236,15 @@ enum class DATA_TYPE : uint8_t {
 	
 	BOOL8 = 119,
 	BOOL16 = 120,
+	
+	BFLOAT1 = 121,
+	BFLOAT2 = 122,
+	BFLOAT3 = 123,
+	BFLOAT4 = 124,
+	
+	DEPTH_STENCIL_STATE = 139,
+	
+	TENSOR = 140,
 };
 
 static inline const char* data_type_to_string(const DATA_TYPE type) {
@@ -478,6 +487,18 @@ static inline const char* data_type_to_string(const DATA_TYPE type) {
 			return "bool8";
 		case DATA_TYPE::BOOL16:
 			return "bool16";
+		case DATA_TYPE::BFLOAT1:
+			return "bfloat";
+		case DATA_TYPE::BFLOAT2:
+			return "bfloat2";
+		case DATA_TYPE::BFLOAT3:
+			return "bfloat3";
+		case DATA_TYPE::BFLOAT4:
+			return "bfloat4";
+		case DATA_TYPE::DEPTH_STENCIL_STATE:
+			return "depth-stencil-state";
+		case DATA_TYPE::TENSOR:
+			return "tensor";
 		case DATA_TYPE::_UNUSED_0:
 		case DATA_TYPE::_UNUSED_1:
 			break;
@@ -547,6 +568,11 @@ static inline DATA_TYPE data_type_from_string(const std::string& type_str) {
 		{ "bool2", DATA_TYPE::BOOL2 },
 		{ "bool3", DATA_TYPE::BOOL3 },
 		{ "bool4", DATA_TYPE::BOOL4 },
+		{ "bfloat", DATA_TYPE::BFLOAT1 },
+		{ "bfloat1", DATA_TYPE::BFLOAT1 },
+		{ "bfloat2", DATA_TYPE::BFLOAT2 },
+		{ "bfloat3", DATA_TYPE::BFLOAT3 },
+		{ "bfloat4", DATA_TYPE::BFLOAT4 },
 	};
 	const auto iter = lut.find(type_str);
 	if (iter == lut.end()) {
