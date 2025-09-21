@@ -379,9 +379,17 @@ static void createMemMoveLoop(Instruction *InsertBefore, Value *SrcAddr,
   ElseTerm->eraseFromParent();
 }
 
-static void createMemSetLoop(Instruction *InsertBefore, Value *DstAddr,
-                             Value *CopyLen, Value *SetValue, Align DstAlign,
-                             bool IsVolatile) {
+void llvm::createMemSetLoopKnownSize(Instruction *InsertBefore, Value *DstAddr,
+                                     ConstantInt *CopyLen, Value *SetValue, Align DstAlign,
+                                     bool IsVolatile,
+                                     Type *OverrideLoopOpType) {
+  llvm::createMemSetLoop(InsertBefore, DstAddr, CopyLen, SetValue, DstAlign, IsVolatile, OverrideLoopOpType);
+}
+
+void llvm::createMemSetLoop(Instruction *InsertBefore, Value *DstAddr,
+                            Value *CopyLen, Value *SetValue, Align DstAlign,
+                            bool IsVolatile,
+                            Type *OverrideLoopOpType) {
   Type *TypeOfCopyLen = CopyLen->getType();
   BasicBlock *OrigBB = InsertBefore->getParent();
   Function *F = OrigBB->getParent();
@@ -391,19 +399,21 @@ static void createMemSetLoop(Instruction *InsertBefore, Value *DstAddr,
   BasicBlock *LoopBB
     = BasicBlock::Create(F->getContext(), "loadstoreloop", F, NewBB);
 
+  Type *LoopOpType = (OverrideLoopOpType ? OverrideLoopOpType : SetValue->getType());
+
   IRBuilder<> Builder(OrigBB->getTerminator());
 
   // Cast pointer to the type of value getting stored
   unsigned dstAS = cast<PointerType>(DstAddr->getType())->getAddressSpace();
   DstAddr = Builder.CreateBitCast(DstAddr,
-                                  PointerType::get(SetValue->getType(), dstAS));
+                                  PointerType::get(LoopOpType, dstAS));
 
   Builder.CreateCondBr(
       Builder.CreateICmpEQ(ConstantInt::get(TypeOfCopyLen, 0), CopyLen), NewBB,
       LoopBB);
   OrigBB->getTerminator()->eraseFromParent();
 
-  unsigned PartSize = DL.getTypeStoreSize(SetValue->getType());
+  unsigned PartSize = DL.getTypeStoreSize(LoopOpType);
   Align PartAlign(commonAlignment(DstAlign, PartSize));
 
   IRBuilder<> LoopBuilder(LoopBB);
@@ -412,15 +422,25 @@ static void createMemSetLoop(Instruction *InsertBefore, Value *DstAddr,
 
   LoopBuilder.CreateAlignedStore(
       SetValue,
-      LoopBuilder.CreateInBoundsGEP(SetValue->getType(), DstAddr, LoopIndex),
+      LoopBuilder.CreateInBoundsGEP(LoopOpType, DstAddr, LoopIndex),
       PartAlign, IsVolatile);
 
   Value *NewIndex =
       LoopBuilder.CreateAdd(LoopIndex, ConstantInt::get(TypeOfCopyLen, 1));
   LoopIndex->addIncoming(NewIndex, LoopBB);
 
-  LoopBuilder.CreateCondBr(LoopBuilder.CreateICmpULT(NewIndex, CopyLen), LoopBB,
-                           NewBB);
+  if (auto CopyLenCI = dyn_cast_or_null<ConstantInt>(CopyLen); CopyLenCI) {
+    uint64_t PartEndCount = CopyLenCI->getZExtValue() / PartSize;
+    Constant *LoopEndCI = ConstantInt::get(TypeOfCopyLen, PartEndCount);
+    LoopBuilder.CreateCondBr(LoopBuilder.CreateICmpULT(NewIndex, LoopEndCI), LoopBB, NewBB);
+  } else {
+    auto PartEndCount = CopyLen;
+    if (OverrideLoopOpType && PartSize != 1) {
+      auto ctx = &OrigBB->getParent()->getParent()->getContext();
+      PartEndCount = LoopBuilder.CreateUDiv(PartEndCount, ConstantInt::get(llvm::Type::getInt32Ty(*ctx), PartSize));
+    }
+    LoopBuilder.CreateCondBr(LoopBuilder.CreateICmpULT(NewIndex, PartEndCount), LoopBB, NewBB);
+  }
 }
 
 void llvm::expandMemCpyAsLoop(MemCpyInst *Memcpy,
@@ -462,10 +482,10 @@ void llvm::expandMemMoveAsLoop(MemMoveInst *Memmove) {
 }
 
 void llvm::expandMemSetAsLoop(MemSetInst *Memset) {
-  createMemSetLoop(/* InsertBefore */ Memset,
-                   /* DstAddr */ Memset->getRawDest(),
-                   /* CopyLen */ Memset->getLength(),
-                   /* SetValue */ Memset->getValue(),
-                   /* Alignment */ Memset->getDestAlign().valueOrOne(),
-                   Memset->isVolatile());
+  llvm::createMemSetLoop(/* InsertBefore */ Memset,
+                         /* DstAddr */ Memset->getRawDest(),
+                         /* CopyLen */ Memset->getLength(),
+                         /* SetValue */ Memset->getValue(),
+                         /* Alignment */ Memset->getDestAlign().valueOrOne(),
+                         Memset->isVolatile());
 }

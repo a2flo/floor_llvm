@@ -50,6 +50,16 @@ void expandMemCpyAsLoop(MemCpyInst *MemCpy, const TargetTransformInfo &TTI);
 /// Expand \p MemMove as a loop. \p MemMove is not deleted.
 void expandMemMoveAsLoop(MemMoveInst *MemMove);
 
+void createMemSetLoopKnownSize(Instruction *InsertBefore, Value *DstAddr,
+                               ConstantInt *CopyLen, Value *SetValue, Align DstAlign,
+                               bool IsVolatile,
+                               Type *OverrideLoopOpType = nullptr);
+
+void createMemSetLoop(Instruction *InsertBefore, Value *DstAddr,
+                      Value *CopyLen, Value *SetValue, Align DstAlign,
+                      bool IsVolatile,
+                      Type *OverrideLoopOpType = nullptr);
+
 /// Expand \p MemSet as a loop. \p MemSet is not deleted.
 void expandMemSetAsLoop(MemSetInst *MemSet);
 

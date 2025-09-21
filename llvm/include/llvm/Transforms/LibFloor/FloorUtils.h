@@ -296,6 +296,16 @@ static inline llvm::Type* get_elemental_type(llvm::Type* type) {
 	return type;
 }
 
+//! adds LLVM MD_range [min, max] info on the specified instruction "I"
+static inline void add_range_info(llvm::LLVMContext& ctx, llvm::Instruction& I, const uint64_t min_range, const uint64_t max_range) {
+	auto range_int_type = llvm::Type::getInt32Ty(ctx);
+	llvm::Metadata* range_md[2] {
+		llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(range_int_type, min_range, false)),
+		llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(range_int_type, max_range, false))
+	};
+	I.setMetadata(llvm::LLVMContext::MD_range, llvm::MDNode::get(ctx, range_md));
+}
+
 } // namespace libfloor_utils
 
 #endif

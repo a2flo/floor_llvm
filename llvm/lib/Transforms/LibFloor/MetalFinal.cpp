@@ -167,6 +167,17 @@ namespace {
 						kernel_local_size[1] != 0 &&
 						kernel_local_size[2] != 0);
 			}
+			uint32_t fixed_local_size_extent() const {
+				assert(has_fixed_local_size());
+				uint32_t extent = kernel_local_size[0];
+				if (kernel_dim >= 2) {
+					extent *= kernel_local_size[1];
+				}
+				if (kernel_dim >= 3) {
+					extent *= kernel_local_size[2];
+				}
+				return extent;
+			}
 			
 			// added kernel function args
 			Argument* global_id { nullptr };
@@ -797,13 +808,7 @@ namespace {
 				// if both the SIMD width and the local size are fixed, we also have a fixed #sub-groups,
 				// because the local size extent must be a multiple of the SIMD width
 				if (state.kernel_simd_width > 0 && state.has_fixed_local_size()) {
-					uint32_t local_size_extent = state.kernel_local_size[0];
-					if (state.kernel_dim > 1) {
-						local_size_extent *= state.kernel_local_size[1];
-					}
-					if (state.kernel_dim > 2) {
-						local_size_extent *= state.kernel_local_size[2];
-					}
+					uint32_t local_size_extent = state.fixed_local_size_extent();
 					assert((local_size_extent % state.kernel_simd_width) == 0u);
 					id = ConstantInt::get(Type::getInt32Ty(*ctx), local_size_extent / state.kernel_simd_width);
 				} else {
@@ -958,14 +963,20 @@ namespace {
 			
 			// replace call with vector load / elem extraction from the appropriate vector
 			Value* repl = nullptr;
+			uint32_t dim_idx = 0u;
 			if (get_from_vector) {
-				const auto dim_idx = get_dim_idx(I.getOperand(0), &I);
+				dim_idx = get_dim_idx(I.getOperand(0), &I);
 				repl = builder->CreateExtractElement(id, dim_idx);
 			} else {
 				repl = id;
 			}
 			I.replaceAllUsesWith(repl);
 			I.eraseFromParent();
+			
+			// add metadata
+			if (func_name == "floor.get_local_id.i32" && state.has_fixed_local_size()) {
+				libfloor_utils::add_range_info(*ctx, *(llvm::Instruction*)repl, 0u, state.kernel_local_size[dim_idx]);
+			}
 		}
 		
 		// performs some simple air.* call checks (e.g. if the call is valid in the current function type)

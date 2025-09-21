@@ -125,6 +125,17 @@ namespace {
 						kernel_local_size[1] != 0 &&
 						kernel_local_size[2] != 0);
 			}
+			uint32_t fixed_local_size_extent() const {
+				assert(has_fixed_local_size());
+				uint32_t extent = kernel_local_size[0];
+				if (kernel_dim >= 2) {
+					extent *= kernel_local_size[1];
+				}
+				if (kernel_dim >= 3) {
+					extent *= kernel_local_size[2];
+				}
+				return extent;
+			}
 			
 			// added kernel function args
 			Argument* group_id { nullptr };
@@ -477,13 +488,7 @@ namespace {
 						// if both the SIMD width and the local size are fixed, we also have a fixed #sub-groups,
 						// because the local size extent must be a multiple of the SIMD width
 						if (state.kernel_simd_width > 0 && state.has_fixed_local_size()) {
-							uint32_t local_size_extent = state.kernel_local_size[0];
-							if (state.kernel_dim > 1) {
-								local_size_extent *= state.kernel_local_size[1];
-							}
-							if (state.kernel_dim > 2) {
-								local_size_extent *= state.kernel_local_size[2];
-							}
+							uint32_t local_size_extent = state.fixed_local_size_extent();
 							assert((local_size_extent % state.kernel_simd_width) == 0u);
 							return ConstantInt::get(Type::getInt32Ty(*ctx), local_size_extent / state.kernel_simd_width);
 						}
@@ -525,6 +530,10 @@ namespace {
 					auto sgid = get_id<id::sub_group_id>(0);
 					auto sgsize = get_id<id::sub_group_size>(0);
 					auto linear_idx = builder->CreateAdd(builder->CreateMul(sgid, sgsize), sglid, "local_linear_id");
+					// set range metadata on local_linear_id when we have a fixed local size
+					if (state.has_fixed_local_size()) {
+						libfloor_utils::add_range_info(*ctx, *(llvm::Instruction*)linear_idx, 0u, state.fixed_local_size_extent());
+					}
 					
 					const auto handle_const_2D_lsize = [this, &linear_idx](const uint32_t lsize_x, Value* const_lsize_0, uint32_t dim) {
 						// NOTE: since the SIMD width must be a power-of-two and work-group X dim must be a multiple of it
@@ -2488,23 +2497,24 @@ namespace {
 				} else if (auto memmove_instr = dyn_cast_or_null<MemMoveInst>(mem_instr)) {
 					llvm::errs() << "can't lower memmove yet: " << *memmove_instr << "\n";
 				} else if (auto memset_instr = dyn_cast_or_null<MemSetInst>(mem_instr)) {
-					llvm::errs() << "can't lower memset yet: " << *memset_instr << "\n";
+					was_modified |= lower_memset(*memset_instr);
 				} else {
 					llvm::errs() << "unknown/unhandled memory instruction: " << *mem_instr << "\n";
 				}
 			}
 		}
-		//! tries to lower "memcpy_instr" to LLVM instructions,
-		//! returns true if the lowering happened
-		bool lower_memcpy(MemCpyInst& memcpy_instr) {
-			auto len_op = memcpy_instr.getLength();
+		
+		struct memop_lower_info_t {
+			llvm::Value* src { nullptr };
+			llvm::Value* dst { nullptr };
+			llvm::ConstantInt* const_len_op { nullptr };
+			llvm::Value* len_op { nullptr };
+			llvm::Type* override_loop_op_type { nullptr };
+		};
+		template <typename memop_instr_type>
+		memop_lower_info_t compute_memop_lower_info(memop_instr_type& memop) {
+			auto len_op = memop.getLength();
 			auto const_len_op = dyn_cast_or_null<ConstantInt>(len_op);
-#if 0
-			if (const_len_op && const_len_op->getZExtValue() <= 1 /* not sure if 0 is possible */) {
-				// -> only copying one value, can be handled by OpCopyMemory
-				return false;
-			}
-#endif
 			
 			// optimize length operand
 			if (const_len_op) {
@@ -2518,8 +2528,18 @@ namespace {
 			}
 			
 			// try to use the original type for the memcpy
-			auto src = memcpy_instr.getRawSource();
-			auto dst = memcpy_instr.getRawDest();
+			llvm::Value* src = nullptr;
+			if constexpr (std::is_same_v<memop_instr_type, MemCpyInst>) {
+				src = memop.getRawSource();
+			} else if constexpr (std::is_same_v<memop_instr_type, MemSetInst>) {
+				src = memop.getValue();
+			} else {
+				assert(false);
+				ctx->emitError(&memop, "unhandled memop");
+				return {};
+			}
+			assert(src);
+			auto dst = memop.getRawDest();
 			auto src_orig_type = src->getType();
 			auto dst_orig_type = dst->getType();
 			auto src_bitcast_op = libfloor_utils::get_underlying_bitcast_operand_or_null(src);
@@ -2530,17 +2550,79 @@ namespace {
 			if (dst_bitcast_op) {
 				dst_orig_type = dst_bitcast_op->getType();
 			}
-			auto elem_type = src_orig_type->getPointerElementType();
+			
 			llvm::Type* override_loop_op_type = nullptr;
-			if (elem_type == dst_orig_type->getPointerElementType() && elem_type->isSized()) {
-				auto elem_size = M->getDataLayout().getTypeStoreSize(elem_type).getFixedValue();
-				if (elem_size > 1) {
-					// original source and destination types are compatible -> copy based on this type instead
-					src = (src_bitcast_op ? src_bitcast_op : src);
-					dst = (dst_bitcast_op ? dst_bitcast_op : dst);
-					override_loop_op_type = elem_type;
-					assert(!const_len_op || (const_len_op->getZExtValue() % elem_size == 0u));
+			auto elem_type = dst_orig_type->getPointerElementType();
+			if constexpr (std::is_same_v<memop_instr_type, MemCpyInst>) {
+				if (elem_type == src_orig_type->getPointerElementType() && elem_type->isSized()) {
+					auto elem_size = M->getDataLayout().getTypeStoreSize(elem_type).getFixedValue();
+					if (elem_size > 1) {
+						// original source and destination types are compatible -> copy based on this type instead
+						src = (src_bitcast_op ? src_bitcast_op : src);
+						dst = (dst_bitcast_op ? dst_bitcast_op : dst);
+						override_loop_op_type = elem_type;
+						if (const_len_op && (const_len_op->getZExtValue() % elem_size) != 0u) {
+							ctx->emitError(&memop, "can't handle uneven memcpy element type");
+							return {};
+						}
+					}
 				}
+			} else if constexpr (std::is_same_v<memop_instr_type, MemSetInst>) {
+				if (elem_type->isSized()) {
+					auto elem_size = M->getDataLayout().getTypeStoreSize(elem_type).getFixedValue();
+					if (elem_size > 1) {
+						// memset based on this type instead
+						dst = (dst_bitcast_op ? dst_bitcast_op : dst);
+						override_loop_op_type = elem_type;
+						if (const_len_op && (const_len_op->getZExtValue() % elem_size) != 0u) {
+							ctx->emitError(&memop, "can't handle uneven memset element type");
+							return {};
+						}
+						
+						// update src/set value and type
+						src = (src_bitcast_op ? src_bitcast_op : src);
+						auto src_type = src->getType();
+						if (src_type != elem_type) {
+							auto src_elem_size = M->getDataLayout().getTypeStoreSize(src_type).getFixedValue();
+							if ((elem_size % src_elem_size) != 0u) {
+								ctx->emitError(&memop, "can't handle uneven memset set/src type extension");
+								return {};
+							}
+							
+							if (auto src_constant = dyn_cast_or_null<ConstantInt>(src); src_constant) {
+								// extend src value to new element type
+								const auto src_value = src_constant->getZExtValue();
+								const auto iters = (elem_size / src_elem_size);
+								const auto shift = src_elem_size * 8u;
+								uint64_t extended_src_value = src_value;
+								for (uint32_t i = 1; i < iters; ++i) {
+									extended_src_value |= src_value << (shift * i);
+								}
+								src = ConstantInt::get(elem_type, extended_src_value);
+							} else {
+								ctx->emitError(&memop, "can't handle memset src extension with dynamic value yet");
+								return {};
+							}
+						}
+					}
+				}
+			}
+			
+			return {
+				.src = src,
+				.dst = dst,
+				.const_len_op = const_len_op,
+				.len_op = len_op,
+				.override_loop_op_type = override_loop_op_type,
+			};
+		}
+		
+		//! tries to lower "memcpy_instr" to LLVM instructions,
+		//! returns true if the lowering happened
+		bool lower_memcpy(MemCpyInst& memcpy_instr) {
+			auto [src, dst, const_len_op, len_op, override_loop_op_type] = compute_memop_lower_info(memcpy_instr);
+			if (!src || !dst || !len_op) {
+				return false;
 			}
 			
 			// -> length is either constant > 1 or a dynamic length
@@ -2555,6 +2637,29 @@ namespace {
 											memcpy_instr.isVolatile(), memcpy_instr.isVolatile(), TTI, override_loop_op_type);
 			}
 			memcpy_instr.eraseFromParent();
+			return true;
+		}
+		
+		//! tries to lower "memset_instr" to LLVM instructions,
+		//! returns true if the lowering happened
+		bool lower_memset(MemSetInst& memset_instr) {
+			auto [src, dst, const_len_op, len_op, override_loop_op_type] = compute_memop_lower_info(memset_instr);
+			if (!src || !dst || !len_op) {
+				return false;
+			}
+			
+			// TODO: make use of VK_KHR_zero_initialize_workgroup_memory when memory is local/work-group and this is the first use of it
+			
+			if (const_len_op) {
+				createMemSetLoopKnownSize(&memset_instr, dst, const_len_op, src,
+										  memset_instr.getDestAlign().valueOrOne(),
+										  memset_instr.isVolatile(), override_loop_op_type);
+			} else {
+				createMemSetLoop(&memset_instr, dst, len_op, src,
+								 memset_instr.getDestAlign().valueOrOne(),
+								 memset_instr.isVolatile(), override_loop_op_type);
+			}
+			memset_instr.eraseFromParent();
 			return true;
 		}
 	};

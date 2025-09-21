@@ -1096,6 +1096,9 @@ void PassManagerBuilder::populateModulePassManager(
     }
   }
   if (EnableVulkanPasses) { // must run after spir!
+    // builtin -> parameter replacement
+    MPM.add(createVulkanBuiltinParamHandlingPass());
+
     // initial cfg cleanup/simplification
     MPM.add(createAggressiveDCEPass(true /* allow CFG removal here */));
     // NOTE: we no longer need to or want to perform switch lowering (switch'es can be handled now!)
@@ -1110,9 +1113,6 @@ void PassManagerBuilder::populateModulePassManager(
     MPM.add(createGVNPass());
     MPM.add(createNaryReassociatePass());
     MPM.add(createEarlyCSEPass());
-
-    // builtin -> parameter replacement
-    MPM.add(createVulkanBuiltinParamHandlingPass());
 
     // "pre-final" vulkanization (prior to cfg structurization)
     // NOTE: we perform some loop+vector passes after this to clean up lowered memcpy's
