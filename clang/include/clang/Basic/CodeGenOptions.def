@@ -97,6 +97,7 @@ CODEGENOPT(VulkanLLVMPreStructurizationPass , 1, 0) ///< Enable LLVM CFG structu
 CODEGENOPT(VulkanSoftPrintf , 1, 0) ///< Enables support of software printf emulation.
 CODEGENOPT(VulkanSubgroupUniformCF , 1, 0) ///< Enables support for SPV_KHR_subgroup_uniform_control_flow.
 CODEGENOPT(VulkanLowDescriptorSetCount , 1, 0) ///< Enables low descriptor set count handling.
+CODEGENOPT(SPIRVVersion , 32, 0x10000) ///< SPIR-V target version (not used in containers)
 CODEGENOPT(GraphicsPrimitiveID , 1, 0) ///< Enables support for builtin primitive id.
 CODEGENOPT(GraphicsBarycentricCoord , 1, 0) ///< Enables support for builtin primitive id.
 CODEGENOPT(EmulatedTLS       , 1, 0) ///< Set by default or -f[no-]emulated-tls.

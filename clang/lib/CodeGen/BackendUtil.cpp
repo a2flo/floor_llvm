@@ -1183,7 +1183,7 @@ void EmitAssemblyHelper::EmitAssemblyWithLegacyPassManager(
     break;
 
   case Backend_EmitSPIRV:
-    PerModulePasses.add(createSPIRVWriterPass(*OS));
+    PerModulePasses.add(createSPIRVWriterPass(*OS, CodeGenOpts.SPIRVVersion));
     break;
 
   case Backend_EmitSPIRVContainer:

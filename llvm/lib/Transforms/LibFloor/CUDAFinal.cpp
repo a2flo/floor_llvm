@@ -43,6 +43,7 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/InstVisitor.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/IntrinsicsNVPTX.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
@@ -85,6 +86,7 @@ namespace {
 		Function* func { nullptr };
 		Instruction* alloca_insert { nullptr };
 		bool was_modified { false };
+		uint32_t kernel_dim { 1 };
 		
 		CUDAFinal() : FunctionPass(ID) {
 			initializeCUDAFinalPass(*PassRegistry::getPassRegistry());
@@ -104,6 +106,15 @@ namespace {
 			builder = std::make_shared<llvm::IRBuilder<>>(*ctx);
 			was_modified = false;
 			
+			// get kernel dim
+			auto kernel_dim_node = F.getMetadata("kernel_dim");
+			assert(kernel_dim_node);
+			if (kernel_dim_node->getNumOperands() > 0) {
+				auto& op = kernel_dim_node->getOperand(0);
+				kernel_dim = (uint32_t)mdconst::extract<ConstantInt>(op)->getZExtValue();
+				assert(kernel_dim >= 1 && kernel_dim <= 3);
+			}
+			
 			// visit everything in this function
 			DBG(errs() << "in func: "; errs().write_escaped(F.getName()) << '\n';)
 			visit(F);
@@ -114,6 +125,71 @@ namespace {
 		using InstVisitor<CUDAFinal>::visit;
 		void visit(Instruction& I) {
 			InstVisitor<CUDAFinal>::visit(I);
+		}
+		
+		void visitCallInst(CallInst &I) {
+			const auto called_func = I.getCalledFunction();
+			if (!called_func) {
+				return;
+			}
+			
+			const auto func_name = called_func->getName();
+			if (!func_name.startswith("floor.")) {
+				return;
+			}
+			
+			if (func_name == "floor.get_sub_group_id.i32") {
+				std::array<Function*, 3> local_id {
+					Intrinsic::getDeclaration(M, Intrinsic::nvvm_read_ptx_sreg_tid_x),
+					Intrinsic::getDeclaration(M, Intrinsic::nvvm_read_ptx_sreg_tid_y),
+					Intrinsic::getDeclaration(M, Intrinsic::nvvm_read_ptx_sreg_tid_z),
+				};
+				std::array<Function*, 2> local_size {
+					Intrinsic::getDeclaration(M, Intrinsic::nvvm_read_ptx_sreg_ntid_x),
+					Intrinsic::getDeclaration(M, Intrinsic::nvvm_read_ptx_sreg_ntid_y),
+				};
+				
+				Value* result = nullptr;
+				builder->SetInsertPoint(&I);
+				switch (kernel_dim) {
+					default:
+					case 1: {
+						auto lid_x = builder->CreateCall(local_id[0], {});
+						result = builder->CreateUDiv(lid_x, ConstantInt::get(Type::getInt32Ty(*ctx), 32u /* warp size */));
+						break;
+					}
+					case 2: {
+						auto lid_x = builder->CreateCall(local_id[0], {});
+						auto lid_y = builder->CreateCall(local_id[1], {});
+						auto lsize_x = builder->CreateCall(local_size[0], {});
+						auto linear_lid = builder->CreateAdd(lid_x, builder->CreateMul(lid_y, lsize_x));
+						result = builder->CreateUDiv(linear_lid, ConstantInt::get(Type::getInt32Ty(*ctx), 32u /* warp size */));
+						break;
+					}
+					case 3: {
+						auto lid_x = builder->CreateCall(local_id[0], {});
+						auto lid_y = builder->CreateCall(local_id[1], {});
+						auto lid_z = builder->CreateCall(local_id[1], {});
+						auto lsize_x = builder->CreateCall(local_size[0], {});
+						auto lsize_y = builder->CreateCall(local_size[1], {});
+						// x + y * size_x + z * size_x * size_y
+						auto linear_lid = builder->CreateAdd(builder->CreateAdd(lid_x, builder->CreateMul(lid_y, lsize_x)),
+															 builder->CreateMul(lid_z, builder->CreateMul(lsize_x, lsize_y)));
+						result = builder->CreateUDiv(linear_lid, ConstantInt::get(Type::getInt32Ty(*ctx), 32u /* warp size */));
+						break;
+					}
+				}
+				
+				assert(result);
+				I.replaceAllUsesWith(result);
+				I.eraseFromParent();
+				
+				was_modified = true;
+				return;
+			} else {
+				// unknown -> ignore for now
+				return;
+			}
 		}
 		
 	};

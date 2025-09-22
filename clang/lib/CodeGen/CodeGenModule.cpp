@@ -4161,6 +4161,18 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 		return;
 	}
 	
+	if (const ComputeKernelDimAttr *A = FD->getAttr<ComputeKernelDimAttr>()) {
+		llvm::Metadata *AttrMDArgs[] = {
+			llvm::ConstantAsMetadata::get(Builder.getInt32(A->getDim()))};
+		Fn->setMetadata("kernel_dim", llvm::MDNode::get(getLLVMContext(), AttrMDArgs));
+	}
+	
+	if (const ComputeKernelSIMDWidthAttr *A = FD->getAttr<ComputeKernelSIMDWidthAttr>()) {
+		llvm::Metadata *AttrMDArgs[] = {
+			llvm::ConstantAsMetadata::get(Builder.getInt32(A->getWidth()))};
+		Fn->setMetadata("kernel_simd_width", llvm::MDNode::get(getLLVMContext(), AttrMDArgs));
+	}
+	
 	if (getLangOpts().floor_function_info == nullptr) {
 		return;
 	}

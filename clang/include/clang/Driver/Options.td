@@ -5961,6 +5961,8 @@ def cl_verify_spir : Flag<["-"], "cl-verify-spir">,
   HelpText<"OpenCL/SPIR only. Runs the Khronos SPIR verifier on the final LLVM IR.">;
 def cl_spir_intel_workarounds : Flag<["-"], "cl-spir-intel-workarounds">,
   HelpText<"Enable Intel SPIR specific fixes and workarounds">;
+def spirv_version_EQ : Joined<["-"], "spirv-version=">,
+  HelpText<"Sets the OpenCL SPIR-V version number">;
 
 //===----------------------------------------------------------------------===//
 // CUDA Options
