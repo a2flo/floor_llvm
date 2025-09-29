@@ -76,20 +76,24 @@ class LibFloorGPUTargetLowering : public TargetLowering {
 protected:
 	const bool is_metal { false };
 	const bool is_vulkan { false };
+	const bool is_restricted_vector_support { false };
 	
 public:
-	explicit LibFloorGPUTargetLowering(const bool is_metal_, const bool is_vulkan_) :
-	TargetLowering(*LibFloorGPUTargetMachine::get_instance()), is_metal(is_metal_), is_vulkan(is_vulkan_) {}
+	explicit LibFloorGPUTargetLowering(const bool is_metal_, const bool is_vulkan_,
+									   const bool is_restricted_vector_support_) :
+	TargetLowering(*LibFloorGPUTargetMachine::get_instance()), is_metal(is_metal_), is_vulkan(is_vulkan_),
+	is_restricted_vector_support(is_restricted_vector_support_) {}
 	
-	static LibFloorGPUTargetLowering* get_instance(const bool is_metal_, const bool is_vulkan_) {
-		static LibFloorGPUTargetLowering instance(is_metal_, is_vulkan_);
+	static LibFloorGPUTargetLowering* get_instance(const bool is_metal_, const bool is_vulkan_,
+												   const bool is_restricted_vector_support_) {
+		static LibFloorGPUTargetLowering instance(is_metal_, is_vulkan_, is_restricted_vector_support_);
 		return &instance;
 	}
 	
 	//! Metal: allow misaligned access under certain pre-conditions
 	//! Vulkan: TBD
 	bool impl_allowsMisalignedMemoryAccesses(unsigned BitWidth, unsigned AddressSpace, Align Alignment, bool *Fast) const {
-		if (is_metal) {
+		if (is_metal && !is_restricted_vector_support) {
 			// both alignment and #bytes must be 1 or divisble by 2
 			const auto align = Alignment.value();
 			if (align > 1u && align % 2u != 0) {
@@ -145,7 +149,8 @@ public:
 	CodeGenOpts(CodeGenOpts_), TargetOpts(TargetOpts_), LangOpts(LangOpts_), M(M_),
 	is_metal(Triple(M.getTargetTriple()).getArch() == Triple::ArchType::air64),
 	is_vulkan(Triple(M.getTargetTriple()).getArch() == Triple::ArchType::spir64 &&
-			  Triple(M.getTargetTriple()).getEnvironment() == Triple::EnvironmentType::Vulkan) {}
+			  Triple(M.getTargetTriple()).getEnvironment() == Triple::EnvironmentType::Vulkan),
+	is_restricted_vector_support(is_vulkan || CodeGenOpts.MetalRestrictedVectorization) {}
 	
 	//! restrict to width of 4
 	unsigned getMaximumVF(unsigned, unsigned) const { return 4; }
@@ -161,7 +166,7 @@ public:
 		if (VecRegBitWidth > max_bit_width && VecTy->getScalarSizeInBits() < 32) {
 			VF = max_bit_width / LoadSize;
 		}
-		if (is_vulkan) {
+		if (is_restricted_vector_support) {
 			return std::min(VF, 4u);
 		}
 		return VF;
@@ -174,7 +179,7 @@ public:
 		if (VecRegBitWidth > max_bit_width) {
 			VF = max_bit_width / StoreSize;
 		}
-		if (is_vulkan) {
+		if (is_restricted_vector_support) {
 			return std::min(VF, 4u);
 		}
 		return VF;
@@ -210,8 +215,8 @@ public:
 	}
 	
 	InstructionCost getVectorInstrCost(unsigned Opcode, Type *ValTy, unsigned Index) {
-		if (is_vulkan && ValTy->isVectorTy() && cast<FixedVectorType>(ValTy)->getElementCount().getFixedValue() > 4) {
-			// Vulkan: last resort to prevent vector types with more than 4 components
+		if (is_restricted_vector_support && ValTy->isVectorTy() && cast<FixedVectorType>(ValTy)->getElementCount().getFixedValue() > 4) {
+			// last resort to prevent vector types with more than 4 components
 			return 0xFFFFFF;
 		}
 		if (Index == 0 && (Opcode == Instruction::ExtractElement ||
@@ -230,7 +235,7 @@ public:
 										   const Instruction *CxtI = nullptr) {
 		auto cost = crtp_base_class::getArithmeticInstrCost(Opcode, Ty, CostKind, Opd1Info, Opd2Info,
 															Opd1PropInfo, Opd2PropInfo, Args, CxtI);
-		if (is_metal && Ty->isVectorTy()) {
+		if (!is_restricted_vector_support && is_metal && Ty->isVectorTy()) {
 			// Metal: for vectors, bias cost so that it equals scalar cost
 			if (auto fixed_vec_type = dyn_cast<FixedVectorType>(Ty); fixed_vec_type) {
 				cost /= fixed_vec_type->getNumElements();
@@ -251,7 +256,7 @@ public:
 					 TTI::CastContextHint CCH,
 					 TTI::TargetCostKind CostKind = TTI::TCK_SizeAndLatency,
 					 const Instruction *I = nullptr) const {
-		if (is_vulkan) {
+		if (is_restricted_vector_support) {
 			// try to prevent vector types with more than 4 components
 			if (auto dst_vec_type = dyn_cast_or_null<FixedVectorType>(Dst);
 				dst_vec_type && dst_vec_type->getElementCount().getFixedValue() > 4) {
@@ -272,12 +277,13 @@ protected:
 	const Module& M;
 	const bool is_metal { false };
 	const bool is_vulkan { false };
+	const bool is_restricted_vector_support { false };
 	
 	const LibFloorGPUSubTarget* ST {
 		LibFloorGPUSubTarget::get_instance()
 	};
 	const LibFloorGPUTargetLowering* TLI {
-		LibFloorGPUTargetLowering::get_instance(is_metal, is_vulkan)
+		LibFloorGPUTargetLowering::get_instance(is_metal, is_vulkan, is_restricted_vector_support)
 	};
 	
 public:

@@ -90,6 +90,7 @@ CODEGENOPT(EmitGcovNotes     , 1, 0) ///< Emit coverage "notes" files, aka GCNO.
 CODEGENOPT(EmitOpenCLArgMetadata , 1, 0) ///< Emit OpenCL kernel arg metadata.
 CODEGENOPT(MetalIntelWorkarounds , 1, 0) ///< Enable Intel GPU specific fixes and workarounds.
 CODEGENOPT(MetalSoftPrintf , 1, 0) ///< Enables support of software printf emulation.
+CODEGENOPT(MetalRestrictedVectorization , 1, 0) ///< Enable restrictive scalar->vector transformations
 CODEGENOPT(SPIRIntelWorkarounds , 1, 0) ///< Enable Intel SPIR specific fixes and workarounds.
 VALUE_CODEGENOPT(VulkanIUBSize, 32, 256) ///< max supported size of Vulkan inline uniform blocks
 VALUE_CODEGENOPT(VulkanIUBCount, 32, 4) ///< max supported count of Vulkan inline uniform blocks

@@ -1839,6 +1839,7 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
                                 Args.hasArg(OPT_emit_spirv_container));
   Opts.MetalIntelWorkarounds = Args.hasArg(OPT_metal_intel_workarounds);
   Opts.MetalSoftPrintf = Args.hasArg(OPT_metal_soft_printf);
+  Opts.MetalRestrictedVectorization = Args.hasArg(OPT_metal_restrictive_vectorization);
   Opts.SPIRIntelWorkarounds = Args.hasArg(OPT_cl_spir_intel_workarounds);
   Opts.VulkanIUBSize = uint32_t(std::min(uint64_t(~0u),
       getLastArgUInt64Value(Args, OPT_vulkan_iub_size_EQ, 256)));

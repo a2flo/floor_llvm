@@ -750,6 +750,8 @@ void AggExprEmitter::VisitCastExpr(CastExpr *E) {
     llvm::Value *SizeVal = llvm::ConstantInt::get(
         CGF.SizeTy,
         CGF.getContext().getTypeSizeInChars(E->getType()).getQuantity());
+    // TODO: this would be correct, but doing so prevents memcpy lowering even for trivial types
+    //Builder.CreateMemCpy(DestAddress, SourceAddress, SizeVal, SourceLV.getType().isVolatileQualified());
     Builder.CreateMemCpy(DestAddress, SourceAddress, SizeVal);
     break;
   }
