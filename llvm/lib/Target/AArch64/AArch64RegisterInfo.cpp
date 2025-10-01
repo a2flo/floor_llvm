@@ -320,7 +320,7 @@ AArch64RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   markSuperRegs(Reserved, AArch64::WSP);
   markSuperRegs(Reserved, AArch64::WZR);
 
-  if (TFI->hasFP(MF) || TT.isOSDarwin())
+  if (TFI->hasFP(MF) || TT.isOSDarwin() || TT.getEnvironment() == Triple::FloorHostCompute)
     markSuperRegs(Reserved, AArch64::W29);
 
   for (size_t i = 0; i < AArch64::GPR32commonRegClass.getNumRegs(); ++i) {
@@ -328,7 +328,7 @@ AArch64RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
       markSuperRegs(Reserved, AArch64::GPR32commonRegClass.getRegister(i));
   }
 
-  if (hasBasePointer(MF))
+  if (hasBasePointer(MF) || TT.getEnvironment() == Triple::FloorHostCompute)
     markSuperRegs(Reserved, AArch64::W19);
 
   // SLH uses register W16/X16 as the taint register.
