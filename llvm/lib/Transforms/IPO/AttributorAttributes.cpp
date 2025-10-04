@@ -1147,25 +1147,17 @@ struct AAPointerInfoImpl
                   Scope)
             : nullptr;
 
-    enum GPUAddressSpace : unsigned {
-      Generic = 0,
-      Global = 1,
-      Shared = 3,
-      Constant = 4,
-      Local = 5,
-    };
-
     // Helper to check if a value has "kernel lifetime", that is it will not
     // outlive a GPU kernel. This is true for shared, constant, and local
     // globals on AMD and NVIDIA GPUs.
     auto HasKernelLifetime = [&](Value *V, Module &M) {
       Triple T(M.getTargetTriple());
-      if (!(T.isAMDGPU() || T.isNVPTX()))
+      if (!T.isAnyLibFloorTarget())
         return false;
-      switch (V->getType()->getPointerAddressSpace()) {
-      case GPUAddressSpace::Shared:
-      case GPUAddressSpace::Constant:
-      case GPUAddressSpace::Local:
+      switch ((AA::GPUAddressSpace)V->getType()->getPointerAddressSpace()) {
+      case AA::GPUAddressSpace::Shared:
+      case AA::GPUAddressSpace::Constant:
+      case AA::GPUAddressSpace::Local:
         return true;
       default:
         return false;
@@ -3541,6 +3533,11 @@ struct AAIsDeadFloating : public AAIsDeadValueImpl {
     if (SI.isVolatile())
       return false;
 
+    // any store to a non-zero address space should never be considered a dead store (can't possibly reason about this here)
+    if (SI.getPointerAddressSpace() != 0) {
+      return false;
+    }
+
     bool UsedAssumedInformation = false;
     SmallSetVector<Value *, 4> PotentialCopies;
     if (!AA::getPotentialCopiesOfStoredValue(A, SI, PotentialCopies, *this,
@@ -5367,6 +5364,12 @@ struct AAValueSimplifyImpl : AAValueSimplify {
 
   static bool handleLoad(Attributor &A, const AbstractAttribute &AA,
                          LoadInst &L, function_ref<bool(Value &)> Union) {
+    // loads from any non-zero address space that isn't constant can never be simplified
+    if (const auto addr_space = L.getPointerAddressSpace();
+        addr_space != 0 && (AA::GPUAddressSpace)addr_space != AA::GPUAddressSpace::Constant) {
+      return false;
+    }
+
     auto UnionWrapper = [&](Value &V, Value &Obj) {
       if (isa<AllocaInst>(Obj))
         return Union(V);

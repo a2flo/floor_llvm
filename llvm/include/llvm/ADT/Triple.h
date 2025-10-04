@@ -712,6 +712,12 @@ public:
     return getArch() == Triple::r600 || getArch() == Triple::amdgcn;
   }
 
+  bool isAnyLibFloorTarget() const {
+    return (isSPIR() || isSPIRV() || isNVPTX() || isAMDGPU() ||
+            getEnvironment() == Triple::FloorHostCompute ||
+            getArch() == Triple::air64);
+  }
+
   /// Tests whether the target is Thumb (little and big endian).
   bool isThumb() const {
     return getArch() == Triple::thumb || getArch() == Triple::thumbeb;
