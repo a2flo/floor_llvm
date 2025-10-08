@@ -6008,6 +6008,8 @@ def vulkan_subgroup_uniform_cf : Flag<["-"], "vulkan-subgroup-uniform-cf">,
   HelpText<"Enables support of SPV_KHR_subgroup_uniform_control_flow">;
 def vulkan_low_descriptor_set_count : Flag<["-"], "vulkan-low-descriptor-set-count">,
   HelpText<"Enables low descriptor set count handling">;
+def vulkan_ptr_workarounds : Flag<["-"], "vulkan-ptr-workarounds">,
+  HelpText<"Enables Vulkan specific pointer workarounds">;
 
 //===----------------------------------------------------------------------===//
 // Graphics Options

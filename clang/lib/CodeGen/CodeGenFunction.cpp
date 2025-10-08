@@ -733,6 +733,11 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
     CGM.getModule().getOrInsertNamedMetadata("floor.vulkan_low_descriptor_set_count");
   }
 
+  // add Vulkan pointer workarounds info
+  if (CGM.getCodeGenOpts().VulkanPtrWorkarounds) {
+    CGM.getModule().getOrInsertNamedMetadata("floor.vulkan_ptr_workarounds");
+  }
+
   // signal that we're generating SPIR-V in the end
   if (CGM.getCodeGenOpts().floor_generating_spirv > 0) {
     CGM.getModule().getOrInsertNamedMetadata("floor.generating_spirv");

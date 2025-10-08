@@ -1753,6 +1753,10 @@ namespace {
 			// NOTE: disabled for now as we don't need this any more (probably ...)
 			// handle everything
 			//handle_pointers();
+			// enable specific pointer-select+store workarounds
+			if (M->getNamedMetadata("floor.vulkan_ptr_workarounds")) {
+				handle_select_ptrs();
+			}
 			
 			// we can't use mem* instructions that handle more than one value in Vulkan/SPIR-V
 			if (!mem_instrs.empty()) {
@@ -1922,6 +1926,474 @@ namespace {
 				return;
 			}
 			phi_ptrs.emplace_back(&PHI);
+		}
+		
+		void handle_select_ptrs() {
+			DBG(errs() << "####################\n## in " << func->getName() << "\n";
+				for(const auto& sel : select_ptrs) {
+					errs() << "select: " << *sel << "\n";
+				}
+			)
+			was_modified = true; // TODO: do this properly
+			
+			//
+			std::vector<GetElementPtrInst*> problem_geps;
+			for(const auto& gep : gep_ptrs) {
+				if(input_ptrs.count(gep->getPointerOperand()) == 0) {
+					problem_geps.emplace_back(gep);
+					continue;
+				}
+			}
+			DBG(errs() << "\n";
+				for(const auto& gep : problem_geps) {
+					errs() << "PROBLEM GEP: " << *gep << "\n";
+				}
+			)
+			
+			// needed for finding the origin pointers
+			auto DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
+			DT->recalculate(*func);
+			LoopInfo LI(*DT);
+			
+			// find set of problem instructions and their pointer origin(s)
+			std::deque<Instruction*> problem_instrs;
+			problem_instrs.insert(begin(problem_instrs), begin(select_ptrs), end(select_ptrs));
+			problem_instrs.insert(begin(problem_instrs), begin(problem_geps), end(problem_geps));
+			
+			struct ptr_set {
+				// pointer origin(s)
+				std::unordered_set<const Value*> src;
+				// pointer producers (PHIs, selects, GEPs)
+				// TODO: pointer bitcasts should be handled previously
+				std::unordered_set<Instruction*> producers;
+				// pointer consumers (loads, stores)
+				std::unordered_set<Instruction*> consumers;
+			};
+			std::vector<std::shared_ptr<ptr_set>> ptr_sets;
+			std::unordered_map<Instruction*, ptr_set*> ptr_set_map;
+			std::unordered_multimap<const Value*, ptr_set*> origin_map;
+			
+			// create initial ptr_sets from our "problem" instructions
+			for(; !problem_instrs.empty(); problem_instrs.pop_front()) {
+				const auto& instr = problem_instrs[0];
+				
+				// already handled elsewhere?
+				if(ptr_set_map.count(instr) > 0) continue;
+				
+				// figure out which origin pointer(s) this comes from
+				SmallVector<const Value*, 3> origins;
+				DBG(errs() << "\n-> " << *instr << "\n";)
+				getUnderlyingObjects(instr, origins, &LI, 0);
+				DBG(for(const auto& orig : origins) {
+					errs() << "     origin: " << *orig << "\n";
+				})
+				if(origins.empty()) {
+					ctx->emitError(instr, "instruction has no origin");
+					return;
+				}
+				
+				// check if we have a ptr_set for this origin combination yet
+				ptr_set* pset = nullptr;
+				auto orig_range = origin_map.equal_range(origins[0]);
+				for(auto oiter = orig_range.first; oiter != orig_range.second; ++oiter) {
+					// same size?
+					if(oiter->second->src.size() != origins.size()) {
+						continue;
+					}
+					
+					// same content?
+					bool equal_set = true;
+					for(const auto& origin : origins) {
+						if(oiter->second->src.count(origin) == 0) {
+							equal_set = false;
+							break;
+						}
+					}
+					if(!equal_set) continue;
+					
+					// found a ptr_set that matches
+					pset = oiter->second;
+					break;
+				}
+				
+				// create a ptr_set if none exists yet
+				if(pset == nullptr) {
+					auto new_ptr_set = std::make_shared<ptr_set>();
+					ptr_sets.push_back(new_ptr_set);
+					pset = new_ptr_set.get();
+					
+					pset->src.insert(origins.begin(), origins.end());
+					for(const auto& origin : origins) {
+						origin_map.emplace(origin, pset);
+					}
+				}
+				
+				// add this instruction
+				pset->producers.emplace(instr);
+				ptr_set_map.emplace(instr, pset);
+				
+				// we must also handle the pointers contained within instructions
+				// -> this makes sure that we recursively get the complete net/graph of pointers
+				if(PHINode* phi = dyn_cast_or_null<PHINode>(instr)) {
+					for(const auto& phi_inc_val : phi->incoming_values()) {
+						// only add the value/instruction if we haven't handled it yet + if it isn't a input ptr
+						const auto phi_inc_instr = dyn_cast_or_null<Instruction>(&phi_inc_val);
+						if(phi_inc_instr != nullptr &&
+						   input_ptrs.count(phi_inc_instr) == 0 &&
+						   ptr_set_map.count(phi_inc_instr) == 0) {
+							problem_instrs.emplace_back(phi_inc_instr);
+						}
+					}
+				}
+				else if(SelectInst* sel = dyn_cast_or_null<SelectInst>(instr)) {
+					const auto true_instr = dyn_cast_or_null<Instruction>(sel->getTrueValue());
+					const auto false_instr = dyn_cast_or_null<Instruction>(sel->getFalseValue());
+					if(true_instr != nullptr &&
+					   input_ptrs.count(true_instr) == 0 &&
+					   ptr_set_map.count(true_instr) == 0) {
+						problem_instrs.emplace_back(true_instr);
+					}
+					if(false_instr != nullptr &&
+					   input_ptrs.count(false_instr) == 0 &&
+					   ptr_set_map.count(false_instr) == 0) {
+						problem_instrs.emplace_back(false_instr);
+					}
+				}
+				else if(GetElementPtrInst* GEP = dyn_cast_or_null<GetElementPtrInst>(instr)) {
+					const auto gep_instr = dyn_cast_or_null<Instruction>(GEP->getPointerOperand());
+					if(gep_instr != nullptr &&
+					   input_ptrs.count(gep_instr) == 0 &&
+					   ptr_set_map.count(gep_instr) == 0) {
+						problem_instrs.emplace_back(gep_instr);
+					}
+				}
+			}
+			
+			// find all consumers of our producers
+			for (const auto& instr_pset : ptr_set_map) {
+				const auto& instr = instr_pset.first;
+				auto& pset = instr_pset.second;
+				
+				// only need to consider direct users this time
+				libfloor_utils::for_all_instruction_users(*instr, [&pset](Instruction& user_instr) {
+					if (isa<GetElementPtrInst>(user_instr) ||
+						isa<SelectInst>(user_instr) ||
+						isa<PHINode>(user_instr) ||
+						isa<LoadInst>(user_instr)) {
+						// not interested in these, should already be handled elsewhere
+						return;
+					}
+					// NOTE: we don't care about what kind of instructions consumers are, because
+					// we can simply iterate over all operands of the instruction and replace the
+					// producer(s) accordingly
+					pset->consumers.emplace(&user_instr);
+				});
+			}
+			
+			// debug output
+			DBG(errs() << "\n\n## ptr sets:\n";
+				for(const auto& pset : ptr_sets) {
+					errs() << "# set\n";
+					errs() << "origins:\n";
+					for(const auto& origin : pset->src) {
+						errs() << "\t" << *origin << "\n";
+					}
+					errs() << "producers:\n";
+					for(const auto& prod : pset->producers) {
+						errs() << "\t" << *prod << "\n";
+					}
+					errs() << "consumers:\n";
+					for(const auto& cons : pset->consumers) {
+						errs() << "\t" << *cons << "\n";
+					}
+					
+					errs() << "\n";
+				}
+			)
+			
+			for (const auto& pset : ptr_sets) {
+				if (pset->src.size() < 2) {
+					// ignore trivial cases
+				}
+				
+				bool has_store_inst = false;
+				for (const auto& cons : pset->consumers) {
+					if (isa<StoreInst>(cons)) {
+						has_store_inst = true;
+						break;
+					}
+				}
+				if (!has_store_inst) {
+					DBG(errs() << "!! ignoring non-store-only consumers\n";)
+				}
+				
+				// go down the condition tree until we hit a leaf / origin pointer, in between:
+				//  * for GEPs: store them in a chain (in the same order as they were encountered) and pass/copy
+				//              them through to each tree branch (so that each branch has its individual chain)
+				//  * for SELs: create if/else branches for each SEL (using the same condition as the SEL),
+				//              then recursively go down each branch, meeting up again after the SEL instruction,
+				//              also insert a PHI if the consumer produces a value (replace consumer with that at the end)
+				//  * for origin ptrs: fuse the GEP chain up to that point, replace pointer with the origin pointer (now
+				//                     unambiguous), replace use of producer pointer in the consumer with the new GEP
+				
+				// (upside-down) condition tree
+				struct condition_tree {
+					enum class TYPE : uint32_t {
+						COMPARE_BOOL,
+						COMPARE_PHI,
+						ORIGIN_PTR,
+						GEP,
+					};
+					TYPE type;
+					
+					// if COMPARE_BOOL: i1 compare value
+					// if COMPARE_PHI: i32 compare value
+					// if ORIGIN_PTR: actual origin ptr (+this is a leaf node)
+					// if GEP: intermediate GEP
+					Value* val;
+					
+					// pointers to the next condition node(s) or actual origin ptrs (if they are leaf nodes)
+					std::vector<condition_tree> nodes;
+				};
+				uint32_t leaf_count = 0;
+				const std::function<void(Value*, condition_tree&)> create_condition_tree =
+				[&create_condition_tree, &pset, &leaf_count, this](Value* prod, condition_tree& node) {
+					// origin ptr: attach as leaf node
+					if(pset->src.count(prod) > 0) {
+						node.type = condition_tree::TYPE::ORIGIN_PTR;
+						node.val = prod;
+						++leaf_count;
+						return;
+					}
+					
+					// intermediate GEP, continue with pointer op
+					if(GetElementPtrInst* GEP = dyn_cast_or_null<GetElementPtrInst>(prod)) {
+						node.type = condition_tree::TYPE::GEP;
+						node.val = GEP;
+						
+						condition_tree child;
+						create_condition_tree(GEP->getPointerOperand(), child);
+						node.nodes.push_back(child);
+					}
+					// select, store condition + continue traversal with true and false value
+					else if(SelectInst* sel = dyn_cast_or_null<SelectInst>(prod)) {
+						node.type = condition_tree::TYPE::COMPARE_BOOL;
+						node.val = sel->getCondition();
+						
+						// NOTE: must be in this order
+						condition_tree true_child, false_child;
+						create_condition_tree(sel->getTrueValue(), true_child);
+						create_condition_tree(sel->getFalseValue(), false_child);
+						node.nodes.push_back(true_child);
+						node.nodes.push_back(false_child);
+					}
+					else if(isa<PHINode>(prod)) {
+						// TODO: handle PHIs!
+						node.type = condition_tree::TYPE::COMPARE_PHI;
+						return;
+					}
+					else {
+						if(Instruction* instr = dyn_cast_or_null<Instruction>(prod)) {
+							ctx->emitError(instr, "unhandled producer while creating condition tree");
+						}
+						else {
+							ctx->emitError("unhandled non-instruction producer value while creating condition tree");
+						}
+					}
+				};
+				
+				// for debugging purposes
+				const std::function<void(const condition_tree&, const uint32_t)> dump_condition_tree =
+				[&dump_condition_tree](const condition_tree& node, const uint32_t level) {
+					errs() << std::string(level, '-') << "> ";
+					switch(node.type) {
+						case condition_tree::TYPE::COMPARE_BOOL:
+							errs() << "SELECT: " << *node.val << "\n";
+							dump_condition_tree(node.nodes[0], level + 1);
+							dump_condition_tree(node.nodes[1], level + 1);
+							break;
+						case condition_tree::TYPE::COMPARE_PHI:
+							errs() << "PHI:\n";
+							break;
+						case condition_tree::TYPE::GEP:
+							errs() << "GEP: " << *node.val << "\n";
+							dump_condition_tree(node.nodes[0], level + 1);
+							break;
+						case condition_tree::TYPE::ORIGIN_PTR:
+							errs() << "LEAF: " << *node.val << "\n";
+							break;
+					}
+				};
+				
+				// this determines if replacing the condition is viable/possible, i.e. there are no PHIs in it
+				const std::function<bool(const condition_tree&, bool)> is_viable_condition_tree =
+				[&is_viable_condition_tree](const condition_tree& node, const bool has_branch_term) {
+					bool viable = true;
+					switch (node.type) {
+						case condition_tree::TYPE::COMPARE_BOOL:
+							viable &= is_viable_condition_tree(node.nodes[0], true);
+							viable &= is_viable_condition_tree(node.nodes[1], true);
+							break;
+						case condition_tree::TYPE::COMPARE_PHI:
+							viable = false;
+							break;
+						case condition_tree::TYPE::GEP:
+							viable &= is_viable_condition_tree(node.nodes[0], has_branch_term);
+							break;
+						case condition_tree::TYPE::ORIGIN_PTR:
+							if (!has_branch_term) {
+								return false;
+							}
+							break;
+					}
+					return viable;
+				};
+				
+				for (Instruction* cons : pset->consumers) {
+					// find producer
+					Instruction* producer = nullptr;
+					for(uint32_t i = 0, count = cons->getNumOperands(); i < count; ++i) {
+						const auto op = cons->getOperand(i);
+						const auto piter = pset->producers.find((Instruction*)op);
+						if(piter != pset->producers.end()) {
+							producer = *piter;
+							break;
+						}
+					}
+					assert(producer != nullptr && "consumer has no producer");
+					DBG(errs() << "-> cons/prod: " << *cons << " -> " << *producer << "\n";)
+					
+					// find the condition(s) on which we need to branch
+					condition_tree cond_tree;
+					create_condition_tree(producer, cond_tree);
+					DBG(dump_condition_tree(cond_tree, 0); errs() << "\n";)
+					if (!is_viable_condition_tree(cond_tree, false)) {
+						DBG(errs() << "!! ignoring non-viable condition tree\n";)
+						continue;
+					}
+					
+					// TODO: once switches are supported, combine all conditions to a single large switch,
+					// instead of creating a condition tree
+					// TODO: try to merge multiple users to a single block per origin instead of per GEP/user
+					
+					BasicBlock* continue_block = nullptr; // code/block _after_ the consumer instruction
+					PHINode* continue_phi = nullptr;
+					const std::function<void(const condition_tree&, std::vector<GetElementPtrInst*>, Instruction*)>
+					handle_condition_tree = [this, &handle_condition_tree, &continue_block, &continue_phi, &leaf_count,
+											 &cons, &producer](const condition_tree& node,
+															   std::vector<GetElementPtrInst*> gep_chain,
+															   Instruction* branch_term)
+					{
+						switch(node.type) {
+							case condition_tree::TYPE::COMPARE_BOOL: {
+								DBG(errs() << "@SEL: " << *node.val << "\n";)
+								// select: create an if-else branch
+								Value* cond = node.val;
+								
+								Instruction* true_term = nullptr;
+								Instruction* false_term = nullptr;
+								if(continue_block == nullptr) {
+									// create the first split and final continue block
+									SplitBlockAndInsertIfThenElse(cond, cons, &true_term, &false_term);
+									assert(true_term != nullptr && "failed to create true branch/term");
+									assert(false_term != nullptr && "failed to create false branch/term");
+									continue_block = cons->getParent();
+									continue_block->setName("continue.block");
+									
+									// insert continue phi if the consumer produces a value
+									if(!cons->getType()->isVoidTy()) {
+										continue_phi = PHINode::Create(cons->getType(), leaf_count, "continue.phi",
+																	   cons->getNextNode());
+									}
+								}
+								else {
+									// TODO: implement this
+									assert(false && "not implemented yet");
+									ctx->emitError("multi-select not implemented yet");
+									return;
+								}
+								
+								true_term->getParent()->setName("sel.true");
+								false_term->getParent()->setName("sel.false");
+								
+								// copy GEP chain into both branches
+								handle_condition_tree(node.nodes[0], gep_chain, true_term);
+								handle_condition_tree(node.nodes[1], gep_chain, false_term);
+								break;
+							}
+							case condition_tree::TYPE::COMPARE_PHI: {
+								DBG(errs() << "@PHI: " << *node.val << "\n";)
+								ctx->emitError("PHI nodes are not handled yet");
+								break;
+							}
+							case condition_tree::TYPE::GEP: {
+								DBG(errs() << "@GEP: " << *node.val << "\n";)
+								// add GEP to chain and continue
+								gep_chain.emplace_back(dyn_cast<GetElementPtrInst>(node.val));
+								handle_condition_tree(node.nodes[0], std::move(gep_chain), branch_term);
+								break;
+							}
+							case condition_tree::TYPE::ORIGIN_PTR: {
+								DBG(errs() << "@PTR: " << *node.val << "\n";)
+								// leaf: finally reached an origin pointer
+								assert(branch_term != nullptr && "must have a branch terminator");
+								
+								// fuse GEPs with origin ptr
+								GetElementPtrInst* mat_gep = (GetElementPtrInst*)gep_chain[0]->clone();
+								mat_gep->setOperand(0, node.val);
+								mat_gep->setName(gep_chain.back()->getName());
+								mat_gep->setDebugLoc(gep_chain.back()->getDebugLoc());
+								for(size_t i = 1, count = gep_chain.size(); i < count; ++i) {
+									bool abort = false;
+									std::tie(mat_gep, abort) = fuse_geps(mat_gep, gep_chain[i], false); // TODO
+									if (abort) {
+										break;
+									}
+								}
+								mat_gep->insertBefore(branch_term);
+								DBG(errs() << ">> mat_gep: " << *mat_gep << "\n";)
+								
+								// copy consumer
+								auto cons_clone = cons->clone();
+								if(cons->hasName()) {
+									cons_clone->setName(cons->getName());
+								}
+								cons_clone->setDebugLoc(cons->getDebugLoc());
+								cons_clone->insertBefore(branch_term);
+								
+								// replace consumer ptr
+								DBG(errs() << ">> cons before: " << *cons_clone << "\n";)
+								for(uint32_t i = 0, count = cons_clone->getNumOperands(); i < count; ++i) {
+									const auto op = cons_clone->getOperand(i);
+									if(op == producer) {
+										cons_clone->setOperand(i, mat_gep);
+									}
+								}
+								DBG(errs() << ">> cons after: " << *cons_clone << "\n";)
+								
+								// branch to continue block
+								auto br_inst = dyn_cast_or_null<BranchInst>(branch_term);
+								assert(br_inst != nullptr && "invalid terminator");
+								assert(br_inst->isUnconditional() && "branch must be unconditional");
+								br_inst->setSuccessor(0, continue_block);
+								
+								// update continue phi (if there is one)
+								if(continue_phi != nullptr) {
+									continue_phi->addIncoming(cons_clone, cons_clone->getParent());
+									DBG(errs() << ">> updated phi: " << *continue_phi << "\n";)
+								}
+								break;
+							}
+						}
+					};
+					handle_condition_tree(cond_tree, {}, nullptr);
+					
+					if(continue_phi != nullptr) {
+						cons->replaceAllUsesWith(continue_phi);
+					}
+					cons->eraseFromParent();
+				}
+			}
 		}
 		
 		void handle_pointers() {
