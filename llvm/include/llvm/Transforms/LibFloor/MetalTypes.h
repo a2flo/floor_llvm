@@ -32,6 +32,7 @@
 #include <string>
 #include <array>
 #include <unordered_map>
+#include <optional>
 
 namespace metal {
 
