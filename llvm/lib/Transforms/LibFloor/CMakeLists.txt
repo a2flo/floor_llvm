@@ -9,6 +9,7 @@ add_llvm_component_library(LLVMLibFloor
   LibFloor.cpp
   MetalFinal.cpp
   MetalImage.cpp
+  PropagateCoherency.cpp
   PropagateRangeInfo.cpp
   SPIRFinal.cpp
   SPIRImage.cpp

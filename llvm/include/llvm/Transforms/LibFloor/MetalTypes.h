@@ -628,6 +628,43 @@ static inline uint32_t get_metal_version(llvm::Module& M) {
 	return metal_version;
 }
 
+static inline std::optional<std::string> get_metal_native_typename(llvm::Type* type, const bool is_signed, const bool with_sign_prefix) {
+	std::string ret;
+	auto elem_type = type;
+	if (auto vec_type = dyn_cast_or_null<llvm::FixedVectorType>(type); vec_type) {
+		elem_type = vec_type->getElementType();
+		ret += "v" + std::to_string(vec_type->getNumElements());
+	}
+	switch (elem_type->getTypeID()) {
+		case llvm::Type::IntegerTyID:
+			if (with_sign_prefix) {
+				ret += (is_signed ? "s." : "u.");
+			}
+			ret += "i" + std::to_string(cast<llvm::IntegerType>(type)->getBitWidth());
+			break;
+			// NOTE: we generally omit the ".f" here, because it's usually not wanted
+		case llvm::Type::HalfTyID:
+			ret += "f16";
+			break;
+		case llvm::Type::FloatTyID:
+			ret += "f32";
+			break;
+		case llvm::Type::DoubleTyID:
+			ret += "f64";
+			break;
+		default:
+			return {};
+	}
+	return ret;
+}
+
+static inline std::optional<std::string> get_metal_suffix_for_type(llvm::Type* type, const bool is_signed) {
+	if (auto str = get_metal_native_typename(type, is_signed, true); str) {
+		return "." + *str;
+	}
+	return {};
+}
+
 } // namespace metal
 
 #endif

@@ -1752,6 +1752,7 @@ void TypePrinter::printAttributedAfter(const AttributedType *T,
   case attr::GraphicsTessellationControlShader: OS << "floor_tessellation_control"; break;
   case attr::GraphicsTessellationEvaluationShader: OS << "floor_tessellation_evaluation"; break;
   case attr::FloorArgBuffer: OS << "floor_arg_buffer"; break;
+  case attr::FloorCoherent: OS << "floor_coherent"; break;
   case attr::ComputeKernelDim: OS << "kernel_dim()"; break;
   case attr::ComputeKernelWorkGroupSize: OS << "kernel_work_group_size()"; break;
   case attr::ComputeKernelSIMDWidth: OS << "kernel_simd_width()"; break;

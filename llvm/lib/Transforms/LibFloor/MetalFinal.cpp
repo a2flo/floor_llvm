@@ -444,34 +444,6 @@ namespace {
 			InstVisitor<MetalFinal>::visit(I);
 		}
 		
-		static std::optional<std::string> get_suffix_for_type(llvm::Type* type, const bool is_signed) {
-			std::string ret = ".";
-			auto elem_type = type;
-			if (auto vec_type = dyn_cast_or_null<FixedVectorType>(type); vec_type) {
-				elem_type = vec_type->getElementType();
-				ret += "v" + std::to_string(vec_type->getNumElements());
-			}
-			switch (elem_type->getTypeID()) {
-				case llvm::Type::IntegerTyID:
-					ret += (is_signed ? "s." : "u.");
-					ret += "i" + std::to_string(cast<IntegerType>(type)->getBitWidth());
-					break;
-				// NOTE: we generally omit the ".f" here, because it's usually not wanted
-				case llvm::Type::HalfTyID:
-					ret += "f16";
-					break;
-				case llvm::Type::FloatTyID:
-					ret += "f32";
-					break;
-				case llvm::Type::DoubleTyID:
-					ret += "f64";
-					break;
-				default:
-					return {};
-			}
-			return ret;
-		}
-		
 		void visitIntrinsicInst(IntrinsicInst &I) {
 			const auto print_instr = [](const Instruction& instr) {
 				std::string instr_str;
@@ -527,7 +499,7 @@ namespace {
 							return;
 					}
 					
-					auto suffix = get_suffix_for_type(op_val->getType(), is_signed);
+					auto suffix = metal::get_metal_suffix_for_type(op_val->getType(), is_signed);
 					if (!suffix) {
 						ctx->emitError(&I, "unexpected type in intrinsic:\n" + print_instr(I));
 						return;
@@ -590,7 +562,7 @@ namespace {
 							return;
 					}
 					
-					auto suffix = get_suffix_for_type(op_lhs->getType(), is_signed);
+					auto suffix = metal::get_metal_suffix_for_type(op_lhs->getType(), is_signed);
 					if (!suffix) {
 						ctx->emitError(&I, "unexpected type in intrinsic:\n" + print_instr(I));
 						return;
@@ -618,7 +590,7 @@ namespace {
 					auto op_2 = I.getOperand(2);
 					
 					// create AIR function name
-					auto suffix = get_suffix_for_type(op_0->getType(), true);
+					auto suffix = metal::get_metal_suffix_for_type(op_0->getType(), true);
 					if (!suffix) {
 						ctx->emitError(&I, "unexpected type in intrinsic:\n" + print_instr(I));
 						return;

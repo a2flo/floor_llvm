@@ -1,4 +1,4 @@
-//===- PropagateRangeInfo.cpp - Vulkan final pass -------------------------===//
+//===- PropagateRangeInfo.cpp - propagate range info pass -----------------===//
 //
 //  Flo's Open libRary (floor)
 //  Copyright (C) 2004 - 2025 Florian Ziesche

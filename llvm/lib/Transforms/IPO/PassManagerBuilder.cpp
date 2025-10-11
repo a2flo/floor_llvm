@@ -1145,11 +1145,13 @@ void PassManagerBuilder::populateModulePassManager(
 
     // vulkanization
     MPM.add(createVulkanFinalPass());
+    MPM.add(createPropagateCoherencyPass());
     MPM.add(createVulkanFinalModuleCleanupPass());
   }
   if (EnableMetalPasses) {
     MPM.add(createFMACombinerPass());
     MPM.add(createMetalFinalPass(EnableMetalIntelWorkarounds));
+    MPM.add(createPropagateCoherencyPass());
     MPM.add(createMetalFinalModuleCleanupPass());
   }
 

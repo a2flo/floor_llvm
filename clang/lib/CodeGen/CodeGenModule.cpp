@@ -2481,6 +2481,10 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 			return getDataLayout().getTypeStoreSize(type).getFixedValue();
 		};
 		
+		if (parm->hasAttr<FloorCoherentAttr>()) {
+			arg_iter->addAttr(llvm::Attribute::get(getLLVMContext(), "floor_coherent"));
+		}
+		
 		// stage input
 		if (parm->hasAttr<GraphicsStageInputAttr>()) {
 			handle_stage_input_output(FD, clang_type, llvm_type, false, &arg_idx);
@@ -3037,6 +3041,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 	for (const auto& parm : FD->parameters()) {
 		const auto clang_type = parm->getType();
 		const auto cxx_rdecl = clang_type->getAsCXXRecordDecl();
+		auto arg_iter = std::next(Fn->arg_begin(), arg_idx);
 		
 		//
 		const auto add_image_arg = [this, &Builder, &parm](const clang::QualType& type,
@@ -3446,6 +3451,10 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			arg_info.push_back(llvm::MDString::get(VMContext, decl.getName()));
 			return arg_info;
 		};
+		
+		if (parm->hasAttr<FloorCoherentAttr>()) {
+			arg_iter->addAttr(llvm::Attribute::get(getLLVMContext(), "floor_coherent"));
+		}
 		
 		if (clang_type->isPointerType() || clang_type->isReferenceType()) { // pointer / buffer
 			auto arg_info = add_buffer_arg(clang_type, *parm, true, false, false, arg_idx, buffer_idx, 0);

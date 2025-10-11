@@ -26,6 +26,8 @@
 #define LLVM_TRANSFORMS_LIBFLOOR_FLOORUTILS_H
 
 #include <functional>
+#include <span>
+#include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Value.h"
 #include "llvm/IR/Instructions.h"
 
@@ -304,6 +306,84 @@ static inline void add_range_info(llvm::LLVMContext& ctx, llvm::Instruction& I, 
 		llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(range_int_type, max_range, false))
 	};
 	I.setMetadata(llvm::LLVMContext::MD_range, llvm::MDNode::get(ctx, range_md));
+}
+
+struct call_options_t {
+	bool is_convergent { false };
+	bool is_argmem_only { false };
+	bool is_read_only { false };
+	bool is_write_only { false };
+	bool is_nounwind { true };
+	bool is_noreturn { false };
+	bool is_tail_call { false };
+	llvm::CallingConv::ID calling_convention { llvm::CallingConv::C };
+};
+
+//! replaces the specified "instr" with a new function call using the specified parameters
+static inline llvm::CallInst* replace_instruction_with_call(llvm::Instruction& instr, llvm::Module& M,
+															const std::string& function_name, const std::string& call_var_name,
+															llvm::Type* return_type,
+															llvm::ArrayRef<llvm::Type*> func_arg_types,
+															llvm::ArrayRef<llvm::Value*> func_args,
+															const call_options_t opts) {
+	auto ctx = &M.getContext();
+	
+	llvm::AttrBuilder attr_builder(*ctx);
+	if (opts.is_convergent) {
+		attr_builder.addAttribute(llvm::Attribute::Convergent);
+	}
+	if (opts.is_argmem_only) {
+		attr_builder.addAttribute(llvm::Attribute::ArgMemOnly);
+	}
+	if (opts.is_read_only) {
+		attr_builder.addAttribute(llvm::Attribute::ReadOnly);
+	}
+	if (opts.is_write_only) {
+		attr_builder.addAttribute(llvm::Attribute::WriteOnly);
+	}
+	if (opts.is_nounwind) {
+		attr_builder.addAttribute(llvm::Attribute::NoUnwind);
+	}
+	if (opts.is_noreturn) {
+		attr_builder.addAttribute(llvm::Attribute::NoReturn);
+	}
+	auto func_attrs = llvm::AttributeList::get(*ctx, ~0, attr_builder);
+	
+	const auto func_type = llvm::FunctionType::get(return_type, func_arg_types, false);
+	auto call = llvm::CallInst::Create(M.getOrInsertFunction(function_name, func_type, func_attrs), func_args, call_var_name, &instr);
+	if (opts.calling_convention != llvm::CallingConv::C) {
+		call->setCallingConv(opts.calling_convention);
+	}
+	
+	// keep metadata and debug location
+	call->copyMetadata(instr);
+	call->setDebugLoc(instr.getDebugLoc());
+	if (opts.is_convergent) {
+		call->setConvergent();
+	}
+	if (opts.is_argmem_only) {
+		call->setOnlyAccessesArgMemory();
+	}
+	if (opts.is_read_only) {
+		call->setOnlyReadsMemory();
+	}
+	if (opts.is_write_only) {
+		call->setOnlyWritesMemory();
+	}
+	if (opts.is_nounwind) {
+		call->setDoesNotThrow();
+	}
+	if (opts.is_noreturn) {
+		call->setDoesNotReturn();
+	}
+	if (opts.is_tail_call) {
+		call->setTailCall();
+	}
+	
+	instr.replaceAllUsesWith(call);
+	instr.eraseFromParent();
+	
+	return call;
 }
 
 } // namespace libfloor_utils

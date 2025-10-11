@@ -1349,6 +1349,11 @@ def FloorArgBuffer : DeclOrTypeAttr {
   let Documentation = [Undocumented];
 }
 
+def FloorCoherent : DeclOrTypeAttr {
+  let Spellings = [GNU<"floor_coherent">, CXX11<"","floor_coherent", 200809>];
+  let Documentation = [Undocumented];
+}
+
 def CUDAConstant : InheritableAttr {
   let Spellings = [GNU<"constant_cuda">, CXX11<"","constant_cuda", 200809>];
   let Subjects = SubjectList<[Var]>;

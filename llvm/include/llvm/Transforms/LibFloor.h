@@ -153,6 +153,13 @@ ModulePass *createVulkanFinalModuleCleanupPass();
 
 //===----------------------------------------------------------------------===//
 //
+// PropagateCoherency - This pass propagates memory coherency and implements
+// backend specific transformations.
+//
+FunctionPass *createPropagateCoherencyPass();
+
+//===----------------------------------------------------------------------===//
+//
 // PropagateRangeInfo - This pass propagates range metadata info.
 //
 FunctionPass *createPropagateRangeInfoPass();

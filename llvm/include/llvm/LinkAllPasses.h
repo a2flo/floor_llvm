@@ -270,6 +270,7 @@ namespace {
       (void) llvm::createVulkanPreFinalPass();
       (void) llvm::createVulkanPreFinalPointerBCFixupPass();
       (void) llvm::createVulkanFinalModuleCleanupPass();
+      (void) llvm::createPropagateCoherencyPass();
       (void) llvm::createPropagateRangeInfoPass();
       (void) llvm::createFMACombinerPass();
     }

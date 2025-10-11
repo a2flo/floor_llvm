@@ -8961,6 +8961,9 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
   case ParsedAttr::AT_FloorArgBuffer:
     handleSimpleAttribute<FloorArgBufferAttr>(S, D, AL);
     break;
+  case ParsedAttr::AT_FloorCoherent:
+    handleSimpleAttribute<FloorCoherentAttr>(S, D, AL);
+    break;
   case ParsedAttr::AT_FloorImageDataType:
     handleFloorImageDataTypeAttr(S, D, AL);
     break;
