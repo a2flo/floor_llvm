@@ -4978,7 +4978,8 @@ static void TryReferenceInitializationCore(Sema &S,
     Sequence.AddReferenceBindingStep(cv1T4, ValueKind == VK_PRValue);
     ValueKind = isLValueRef ? VK_LValue : VK_XValue;
     // Add addr space conversion if required.
-    if (T1Quals.getAddressSpace() != T2Quals.getAddressSpace()) {
+    if (T1Quals.getAddressSpace() != T2Quals.getAddressSpace() &&
+        T1Quals.getAddressSpace() != LangAS::Default) {
       auto T4Quals = cv1T4.getQualifiers();
       T4Quals.addAddressSpace(T1Quals.getAddressSpace());
       QualType cv1T4WithAS = S.Context.getQualifiedType(T2, T4Quals);
