@@ -5716,6 +5716,7 @@ static bool
 ShouldBuildLookupTable(SwitchInst *SI, uint64_t TableSize,
                        const TargetTransformInfo &TTI, const DataLayout &DL,
                        const SmallDenseMap<PHINode *, Type *> &ResultTypes) {
+#if 0 // this is never a good idea for our use cases
   if (SI->getNumCases() > TableSize || TableSize >= UINT64_MAX / 10)
     return false; // TableSize overflowed, or mul below might overflow.
 
@@ -5751,6 +5752,9 @@ ShouldBuildLookupTable(SwitchInst *SI, uint64_t TableSize,
   // jump tables, see SelectionDAGBuilder::handleJTSwitchCase.
   // FIXME: Find the best cut-off.
   return SI->getNumCases() * 10 >= TableSize * 4;
+#else
+  return false;
+#endif
 }
 
 /// Try to reuse the switch table index compare. Following pattern:
