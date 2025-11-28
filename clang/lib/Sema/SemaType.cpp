@@ -8343,6 +8343,7 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
     case ParsedAttr::AT_GraphicsFBODepthType:
     case ParsedAttr::AT_GraphicsVertexPosition:
     case ParsedAttr::AT_GraphicsPointSize:
+    case ParsedAttr::AT_GraphicsInterpolateFlat:
     case ParsedAttr::AT_GraphicsStageInput:
     case ParsedAttr::AT_GraphicsTessellationPatch:
     case ParsedAttr::AT_GraphicsEarlyFragmentTests:

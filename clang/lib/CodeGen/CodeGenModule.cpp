@@ -2349,6 +2349,8 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 							stage_infos.push_back(llvm::MDString::get(VMContext, prefix_stage + "position"));
 						} else if (field.hasAttr<GraphicsPointSizeAttr>()) {
 							stage_infos.push_back(llvm::MDString::get(VMContext, prefix_stage + "point_size"));
+						} else if (field.hasAttr<GraphicsInterpolateFlatAttr>()) {
+							stage_infos.push_back(llvm::MDString::get(VMContext, prefix_stage + "flat"));
 						} else {
 							stage_infos.push_back(llvm::MDString::get(VMContext, "none"));
 						}
@@ -2391,9 +2393,13 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 					}
 				}
 			} else {
-				// stage defaults (can only be those)
 				if (is_vertex_io) {
-					stage_infos.push_back(llvm::MDString::get(VMContext, prefix_stage + "position"));
+					if (cxx_rdecl->hasAttr<GraphicsInterpolateFlatAttr>()) {
+						stage_infos.push_back(llvm::MDString::get(VMContext, prefix_stage + "flat"));
+					} else {
+						// default to position
+						stage_infos.push_back(llvm::MDString::get(VMContext, prefix_stage + "position"));
+					}
 				} else if (is_fragment_io) {
 					add_fbo_output(clang_type, 0, FD->getLocation());
 				}
@@ -3615,8 +3621,8 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 								is_int_type = vec_type->getElementType()->isIntegerType();
 							}
 						}
-						if (is_int_type) {
-							// use flat "interpolation" for uint* and int* types
+						if (is_int_type || field.hasAttr<GraphicsInterpolateFlatAttr>()) {
+							// use flat "interpolation" for uint* and int* types as well as when explicitly set by the user
 							arg_info.push_back(llvm::MDString::get(VMContext, "air.flat"));
 						} else {
 							arg_info.push_back(llvm::MDString::get(VMContext, "air.center"));

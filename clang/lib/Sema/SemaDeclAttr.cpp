@@ -8997,6 +8997,9 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
   case ParsedAttr::AT_GraphicsPointSize:
     handleSimpleAttribute<GraphicsPointSizeAttr>(S, D, AL);
     break;
+  case ParsedAttr::AT_GraphicsInterpolateFlat:
+    handleSimpleAttribute<GraphicsInterpolateFlatAttr>(S, D, AL);
+    break;
   case ParsedAttr::AT_GraphicsStageInput:
     handleSimpleAttribute<GraphicsStageInputAttr>(S, D, AL);
     break;

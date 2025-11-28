@@ -1446,6 +1446,12 @@ def GraphicsPointSize : InheritableAttr {
   let Documentation = [Undocumented];
 }
 
+// explicit vertex -> fragment flat interpolation
+def GraphicsInterpolateFlat : InheritableAttr {
+  let Spellings = [GNU<"flat">, CXX11<"","flat", 200809>];
+  let Documentation = [Undocumented];
+}
+
 // stage input (just fragment shader input right now)
 def GraphicsStageInput : Attr {
   let Spellings = [GNU<"stage_input">, CXX11<"","stage_input", 200809>];
