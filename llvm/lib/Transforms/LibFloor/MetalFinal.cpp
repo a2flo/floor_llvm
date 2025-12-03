@@ -611,57 +611,6 @@ namespace {
 					break;
 				}
 					
-#if 0 // TODO: implement these
-				case Intrinsic::vector_reduce_fadd: {
-					auto init = I.getOperand(0);
-					auto vec = I.getOperand(1);
-					const auto vec_type = dyn_cast_or_null<FixedVectorType>(vec->getType());
-					if (!vec_type) {
-						ctx->emitError(&I, "expected vector type in operand #1:\n" + print_instr(I));
-						return;
-					}
-					const auto elem_type = vec_type->getElementType();
-					if (!elem_type->isFloatTy()) {
-						ctx->emitError(&I, "expected element type of vector to be f32:\n" + print_instr(I));
-					}
-					
-					const auto width = vec_type->getNumElements();
-					if (width != 1 && width != 2 && width != 3 && width != 4 && width != 8 && width != 16) {
-						ctx->emitError(&I, "unexpected vector width " + std::to_string(width) + ":\n" + print_instr(I));
-						return;
-					}
-					
-					SmallVector<llvm::Type*, 2> func_arg_types;
-					SmallVector<llvm::Value*, 2> func_args;
-					func_arg_types.push_back(vec_type);
-					func_arg_types.push_back(vec_type);
-					func_args.push_back(vec);
-					func_args.push_back(ConstantVector::getSplat(ElementCount::getFixed(width), ConstantFP::get(elem_type, 1.0)));
-					
-					// -> build get func name
-					const std::string get_func_name = "air.dot.v" + std::to_string(width) + "f32";
-					
-					AttrBuilder attr_builder;
-					attr_builder.addAttribute(llvm::Attribute::NoUnwind);
-					attr_builder.addAttribute(llvm::Attribute::ReadOnly);
-					auto func_attrs = AttributeList::get(*ctx, ~0, attr_builder);
-					
-					// create the air call
-					const auto func_type = llvm::FunctionType::get(elem_type, func_arg_types, false);
-					builder->SetInsertPoint(&I);
-					llvm::CallInst* get_call = builder->CreateCall(M->getOrInsertFunction(get_func_name, func_type, func_attrs), func_args);
-					get_call->setDoesNotThrow();
-					get_call->setOnlyReadsMemory();
-					get_call->setDebugLoc(I.getDebugLoc()); // keep debug loc
-					
-					// TODO: handle "init" if not 0
-					
-					I.replaceAllUsesWith(get_call);
-					I.eraseFromParent();
-					was_modified = true;
-					break;
-				}
-#endif
 				case Intrinsic::vector_reduce_add:
 				case Intrinsic::vector_reduce_and:
 				case Intrinsic::vector_reduce_fadd:
@@ -675,10 +624,12 @@ namespace {
 				case Intrinsic::vector_reduce_umax:
 				case Intrinsic::vector_reduce_umin:
 				case Intrinsic::vector_reduce_xor:
-				default: {
+					ctx->emitError(&I, "unknown/unhandled vector reduce intrinsic (should have been expanded):\n" + print_instr(I));
+					break;
+					
+				default:
 					ctx->emitError(&I, "unknown/unhandled intrinsic:\n" + print_instr(I));
 					break;
-				}
 			}
 		}
 		

@@ -24,6 +24,7 @@
 #include "llvm/Analysis/ScopedNoAliasAA.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/TypeBasedAliasAnalysis.h"
+#include "llvm/CodeGen/Passes.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Verifier.h"
@@ -1084,6 +1085,11 @@ void PassManagerBuilder::populateModulePassManager(
   // resulted in single-entry-single-exit or empty blocks. Clean up the CFG.
   MPM.add(createCFGSimplificationPass(
       SimplifyCFGOptions().convertSwitchRangeToICmp(true)));
+
+  // expand all llvm.vector.reduce.* intrinsics for Metal/Vulkan/OpenCL
+  if (EnableMetalPasses || EnableVulkanPasses || EnableSPIRPasses) {
+    MPM.add(createExpandReductionsPass());
+  }
 
   addExtensionsToPM(EP_OptimizerLast, MPM);
 
