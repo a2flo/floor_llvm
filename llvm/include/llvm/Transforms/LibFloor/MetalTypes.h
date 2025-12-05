@@ -641,7 +641,7 @@ static inline std::optional<std::string> get_metal_native_typename(llvm::Type* t
 			if (with_sign_prefix) {
 				ret += (is_signed ? "s." : "u.");
 			}
-			ret += "i" + std::to_string(cast<llvm::IntegerType>(type)->getBitWidth());
+			ret += "i" + std::to_string(cast<llvm::IntegerType>(elem_type)->getBitWidth());
 			break;
 			// NOTE: we generally omit the ".f" here, because it's usually not wanted
 		case llvm::Type::HalfTyID:
