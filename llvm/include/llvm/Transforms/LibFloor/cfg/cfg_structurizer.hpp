@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ ed18ccec1f8c87417af68252a0931121806798a0
+// @ e66e8d3d80756a048273bbf7210a2f950c0e6275
 //
 //===----------------------------------------------------------------------===//
 
@@ -143,6 +143,7 @@ private:
   header_and_merge_block_have_entry_exit_relationship(CFGNode *header,
                                                       CFGNode *merge) const;
   void fixup_broken_selection_merges(unsigned pass);
+  bool selection_requires_structured_header(const CFGNode *node) const;
 
   enum class SwitchProgressMode { Done, SimpleModify, IterativeModify };
   SwitchProgressMode process_switch_blocks(unsigned pass);
@@ -165,6 +166,7 @@ private:
   void split_merge_blocks();
   void eliminate_degenerate_switch_merges();
   bool merge_candidate_is_on_breaking_path(const CFGNode *node) const;
+  bool merge_candidate_is_inside_continue_construct(const CFGNode *node) const;
   bool continue_block_can_merge(CFGNode *node) const;
   static bool block_is_plain_continue(const CFGNode *node);
   static const CFGNode *scan_plain_continue_block(const CFGNode *node);
