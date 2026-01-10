@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ e66e8d3d80756a048273bbf7210a2f950c0e6275
+// @ 09b2677af3535316a8b98ac0a4dd01b96577718b
 //
 //===----------------------------------------------------------------------===//
 
@@ -110,7 +110,6 @@ private:
   CFGNode *loop_merge_block = nullptr;
   CFGNode *loop_ladder_block = nullptr;
   CFGNode *selection_merge_block = nullptr;
-  CFGNode *split_merge_block_candidate = nullptr;
   // true if the selection merge is to be skipped because at least one BB exits
   bool selection_merge_exit = false;
   std::vector<CFGNode *> headers;

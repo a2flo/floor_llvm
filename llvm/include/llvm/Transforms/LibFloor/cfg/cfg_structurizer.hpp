@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ e66e8d3d80756a048273bbf7210a2f950c0e6275
+// @ 09b2677af3535316a8b98ac0a4dd01b96577718b
 //
 //===----------------------------------------------------------------------===//
 
@@ -64,9 +64,6 @@ public:
   bool rewrite_rov_lock_region();
   void rewrite_auto_group_shared_barrier();
   void flatten_subgroup_shuffles();
-
-  // For esoteric CFG workarounds.
-  void set_driver_version(uint32_t driver_id, uint32_t driver_version);
 
 private:
   CFGNode *entry_block;
@@ -127,7 +124,10 @@ private:
   static bool is_ordered(const CFGNode *a, const CFGNode *b, const CFGNode *c);
   bool serialize_interleaved_merge_scopes();
   void split_merge_scopes();
-  static CFGNode *rewind_candidate_split_node(CFGNode *node);
+  bool is_rewind_candidate_split_node(
+      const std::vector<const CFGNode *> &visited_orphans, CFGNode *node,
+      CFGNode *candidate) const;
+  bool is_trivially_no_split_node(CFGNode *node) const;
   void eliminate_degenerate_blocks();
   static bool ladder_chain_has_phi_dependencies(const CFGNode *chain,
                                                 const CFGNode *incoming);
@@ -164,6 +164,9 @@ private:
                                         const CFGNode *loop_exit) const;
 
   void split_merge_blocks();
+  bool split_merge_blocks(CFGNode *node);
+  void split_merge_blocks_and_visit_orphan_preds(
+      std::vector<const CFGNode *> &visited, CFGNode *merge, CFGNode *node);
   void eliminate_degenerate_switch_merges();
   bool merge_candidate_is_on_breaking_path(const CFGNode *node) const;
   bool merge_candidate_is_inside_continue_construct(const CFGNode *node) const;
@@ -295,9 +298,6 @@ private:
       const std::string &name);
 
   void propagate_branch_control_hints();
-
-  uint32_t driver_id{0u};
-  uint32_t driver_version{0u};
 
   bool
   find_single_entry_exit_lock_region(CFGNode *&idom, CFGNode *&pdom,
