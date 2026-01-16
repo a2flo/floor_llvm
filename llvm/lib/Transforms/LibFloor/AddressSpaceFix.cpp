@@ -141,6 +141,36 @@ namespace {
 		void visit(Instruction& I) {
 			InstVisitor<AddressSpaceFix>::visit(I);
 		}
+		
+		template <bool fix_call_instrs = true>
+		static void rec_fix_users(Pass* pass, LLVMContext& ctx,
+								  Instruction* instr, Value* parent, const uint32_t address_space,
+								  const bool fix_inner_ptr, std::vector<ReturnInst*>& returns,
+								  bool& was_modified) {
+			// recursively fix all users
+			libfloor_utils::for_all_instruction_users(*instr, [&pass, &ctx, &instr, address_space,
+																fix_inner_ptr, &returns, &was_modified](Instruction& user_instr) {
+				DBG(errs() << ">> replacing rec use: " << user_instr << " -> as: " << address_space << "\n";)
+				switch (user_instr.getOpcode()) {
+					case Instruction::GetElementPtr:
+					case Instruction::BitCast:
+					case Instruction::Call:
+					case Instruction::Ret:
+					case Instruction::Load:
+					case Instruction::Store:
+					case Instruction::PHI:
+					case Instruction::Select:
+						fix_users<fix_call_instrs>(pass, ctx, &user_instr, instr, address_space, fix_inner_ptr, returns, was_modified);
+						break;
+					case Instruction::AddrSpaceCast:
+					case Instruction::Invoke:
+						// bad, should never happen
+						ctx.emitError(&user_instr, "encountered unsupported instruction");
+						break;
+					default: break;
+				}
+			});
+		}
 
 		template <bool fix_call_instrs = true>
 		static void fix_users(Pass* pass, LLVMContext& ctx,
@@ -216,7 +246,7 @@ namespace {
 						DBG(errs() << ">> call: " << *CI << "\n";)
 						// -> recurse (note that the argument will already have the correct address space)
 						assert(pass);
-						fix_call_instr(*pass, *CI, false, was_modified);
+						fix_call_instr(*pass, *CI, ctx, false, was_modified);
 					}
 					break;
 				}
@@ -230,6 +260,8 @@ namespace {
 					// don't replace load pointer type if it's already correct (and may differ from "address_space"!)
 					if (parent->getType()->isPointerTy() &&
 						parent->getType()->getPointerElementType() == LD->getType()) {
+						// don't update any recursive users as the AS is already correct (users must use the AS of the load, not our fix AS)
+						need_users_update = false;
 						break;
 					}
 					if(LD->getType()->isPointerTy()) {
@@ -310,28 +342,7 @@ namespace {
 			}
 			
 			// recursively fix all users
-			libfloor_utils::for_all_instruction_users(*instr, [&pass, &ctx, &instr, &address_space,
-																&fix_inner_ptr, &returns, &was_modified](Instruction& user_instr) {
-				DBG(errs() << ">> replacing rec use: " << user_instr << " -> as: " << address_space << "\n";)
-				switch (user_instr.getOpcode()) {
-					   case Instruction::GetElementPtr:
-					   case Instruction::BitCast:
-					   case Instruction::Call:
-					   case Instruction::Ret:
-					   case Instruction::Load:
-					   case Instruction::Store:
-					   case Instruction::PHI:
-					   case Instruction::Select:
-						   fix_users<fix_call_instrs>(pass, ctx, &user_instr, instr, address_space, fix_inner_ptr, returns, was_modified);
-						   break;
-					   case Instruction::AddrSpaceCast:
-					   case Instruction::Invoke:
-						   // bad, should never happen
-						   ctx.emitError(&user_instr, "encountered unsupported instruction");
-						   break;
-					   default: break;
-				   }
-			});
+			rec_fix_users<fix_call_instrs>(pass, ctx, instr, parent, address_space, fix_inner_ptr, returns, was_modified);
 		}
 		
 		struct as_fix_arg_info {
@@ -529,10 +540,10 @@ namespace {
 		}
 		
 		void visitCallInst(CallInst& CI) {
-			fix_call_instr(*this, CI, true, was_modified);
+			fix_call_instr(*this, CI, *ctx, true, was_modified);
 		}
 		
-		static void fix_call_instr(Pass& pass, CallInst& CI, const bool is_top_call, bool& was_modified) {
+		static void fix_call_instr(Pass& pass, CallInst& CI, LLVMContext& ctx, const bool is_top_call, bool& was_modified) {
 			PointerType* FPTy = cast<PointerType>(CI.getCalledOperand()->getType());
 			FunctionType* FTy = cast<FunctionType>(FPTy->getPointerElementType());
 			
@@ -643,7 +654,7 @@ namespace {
 												traverse_st_type(cast<llvm::StructType>(elem_type));
 											}
 											// -> don't clone arrays that are too large and don't originate from the constant address space
-											if (!is_constant_as && !is_clonable) {
+											if (!is_constant_as && is_clonable) {
 												if (array_type->getNumElements() > 128) {
 													is_clonable = false;
 												}
@@ -709,10 +720,17 @@ namespace {
 				fix_call(pass, CI, fix_args, is_top_call, was_modified);
 				auto fixed_ret_type = CI.getCalledFunction()->getReturnType();
 				
-				if(is_top_call &&
-				   orig_ret_type != fixed_ret_type) {
-					// if this is a top call and the return type changed
+				if (is_top_call && orig_ret_type != fixed_ret_type) {
+					// if this is a top call and the return type changed: update users if return type is a pointer
 					DBG(errs() << "\ttop call return type changed: " << *orig_ret_type << " -> " << *fixed_ret_type << " (in: " << CI.getParent()->getParent()->getName() << ")\n");
+					if (auto ret_ptr_type = dyn_cast<PointerType>(fixed_ret_type); ret_ptr_type) {
+						const auto address_space = ret_ptr_type->getAddressSpace();
+						
+						// recursively fix all users
+						// NOTE: we're not fixing other call instructions here, since we're at the top level and are already iterating over them
+						[[maybe_unused]] std::vector<ReturnInst*> returns;
+						rec_fix_users<false>(&pass, ctx, &CI, nullptr, address_space, false /* must keep inner ptrs as-is */, returns, was_modified);
+					}
 				}
 				
 				// done, signal that the function was modified
