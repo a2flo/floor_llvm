@@ -625,6 +625,7 @@ namespace {
 					const bool is_readonly = CI.onlyReadsMemory(i);
 					const bool is_load = isa<LoadInst>(arg);
 					const auto is_intrinsic = CI.getCalledFunction()->isIntrinsic();
+					const auto returns_ptr = CI.getCalledFunction()->getReturnType()->isPointerTy();
 					// don't allow cloning/alloca-read-only-fix for certain constructs (e.g. intrinsics or too expensive or not allowed, especially arrays)
 					bool is_clonable = !is_intrinsic;
 					const auto elem_type = as_ptr->getPointerElementType();
@@ -675,11 +676,14 @@ namespace {
 						}
 					}
 					
-					DBG(errs() << "\tread-only: " << is_constant_as << ", " << is_readonly << ", " << is_load << "; " << is_clonable << "\n";)
+					DBG(errs() << "\tread-only: " << is_constant_as << ", " << is_readonly << ", " << is_load << "; " << is_clonable << "; " << returns_ptr << "\n";)
 					fix_args.push_back(as_fix_arg_info {
 						i,
 						as_ptr->getPointerAddressSpace(),
-						(is_constant_as || is_readonly || is_load) && is_clonable,
+						// NOTE: when a function returns a pointer, we can currently not know where this pointer may come from,
+						//       i.e. it might derive the pointer from *this* argument, in which case we must not use a read-only fix
+						//       and have to clone the function instead
+						(is_constant_as || is_readonly || is_load) && is_clonable && !returns_ptr,
 					});
 				}
 			}
