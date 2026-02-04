@@ -116,15 +116,10 @@ bool InternalizePass::shouldPreserveGV(const GlobalValue &GV) {
   if (AlwaysPreserved.count(GV.getName()))
     return true;
 
-  // is this a compute (OpenCL/CUDA/Metal/Vulkan) kernel or graphics function?
+  // is this a device entry point?
   if (isa<Function>(GV)) {
     const Function* F = dyn_cast<Function>(&GV);
-    if (F &&
-        (F->getCallingConv() == CallingConv::FLOOR_KERNEL ||
-         F->getCallingConv() == CallingConv::FLOOR_VERTEX ||
-         F->getCallingConv() == CallingConv::FLOOR_FRAGMENT ||
-         F->getCallingConv() == CallingConv::FLOOR_TESS_CONTROL ||
-         F->getCallingConv() == CallingConv::FLOOR_TESS_EVAL)) {
+    if (F && llvm::CallingConv::isFloorEntryPoint(F->getCallingConv())) {
       return true;
     }
   }

@@ -1580,12 +1580,8 @@ static void addNoRecurseAttrs(const SCCNodeSet &SCCNodes,
   if (!F || !F->hasExactDefinition() || F->doesNotRecurse())
     return;
 
-  // set norecurse for all compute kernels and vertex/fragment shaders
-  if (F->getCallingConv() == CallingConv::FLOOR_KERNEL ||
-      F->getCallingConv() == CallingConv::FLOOR_VERTEX ||
-      F->getCallingConv() == CallingConv::FLOOR_FRAGMENT ||
-      F->getCallingConv() == CallingConv::FLOOR_TESS_CONTROL ||
-      F->getCallingConv() == CallingConv::FLOOR_TESS_EVAL) {
+  // set norecurse for all floor device entry points
+  if (llvm::CallingConv::isFloorEntryPoint(F->getCallingConv())) {
     F->setDoesNotRecurse();
     ++NumNoRecurse;
     return;

@@ -259,6 +259,18 @@ namespace CallingConv {
     MaxID = 1023
   };
 
+  //! returns true if the specified "CC" calling convention is a device entry point
+  static inline bool isFloorEntryPoint(CallingConv::ID CC) {
+    if (CC == CallingConv::FLOOR_KERNEL ||
+        CC == CallingConv::FLOOR_VERTEX ||
+        CC == CallingConv::FLOOR_FRAGMENT ||
+        CC == CallingConv::FLOOR_TESS_CONTROL ||
+        CC == CallingConv::FLOOR_TESS_EVAL) {
+      return true;
+    }
+    return false;
+  }
+
 } // end namespace CallingConv
 
 } // end namespace llvm

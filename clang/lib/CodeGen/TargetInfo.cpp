@@ -10569,11 +10569,7 @@ ABIArgInfo AIRABIInfo::classifyArgumentType(QualType Ty, unsigned int CC) const 
   // -> expand all aggregates
   if (CodeGenFunction::hasAggregateEvaluationKind(Ty) &&
       Ty->isStructureOrClassType() &&
-      (CC == llvm::CallingConv::FLOOR_VERTEX ||
-       CC == llvm::CallingConv::FLOOR_FRAGMENT ||
-       CC == llvm::CallingConv::FLOOR_KERNEL ||
-       CC == llvm::CallingConv::FLOOR_TESS_CONTROL ||
-       CC == llvm::CallingConv::FLOOR_TESS_EVAL)) {
+	  llvm::CallingConv::isFloorEntryPoint(CC)) {
     return ABIArgInfo::getExpand();
   }
 

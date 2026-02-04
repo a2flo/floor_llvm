@@ -96,6 +96,7 @@ namespace {
 		Module* M { nullptr };
 		LLVMContext* ctx { nullptr };
 		bool was_modified { false };
+		bool needs_rerun { false };
 		
 		AddressSpaceFix() : ModulePass(ID) {
 			initializeAddressSpaceFixPass(*PassRegistry::getPassRegistry());
@@ -115,10 +116,16 @@ namespace {
 			DBG(errs() << Mod << "\n");
 			
 			bool module_modified = false;
-			for(auto& func : Mod) {
-				// ignore non-c++ functions (e.g. ones that were created in here)
-				if(func.getName().count('.') > 0) continue;
-				module_modified |= runOnFunction(func);
+			needs_rerun = true;
+			while (needs_rerun) {
+				needs_rerun = false;
+				for (auto& func : Mod) {
+					// ignore non-C++ functions (e.g. ones that were created in here)
+					if (func.getName().count('.') > 0) {
+						continue;
+					}
+					module_modified |= runOnFunction(func);
+				}
 			}
 			DBG(if (module_modified) { errs() << "address space fixed module:\n" << Mod << "\n"; })
 			return module_modified;
@@ -146,10 +153,10 @@ namespace {
 		static void rec_fix_users(Pass* pass, LLVMContext& ctx,
 								  Instruction* instr, Value* parent, const uint32_t address_space,
 								  const bool fix_inner_ptr, std::vector<ReturnInst*>& returns,
-								  bool& was_modified) {
+								  bool& was_modified, bool& needs_rerun) {
 			// recursively fix all users
-			libfloor_utils::for_all_instruction_users(*instr, [&pass, &ctx, &instr, address_space,
-																fix_inner_ptr, &returns, &was_modified](Instruction& user_instr) {
+			libfloor_utils::for_all_instruction_users(*instr, [&pass, &ctx, &instr, address_space, fix_inner_ptr,
+																&returns, &was_modified, &needs_rerun](Instruction& user_instr) {
 				DBG(errs() << ">> replacing rec use: " << user_instr << " -> as: " << address_space << "\n";)
 				switch (user_instr.getOpcode()) {
 					case Instruction::GetElementPtr:
@@ -160,7 +167,7 @@ namespace {
 					case Instruction::Store:
 					case Instruction::PHI:
 					case Instruction::Select:
-						fix_users<fix_call_instrs>(pass, ctx, &user_instr, instr, address_space, fix_inner_ptr, returns, was_modified);
+						fix_users<fix_call_instrs>(pass, ctx, &user_instr, instr, address_space, fix_inner_ptr, returns, was_modified, needs_rerun);
 						break;
 					case Instruction::AddrSpaceCast:
 					case Instruction::Invoke:
@@ -176,7 +183,7 @@ namespace {
 		static void fix_users(Pass* pass, LLVMContext& ctx,
 							  Instruction* instr, Value* parent, const uint32_t address_space,
 							  const bool fix_inner_ptr, std::vector<ReturnInst*>& returns,
-							  bool& was_modified) {
+							  bool& was_modified, bool& needs_rerun) {
 			// fix instruction
 			bool need_users_update = true;
 			switch(instr->getOpcode()) {
@@ -246,7 +253,7 @@ namespace {
 						DBG(errs() << ">> call: " << *CI << "\n";)
 						// -> recurse (note that the argument will already have the correct address space)
 						assert(pass);
-						fix_call_instr(*pass, *CI, ctx, false, was_modified);
+						fix_call_instr(*pass, *CI, ctx, false, was_modified, needs_rerun);
 					}
 					break;
 				}
@@ -342,7 +349,58 @@ namespace {
 			}
 			
 			// recursively fix all users
-			rec_fix_users<fix_call_instrs>(pass, ctx, instr, parent, address_space, fix_inner_ptr, returns, was_modified);
+			rec_fix_users<fix_call_instrs>(pass, ctx, instr, parent, address_space, fix_inner_ptr, returns, was_modified, needs_rerun);
+		}
+		
+		//! fixes the return type of the specified function if "returns" specify a different return type,
+		//! returns true if the return type was modified
+		static bool fix_returns(llvm::Function* func, std::vector<ReturnInst*>& returns) {
+			if (returns.empty()) {
+				return false;
+			}
+			
+			DBG(errs() << ">> fixing returns: " << returns.size() << "\n";)
+			LLVMContext* ctx = &func->getContext();
+			std::unordered_set<Type*> ret_types;
+			for (const auto& ret : returns) {
+				// shouldn't occur (there'd be no initial user for this)
+				if (!ret->getReturnValue()) {
+					continue;
+				}
+				ret_types.emplace(ret->getReturnValue()->getType());
+			}
+			
+			// this shouldn't happen if we get here, but still check for it
+			if (ret_types.empty()) {
+				ctx->emitError("must have a return type in function " + func->getName().str());
+				return false;
+			}
+			// if there is more than one expected return type we have a problem
+			else if (ret_types.size() > 1) {
+				// TODO: should try and fix this properly (create alloca in caller + store result in there?)
+				// TODO: for targets with a generic address space, might want to use that instead
+				ctx->emitError("more than one return type in function " + func->getName().str());
+				return false;
+			}
+			
+			if ((*ret_types.begin())->isPointerTy() &&
+				(*ret_types.begin())->getPointerAddressSpace() != func->getReturnType()->getPointerAddressSpace()) {
+				// fix func return type
+				std::vector<Type*> param_types;
+				for(const auto& arg : func->args()) {
+					param_types.push_back(arg.getType());
+				}
+				auto new_ret_type = *ret_types.begin();
+				auto new_func_type = FunctionType::get(new_ret_type, param_types, false);
+				DBG({
+					auto old_func_type = func->getFunctionType();
+					errs() << ">> fixing return type: " << func->getName() << ": " << *old_func_type << " -> " << *new_func_type << "\n";
+				})
+				func->mutateType(PointerType::get(new_func_type, 0));
+				func->mutateFunctionType(new_func_type);
+				return true;
+			}
+			return false;
 		}
 		
 		struct as_fix_arg_info {
@@ -353,7 +411,7 @@ namespace {
 		
 		// returns true if the return type changed
 		static void fix_function(Pass& pass, llvm::Function* func, const std::vector<as_fix_arg_info>& args, const bool is_top_call,
-								 const bool fix_inner_ptr, bool& was_modified) {
+								 const bool fix_inner_ptr, bool& was_modified, bool& needs_rerun) {
 			LLVMContext* ctx = &func->getContext();
 			std::vector<ReturnInst*> returns; // returns to fix
 			for(const auto& arg : args) {
@@ -361,54 +419,19 @@ namespace {
 				
 				Argument& func_arg = *(std::next(func->arg_begin(), arg.index));
 				libfloor_utils::for_all_instruction_users(func_arg, [&pass, &func_arg, &arg, fix_inner_ptr, &returns, ctx,
-																	 &was_modified](Instruction& instr) {
+																	 &was_modified, &needs_rerun](Instruction& instr) {
 					DBG(errs() << ">> replacing use: " << instr << "\n";)
-					fix_users(&pass, *ctx, &instr, &func_arg, arg.address_space, fix_inner_ptr, returns, was_modified);
+					fix_users(&pass, *ctx, &instr, &func_arg, arg.address_space, fix_inner_ptr, returns, was_modified, needs_rerun);
 				});
 				DBG(errs() << "<< fixed arg: " << arg.index << "\n";)
 			}
 			
-			if(!returns.empty()) {
-				DBG(errs() << ">> fixing returns: " << returns.size() << "\n";)
-				std::unordered_set<Type*> ret_types;
-				for(const auto& ret : returns) {
-					// shouldn't occur (there'd be no initial user for this)
-					if(!ret->getReturnValue()) continue;
-					ret_types.emplace(ret->getReturnValue()->getType());
-				}
-				
-				// again, shouldn't occur, but still better to check
-				if(!ret_types.empty()) {
-					// if there is more than one expected return type we have a problem
-					if(ret_types.size() > 1) {
-						// TODO: should try and fix this properly (create alloca in caller + store result in there?)
-						// TODO: for targets with a generic address space, might want to use that instead
-						ctx->emitError("more than one return type in function " + func->getName().str());
-					}
-					else if((*ret_types.begin())->isPointerTy() &&
-							(*ret_types.begin())->getPointerAddressSpace() !=
-							func->getReturnType()->getPointerAddressSpace()) {
-						// fix func return type
-						std::vector<Type*> param_types;
-						for(const auto& arg : func->args()) {
-							param_types.push_back(arg.getType());
-						}
-						auto new_ret_type = *ret_types.begin();
-						auto new_func_type = FunctionType::get(new_ret_type, param_types, false);
-						DBG({
-							auto old_func_type = func->getFunctionType();
-							errs() << ">> fixing return type: " << func->getName() << ": " << *old_func_type << " -> " << *new_func_type << "\n";
-						})
-						func->mutateType(PointerType::get(new_func_type, 0));
-						func->mutateFunctionType(new_func_type);
-					}
-				}
-			}
+			fix_returns(func, returns);
 			
 			DBG(errs() << "<< fixed func\n";)
 		}
 		
-		static void fix_call(Pass& pass, CallInst& CI, const std::vector<as_fix_arg_info>& args, const bool is_top_call, bool& was_modified) {
+		static void fix_call(Pass& pass, CallInst& CI, const std::vector<as_fix_arg_info>& args, const bool is_top_call, bool& was_modified, bool& needs_rerun) {
 			bool need_clone = false, need_read_only_fix = false;
 			for(const auto& arg : args) {
 				if(!arg.read_only_fix) need_clone = true;
@@ -525,7 +548,7 @@ namespace {
 					DBG(errs() << "\n>> before <<\n" << *cloned_func);
 					
 					//
-					fix_function(pass, cloned_func, args, is_top_call, false, was_modified);
+					fix_function(pass, cloned_func, args, is_top_call, false, was_modified, needs_rerun);
 					CI.setCalledFunction(cloned_func, true);
 					CI.mutateType(cloned_func->getReturnType());
 					
@@ -540,12 +563,48 @@ namespace {
 		}
 		
 		void visitCallInst(CallInst& CI) {
-			fix_call_instr(*this, CI, *ctx, true, was_modified);
+			fix_call_instr(*this, CI, *ctx, true, was_modified, needs_rerun);
 		}
 		
-		static void fix_call_instr(Pass& pass, CallInst& CI, LLVMContext& ctx, const bool is_top_call, bool& was_modified) {
+		static void fix_return_users(Pass& pass, CallInst& CI, LLVMContext& ctx, const PointerType* ret_ptr_type, bool& was_modified, bool& needs_rerun) {
+			const auto func = CI.getParent()->getParent();
+			const auto address_space = ret_ptr_type->getAddressSpace();
+			
+			// recursively fix all users
+			std::vector<ReturnInst*> returns;
+			rec_fix_users<false>(&pass, ctx, &CI, nullptr, address_space, false /* must keep inner ptrs as-is */, returns, was_modified, needs_rerun);
+			
+			// for non-entry-points we may need to recursively change the return type of *this* function itself,
+			// in which case we also need to fix all external callers
+			const auto is_entry_point = CallingConv::isFloorEntryPoint(func->getCallingConv());
+			if (!is_entry_point && !returns.empty()) {
+				if (fix_returns(func, returns)) {
+					// return type changed -> need to update external callers
+					// however: since we're currently deep within an instruction visitor, we can't easily do this here -> perform another pass on the outside (ModulePass)
+					needs_rerun = true;
+				}
+			}
+		}
+		
+		static void fix_call_instr(Pass& pass, CallInst& CI, LLVMContext& ctx, const bool is_top_call, bool& was_modified, bool& needs_rerun) {
 			PointerType* FPTy = cast<PointerType>(CI.getCalledOperand()->getType());
 			FunctionType* FTy = cast<FunctionType>(FPTy->getPointerElementType());
+			
+			// before all else: check if the return type still mismatches
+			// -> if it doesn't, there may have been a previous fix that modified the address space, so fix up all users first
+			const auto func_ret_type = FTy->getReturnType();
+			if (func_ret_type != CI.getType()) {
+				if (func_ret_type->isPointerTy() && CI.getType()->isPointerTy()) {
+					assert(func_ret_type->getPointerElementType() == CI.getType()->getPointerElementType());
+					CI.setCalledFunction(CI.getCalledFunction(), true);
+					CI.mutateType(func_ret_type);
+					fix_return_users(pass, CI, ctx, dyn_cast<PointerType>(func_ret_type), was_modified, needs_rerun);
+					was_modified = true;
+				} else {
+					ctx.emitError(&CI, "encountered invalid call instruction return type mismatch");
+					return;
+				}
+			}
 			
 			std::vector<as_fix_arg_info> fix_args;
 			for (unsigned i = 0, e = FTy->getNumParams(); i != e; ++i) {
@@ -721,19 +780,14 @@ namespace {
 				
 				// fix the call (+detect return type change)
 				auto orig_ret_type = CI.getCalledFunction()->getReturnType();
-				fix_call(pass, CI, fix_args, is_top_call, was_modified);
+				fix_call(pass, CI, fix_args, is_top_call, was_modified, needs_rerun);
 				auto fixed_ret_type = CI.getCalledFunction()->getReturnType();
 				
 				if (is_top_call && orig_ret_type != fixed_ret_type) {
 					// if this is a top call and the return type changed: update users if return type is a pointer
-					DBG(errs() << "\ttop call return type changed: " << *orig_ret_type << " -> " << *fixed_ret_type << " (in: " << CI.getParent()->getParent()->getName() << ")\n");
+					DBG(errs() << "\ttop call return type changed: " << *orig_ret_type << " -> " << *fixed_ret_type << " (in: " << func->getName() << ")\n");
 					if (auto ret_ptr_type = dyn_cast<PointerType>(fixed_ret_type); ret_ptr_type) {
-						const auto address_space = ret_ptr_type->getAddressSpace();
-						
-						// recursively fix all users
-						// NOTE: we're not fixing other call instructions here, since we're at the top level and are already iterating over them
-						[[maybe_unused]] std::vector<ReturnInst*> returns;
-						rec_fix_users<false>(&pass, ctx, &CI, nullptr, address_space, false /* must keep inner ptrs as-is */, returns, was_modified);
+						fix_return_users(pass, CI, ctx, ret_ptr_type, was_modified, needs_rerun);
 					}
 				}
 				
@@ -752,9 +806,11 @@ void fix_instruction_users(LLVMContext &ctx,
 						   const bool fix_inner_ptr,
 						   std::vector<ReturnInst *> &returns) {
 	// NOTE: we can't fix call instructions here
-	bool was_modified = false;
-	AddressSpaceFix::fix_users<false>(nullptr, ctx, &instr, &parent, address_space, fix_inner_ptr, returns, was_modified);
+	bool was_modified = false, needs_rerun = false;
+	AddressSpaceFix::fix_users<false>(nullptr, ctx, &instr, &parent, address_space, fix_inner_ptr, returns, was_modified, needs_rerun);
 	(void)was_modified;
+	(void)needs_rerun;
+	assert(!needs_rerun);
 }
 
 bool fix_instruction_users_with_calls(Pass& pass,
@@ -764,8 +820,9 @@ bool fix_instruction_users_with_calls(Pass& pass,
 									  const uint32_t address_space,
 									  const bool fix_inner_ptr,
 									  std::vector<ReturnInst *> &returns) {
-	bool was_modified = false;
-	AddressSpaceFix::fix_users<true>(&pass, ctx, &instr, &parent, address_space, fix_inner_ptr, returns, was_modified);
+	bool was_modified = false, needs_rerun = false;
+	AddressSpaceFix::fix_users<true>(&pass, ctx, &instr, &parent, address_space, fix_inner_ptr, returns, was_modified, needs_rerun);
+	assert(!needs_rerun);
 	return was_modified;
 }
 }
