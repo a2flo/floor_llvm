@@ -218,6 +218,12 @@ CodeGenModule::CodeGenModule(ASTContext &C, const HeaderSearchOptions &HSO,
     ModuleNameHash = (Twine(".__uniq.") +
         Twine(toString(IntHash, /* Radix = */ 10, /* Signed = */false))).str();
   }
+
+  // emit initial metadata
+  (void)getModule().getOrInsertModuleFlagsMetadata();
+  if (CodeGenOpts.EmitVersionIdentMetadata) {
+    EmitVersionIdentMetadata();
+  }
 }
 
 CodeGenModule::~CodeGenModule() {}
@@ -853,6 +859,27 @@ void CodeGenModule::Release() {
   if (getLangOpts().OpenCL && !getLangOpts().Metal)
     EmitOCLAnnotations();
 
+  // emit Metal/AIR limits
+  if (LangOpts.Metal) {
+    llvm::NamedMDNode *ModuleFlags = getModule().getOrInsertModuleFlagsMetadata();
+    static const std::vector<std::pair<std::string, int>> limits {
+      { "air.max_device_buffers", 31 },
+      { "air.max_constant_buffers", 31 },
+      { "air.max_threadgroup_buffers", 31 },
+      { "air.max_textures", 128 },
+      { "air.max_read_write_textures", 8 },
+      { "air.max_samplers", 16 },
+    };
+    for (const auto& limit : limits) {
+      llvm::LLVMContext &Ctx = TheModule.getContext();
+      SmallVector <llvm::Metadata*, 3> air_limit;
+      air_limit.push_back(llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(Int32Ty, 7)));
+      air_limit.push_back(llvm::MDString::get(Ctx, limit.first));
+      air_limit.push_back(llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(Int32Ty, limit.second)));
+      ModuleFlags->addOperand(llvm::MDNode::get(Ctx, air_limit));
+    }
+  }
+
   if (getCodeGenOpts().EmitDeclMetadata)
     EmitDeclMetadata();
 
@@ -889,9 +916,6 @@ void CodeGenModule::Release() {
     }
     AddSPIRMetadata(TheModule, getLangOpts().OpenCLVersion, sBuildOptions, LangOpts, getContext().getOpenCLFeatures());
   }
-
-  if (getCodeGenOpts().EmitVersionIdentMetadata)
-    EmitVersionIdentMetadata();
 
   if (!getCodeGenOpts().RecordCommandLine.empty())
     EmitCommandLineMetadata();
@@ -2866,17 +2890,19 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		//  * "vectorN<type>" to "typeN"
 		//  * "floor_image::image<TYPE>" to Metal texture type name
 		//  * "std::array<T, N>" to "array<make_type_name(T), N>"
+		//  * drop template parameters from all others
+		auto type_name_str = unqualified_type.getAsString(Policy);
 		do {
 			const auto cxx_rdecl = unqualified_type->getAsCXXRecordDecl();
 			if (!cxx_rdecl) {
 				break;
 			}
 			
-			const auto type_name_str = unqualified_type.getAsString(Policy);
 			const auto type_param_start = type_name_str.find('<');
 			const auto type_param_end = type_name_str.rfind('>');
-			if (type_param_start != std::string::npos && type_param_start > 0 &&
-				type_param_end != std::string::npos && type_param_end > type_param_start) {
+			if (type_param_start == std::string::npos || type_param_end == std::string::npos ||
+				type_param_start > type_param_end) {
+				break;
 			}
 			
 			const auto template_param = type_name_str.substr(type_param_start + 1, type_param_end - type_param_start - 1);
@@ -3022,23 +3048,25 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				}
 				
 				return "array<" + make_type_name(arr_elem_type.getAsType()) + ", " + std::to_string(arr_elem_count.getAsIntegral().getZExtValue()) + ">";
+			} else {
+				type_name_str.erase(type_param_start, type_param_end - type_param_start + 1);
 			}
 		} while (false);
 		
-		std::string type_name = "";
 		if (type->isVectorType()) {
-			type_name = getVectorMetadataValue(llvm::dyn_cast<clang::ExtVectorType>(unqualified_type.getTypePtr()), Policy);
+			type_name_str = getVectorMetadataValue(llvm::dyn_cast<clang::ExtVectorType>(unqualified_type.getTypePtr()), Policy);
 		} else if (type->isHalfType()) {
-			type_name = "half";
-		} else {
-			type_name = unqualified_type.getAsString(Policy);
+			type_name_str = "half";
+		} else if (type->isEnumeralType()) {
+			// use the underlying integer type for enums
+			return make_type_name(cast<EnumType>(unqualified_type.getTypePtr())->getDecl()->getIntegerType());
 		}
-		type_name = strip_cvr(type_name);
+		type_name_str = strip_cvr(type_name_str);
 		// turn "unsigned type" into "utype"
-		if (const auto pos = type_name.find("unsigned "); pos != std::string::npos) {
-			type_name.erase(pos + 1, 8);
+		if (const auto pos = type_name_str.find("unsigned "); pos != std::string::npos) {
+			type_name_str.erase(pos + 1, 8);
 		}
-		return type_name;
+		return type_name_str;
 	};
 	
 	//

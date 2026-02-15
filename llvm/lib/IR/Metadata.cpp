@@ -1297,7 +1297,8 @@ void Value::clearMetadata() {
   if (!HasMetadata)
     return;
   if (auto F = dyn_cast<Function>(this)) {
-    if (F->getSubprogram()) {
+    auto &Store = getContext().pImpl->ValueMetadata[this];
+    if (!Store.empty() && F->getSubprogram()) {
       F->getSubprogram()->associated_function = nullptr;
     }
   }

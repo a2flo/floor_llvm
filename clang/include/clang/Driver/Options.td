@@ -6010,6 +6010,8 @@ def vulkan_low_descriptor_set_count : Flag<["-"], "vulkan-low-descriptor-set-cou
   HelpText<"Enables low descriptor set count handling">;
 def vulkan_ptr_workarounds : Flag<["-"], "vulkan-ptr-workarounds">,
   HelpText<"Enables Vulkan specific pointer workarounds">;
+def vulkan_untyped_pointers : Flag<["-"], "vulkan-untyped-pointers">,
+  HelpText<"Enables support of SPV_KHR_untyped_pointers">;
 
 //===----------------------------------------------------------------------===//
 // Graphics Options

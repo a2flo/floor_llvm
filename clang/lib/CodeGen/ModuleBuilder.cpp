@@ -144,8 +144,13 @@ namespace {
       M->setTargetTriple(Ctx->getTargetInfo().getTriple().getTriple());
       M->setDataLayout(Ctx->getTargetInfo().getDataLayoutString());
       const auto &SDKVersion = Ctx->getTargetInfo().getSDKVersion();
-      if (!SDKVersion.empty())
+      if (!SDKVersion.empty()) {
         M->setSDKVersion(SDKVersion);
+      } else if (Ctx->getTargetInfo().getTriple().isOSDarwin()) {
+        // fall back to specified OS version
+        const auto os_version = Ctx->getTargetInfo().getTriple().getOSVersion();
+        M->setSDKVersion(VersionTuple(os_version.getMajor(), os_version.getMinor().getValueOr(0u)));
+      }
       Builder.reset(new CodeGen::CodeGenModule(Context, HeaderSearchOpts,
                                                PreprocessorOpts, CodeGenOpts,
                                                *M, Diags, CoverageInfo));

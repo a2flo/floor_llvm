@@ -171,6 +171,12 @@ FunctionPass *createPropagateRangeInfoPass();
 //
 FunctionPass *createFMACombinerPass();
 
+//===----------------------------------------------------------------------===//
+//
+// FloorModuleCleanup - Performs final module cleanup in all backends.
+//
+ModulePass *createFloorModuleCleanupPass();
+
 } // End llvm namespace
 
 #endif

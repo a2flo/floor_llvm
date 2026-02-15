@@ -125,13 +125,6 @@ static_assert(sizeof(metallib_header) == 4 + sizeof(metallib_version) +
               "invalid metallib header size");
 
 struct metallib_program_info {
-  enum class PROGRAM_TYPE : uint8_t {
-    VERTEX = 0,
-    FRAGMENT = 1,
-    KERNEL = 2,
-    NONE = 255
-  };
-
   struct version_info {
     uint32_t major : 16;
     uint32_t minor : 8;
@@ -155,7 +148,7 @@ struct metallib_program_info {
 
     string name; // NOTE: limited to 65536 - 1 ('\0')
 
-    PROGRAM_TYPE type{PROGRAM_TYPE::NONE};
+    FUNCTION_TYPE type{FUNCTION_TYPE::NONE};
 
     sha256_hash hash;
 
@@ -314,10 +307,12 @@ struct metallib_program_info {
 static bool is_used_in_function(const Function *F, const GlobalVariable *GV) {
   bool used = false;
   libfloor_utils::for_all_instruction_users(
-      *GV, [&used](const Instruction &) {
+      *GV,
+      [&used](const Instruction &) {
         // always true with restriction below
         used = true;
-      }, F /* restrict to this function */);
+      },
+      F /* restrict to this function */);
   return used;
 }
 
@@ -429,11 +424,6 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     } else if (ios_version.getMajor() >= 26) {
       target_air_version = 280;
     }
-
-    auto ios_minor = ios_version.getMinor().hasValue()
-                         ? ios_version.getMinor().getValue()
-                         : 0;
-    M.setSDKVersion(VersionTuple{ios_version.getMajor(), ios_minor});
   } else if (TT.isXROS()) {
     auto xros_version = TT.getXROSVersion();
     if (xros_version.getMajor() == 2) {
@@ -441,17 +431,9 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     } else if (xros_version.getMajor() >= 26) {
       target_air_version = 280;
     }
-
-    auto xros_minor = xros_version.getMinor().hasValue()
-                          ? xros_version.getMinor().getValue()
-                          : 0;
-    M.setSDKVersion(VersionTuple{xros_version.getMajor(), xros_minor});
   } else {
     VersionTuple osx_version{};
     TT.getMacOSXVersion(osx_version);
-    auto osx_minor = osx_version.getMinor().hasValue()
-                         ? osx_version.getMinor().getValue()
-                         : 0;
     auto osx_major = osx_version.getMajor();
     if (osx_major == 13) {
       target_air_version = 250;
@@ -461,10 +443,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       target_air_version = 270;
     } else if (osx_major == 16 || osx_major >= 26) {
       target_air_version = 280;
-      osx_major = 26; // make sure SDK version is actually 26 for 16 as well
     }
-
-    M.setSDKVersion(VersionTuple{osx_major, osx_minor});
   }
   const auto &metal_version = *metal_versions.find(target_air_version);
 #if FORCE_EMIT_BC50
@@ -474,22 +453,28 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
 #endif
 
   // gather entry point functions that we want to clone/emit
-  unordered_map<string, metallib_program_info::PROGRAM_TYPE> function_set;
+  unordered_map<string, FUNCTION_TYPE> function_set;
   // -> first pass to gather all entry points specified in metadata lists
   for (uint32_t i = 0; i < 3; ++i) {
-    const auto func_type = (metallib_program_info::PROGRAM_TYPE)i;
+    const auto func_type = (FUNCTION_TYPE)i;
     const NamedMDNode *func_list = nullptr;
     switch (func_type) {
-    case metallib_program_info::PROGRAM_TYPE::KERNEL:
+    case FUNCTION_TYPE::KERNEL:
       func_list = M.getNamedMetadata("air.kernel");
       break;
-    case metallib_program_info::PROGRAM_TYPE::VERTEX:
+    case FUNCTION_TYPE::VERTEX:
       func_list = M.getNamedMetadata("air.vertex");
       break;
-    case metallib_program_info::PROGRAM_TYPE::FRAGMENT:
+    case FUNCTION_TYPE::FRAGMENT:
       func_list = M.getNamedMetadata("air.fragment");
       break;
-    case metallib_program_info::PROGRAM_TYPE::NONE:
+    case FUNCTION_TYPE::UNQUALIFIED:
+    case FUNCTION_TYPE::VISIBLE:
+    case FUNCTION_TYPE::EXTERN:
+    case FUNCTION_TYPE::INTERSECTION:
+    case FUNCTION_TYPE::MESH:
+    case FUNCTION_TYPE::OBJECT:
+    case FUNCTION_TYPE::NONE:
       llvm_unreachable("invalid type");
     }
     if (func_list == nullptr) {
@@ -508,7 +493,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   }
   // -> second pass to actually gather all functions
   // NOTE: we do it this way so that we maintain the order of functions
-  vector<pair<const Function *, metallib_program_info::PROGRAM_TYPE>> functions;
+  vector<pair<const Function *, FUNCTION_TYPE>> functions;
   for (const auto &func : M.functions()) {
     if (!func.hasName()) {
       continue;
@@ -530,6 +515,16 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   // absolute source file name
   const std::string src_file_name = make_abs_file_name(M.getSourceFileName());
   const uint32_t src_file_name_length = src_file_name.length() + 1u /* \0 */;
+  std::string file_name_stem = M.getSourceFileName();
+  if (const auto file_name_dot_pos = file_name_stem.rfind('.');
+      file_name_dot_pos != std::string::npos) {
+    file_name_stem.erase(file_name_dot_pos,
+                         file_name_stem.size() - file_name_dot_pos);
+  }
+  if (const auto file_name_folder_pos = file_name_stem.rfind('/');
+      file_name_folder_pos != std::string::npos) {
+    file_name_stem.erase(0, file_name_folder_pos + 1);
+  }
 
   // if we're building with debug info, emit .metallib specific debug info
   const bool emit_debug_info =
@@ -841,7 +836,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
             {250, "Apple metal version 31001.638 (metalfe-31001.638.1)"},
             {260, "Apple metal version 32023.155 (metalfe-32023.155)"},
             {270, "Apple metal version 32023.620 (metalfe-32023.620)"},
-            {280, "Apple metal version 32023.830 (metalfe-32023.830.2)"},
+            {280, "Apple metal version 32023.850 (metalfe-32023.850.10)"},
         };
         ident_op->replaceOperandWith(
             0, llvm::MDString::get(cloned_mod->getContext(),
@@ -1145,6 +1140,9 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   // file length
   uint64_t ext_program_md_size = sizeof(TAG_TYPE) /* ENDT */;
   ext_program_md_size += (4 + 2 + 16) /* UUID */;
+  if (target_air_version >= 270) {
+    ext_program_md_size += (4 + 2 + 16) /* HDYN */;
+  }
   if (emit_debug_info) {
     ext_program_md_size += (4 + 2 + 16) /* HSRD */;
   }
@@ -1160,14 +1158,23 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
               sizeof(uint16_t) /* "0" */ + source_archive_data.second +
               sizeof(TAG_TYPE) /* end tag */)
            : 0u);
+  const auto metallib_file_name = file_name_stem + ".metallib";
+  const auto metallib_file_name_size =
+      metallib_file_name.size() + sizeof(uint8_t) /* "0" */;
+  const uint32_t dyn_header_block_length =
+      (target_air_version >= 270
+           ? (sizeof(TAG_TYPE) /* magic/tag */ +
+              sizeof(uint16_t) /* name length */ + metallib_file_name_size +
+              sizeof(TAG_TYPE) /* end tag */)
+           : 0);
   const uint64_t file_length =
       (sizeof(metallib_header) + sizeof(uint32_t) /* #programs */ +
        entries_size + ext_program_md_size + extended_md_data_size +
-       debug_data_size + bitcode_data_size + src_archive_header_length +
-       src_archive_length);
+       debug_data_size + bitcode_data_size + dyn_header_block_length +
+       src_archive_header_length + src_archive_length);
   OS.write((const char *)&file_length, sizeof(uint64_t));
 
-  // header control
+  // header/block control
   ctrl.programs_offset = sizeof(metallib_header);
   ctrl.programs_length = entries_size;
   ctrl.extended_md_offset = ctrl.programs_offset + sizeof(uint32_t) +
@@ -1177,6 +1184,12 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   ctrl.debug_length = debug_data_size;
   ctrl.bitcode_offset = ctrl.debug_offset + ctrl.debug_length;
   ctrl.bitcode_length = bitcode_data_size;
+  const uint64_t dyn_header_offset = ctrl.bitcode_offset + ctrl.bitcode_length;
+  const uint64_t dyn_header_length =
+      (target_air_version >= 270 ? dyn_header_block_length : 0u);
+  const uint64_t src_archives_offset = dyn_header_offset + dyn_header_length;
+  const uint64_t src_archives_length =
+      (src_archive_header_length + src_archive_length);
   OS.write((const char *)&ctrl, sizeof(metallib_header_control));
 
   // write entry headers/info
@@ -1196,12 +1209,18 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       OS.write((const char *)&HSRD_tag, sizeof(TAG_TYPE));
       OS.write(0x10);
       OS.write(0x0);
-      const uint64_t src_archives_offset =
-          ctrl.bitcode_offset + bitcode_data_size;
-      const uint64_t src_archives_length =
-          (src_archive_header_length + src_archive_length);
       OS.write((const char *)&src_archives_offset, sizeof(uint64_t));
       OS.write((const char *)&src_archives_length, sizeof(uint64_t));
+    }
+
+    // write dynamic header metadata (Metal 3.2+)
+    if (target_air_version >= 270) {
+      const auto HDYN_tag = TAG_TYPE::HDYN;
+      OS.write((const char *)&HDYN_tag, sizeof(TAG_TYPE));
+      OS.write(0x10);
+      OS.write(0x0);
+      OS.write((const char *)&dyn_header_offset, sizeof(uint64_t));
+      OS.write((const char *)&dyn_header_length, sizeof(uint64_t));
     }
 
     // write UUID
@@ -1217,7 +1236,6 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     program_uuid[6] = (4u /* version */ << 4u) | (program_uuid[6] & 0x0Fu);
     program_uuid[8] = (0b10 /* variant */ << 6u) | (program_uuid[8] & 0x3Fu);
 
-    // write
     const auto UUID_tag = TAG_TYPE::UUID;
     OS.write((const char *)&UUID_tag, sizeof(TAG_TYPE));
     OS.write(0x10);
@@ -1243,6 +1261,18 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   // write bitcode data
   for (const auto &entry : prog_info.entries) {
     entry.write_module(OS);
+  }
+
+  // write dynamic header
+  if (target_air_version >= 270) {
+    const auto NAME_tag = TAG_TYPE::NAME;
+    OS.write((const char *)&NAME_tag, sizeof(TAG_TYPE));
+    const auto len = (uint16_t)metallib_file_name_size;
+    OS.write((const char *)&len, sizeof(len));
+    OS.write(metallib_file_name.c_str(), metallib_file_name_size - 1);
+    OS.write(0x0); // \0
+    const auto END_tag = TAG_TYPE::END;
+    OS.write((const char *)&END_tag, sizeof(TAG_TYPE));
   }
 
   // write embedded source code archives

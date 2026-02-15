@@ -66,6 +66,7 @@ enum TAG_TYPE : uint32_t {
 	DEPF        = make_tag_type('D', 'E', 'P', 'F'),
 	// used in reflection list section
 	RBUF        = make_tag_type('R', 'B', 'U', 'F'),
+	RBUZ        = make_tag_type('R', 'B', 'U', 'Z'),
 	AIRR        = make_tag_type('A', 'I', 'R', 'R'),
 	// used for source code/archive
 	SARC        = make_tag_type('S', 'A', 'R', 'C'),
@@ -76,6 +77,20 @@ enum TAG_TYPE : uint32_t {
 	END         = make_tag_type('E', 'N', 'D', 'T'),
 };
 #undef make_tag_type
+
+//! entry point function type
+enum class FUNCTION_TYPE : uint8_t {
+	VERTEX = 0,
+	FRAGMENT = 1,
+	KERNEL = 2,
+	UNQUALIFIED = 3,
+	VISIBLE = 4,
+	EXTERN = 5,
+	INTERSECTION = 6,
+	MESH = 7,
+	OBJECT = 8,
+	NONE = 255
+};
 
 //! Apple platform targets
 //! in recent LLVM versions, this is defined here: https://github.com/llvm/llvm-project/blob/main/llvm/include/llvm/BinaryFormat/MachO.def#L123

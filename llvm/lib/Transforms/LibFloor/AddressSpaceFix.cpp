@@ -587,6 +587,12 @@ namespace {
 		}
 		
 		static void fix_call_instr(Pass& pass, CallInst& CI, LLVMContext& ctx, const bool is_top_call, bool& was_modified, bool& needs_rerun) {
+			auto called_func = CI.getCalledFunction();
+			if (!called_func) {
+				// TODO: properly handle intrinsics
+				return;
+			}
+			
 			PointerType* FPTy = cast<PointerType>(CI.getCalledOperand()->getType());
 			FunctionType* FTy = cast<FunctionType>(FPTy->getPointerElementType());
 			
@@ -596,7 +602,7 @@ namespace {
 			if (func_ret_type != CI.getType()) {
 				if (func_ret_type->isPointerTy() && CI.getType()->isPointerTy()) {
 					assert(func_ret_type->getPointerElementType() == CI.getType()->getPointerElementType());
-					CI.setCalledFunction(CI.getCalledFunction(), true);
+					CI.setCalledFunction(called_func, true);
 					CI.mutateType(func_ret_type);
 					fix_return_users(pass, CI, ctx, dyn_cast<PointerType>(func_ret_type), was_modified, needs_rerun);
 					was_modified = true;
@@ -632,9 +638,9 @@ namespace {
 					}
 					// else: yup, only addrspace mismatch
 					DBG(errs() << "#####################################################\n";)
-					DBG(errs() << "\t>> call to: "; CI.getCalledFunction()->llvm::Value::getType()->dump();)
+					DBG(errs() << "\t>> call to: "; called_func->llvm::Value::getType()->dump();)
 					DBG(errs() << "\n\t>> call: " << CI << "\n";)
-					DBG(errs() << "\t>> full: " << CI.getCalledFunction()->getName() << "\n";)
+					DBG(errs() << "\t>> full: " << called_func->getName() << "\n";)
 					DBG(errs() << "\treplacing arg #" << i << "!\n";)
 					DBG(errs() << "\t" << called_arg_type->getPointerAddressSpace() << ", ";)
 					DBG(errs() << expected_arg_type->getPointerAddressSpace() << "\n";)
@@ -642,8 +648,8 @@ namespace {
 					DBG(errs() << "\texpected: "; expected_arg_type->dump();)
 					DBG({
 						int err = 0;
-						const char* demangled_name = abi::__cxa_demangle(CI.getCalledFunction()->getName().data(), 0, 0, &err);
-						errs() << "\tfunc: " << (demangled_name != nullptr ? demangled_name : CI.getCalledFunction()->getName().data()) << "\n";
+						const char* demangled_name = abi::__cxa_demangle(called_func->getName().data(), 0, 0, &err);
+						errs() << "\tfunc: " << (demangled_name != nullptr ? demangled_name : called_func->getName().data()) << "\n";
 						if(demangled_name != nullptr) {
 							free((void*)demangled_name);
 						}
@@ -683,8 +689,8 @@ namespace {
 					const bool is_constant_as = (as_ptr->getPointerAddressSpace() == 2);
 					const bool is_readonly = CI.onlyReadsMemory(i);
 					const bool is_load = isa<LoadInst>(arg);
-					const auto is_intrinsic = CI.getCalledFunction()->isIntrinsic();
-					const auto returns_ptr = CI.getCalledFunction()->getReturnType()->isPointerTy();
+					const auto is_intrinsic = called_func->isIntrinsic();
+					const auto returns_ptr = called_func->getReturnType()->isPointerTy();
 					// don't allow cloning/alloca-read-only-fix for certain constructs (e.g. intrinsics or too expensive or not allowed, especially arrays)
 					bool is_clonable = !is_intrinsic;
 					const auto elem_type = as_ptr->getPointerElementType();
@@ -779,9 +785,10 @@ namespace {
 				}
 				
 				// fix the call (+detect return type change)
-				auto orig_ret_type = CI.getCalledFunction()->getReturnType();
+				auto orig_ret_type = called_func->getReturnType();
 				fix_call(pass, CI, fix_args, is_top_call, was_modified, needs_rerun);
-				auto fixed_ret_type = CI.getCalledFunction()->getReturnType();
+				called_func = CI.getCalledFunction();
+				auto fixed_ret_type = called_func->getReturnType();
 				
 				if (is_top_call && orig_ret_type != fixed_ret_type) {
 					// if this is a top call and the return type changed: update users if return type is a pointer

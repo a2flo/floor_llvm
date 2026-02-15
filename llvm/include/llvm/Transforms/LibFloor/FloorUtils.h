@@ -174,11 +174,15 @@ static inline void replace_all_uses_with_in_function(llvm::Value& val, llvm::Val
 
 //! tries to simplify the specified constant integer value to 32-bit,
 //! returns the simplified value if one could be created, nullptr otherwise
-static inline llvm::ConstantInt* simplify_const_integer_to_32bit(llvm::ConstantInt& const_val) {
+static inline llvm::ConstantInt* simplify_const_integer_to_32bit(llvm::ConstantInt& const_val,
+																 const bool is_positive = false) {
 	// integer constant -> use signed 32-bit instead if constant is small enough
 	auto const_value = const_val.getZExtValue();
-	if (const_val.getBitWidth() > 32 && const_value <= 0x7FFF'FFFFull) {
-		return llvm::ConstantInt::get(llvm::Type::getInt32Ty(const_val.getContext()), int32_t(const_value));
+	const auto bit_width = const_val.getBitWidth();
+	if ((bit_width > 32 && ((!is_positive && const_value <= 0x7FFF'FFFFull) || (is_positive && const_value <= 0xFFFF'FFFFull))) ||
+		(bit_width == 16 && ((!is_positive && const_value <= 0x7FFFull) || (is_positive && const_value <= 0xFFFFull))) ||
+		(bit_width == 8 && ((!is_positive && const_value <= 0x7Full) || (is_positive && const_value <= 0xFFull)))) {
+		return llvm::ConstantInt::get(llvm::Type::getInt32Ty(const_val.getContext()), const_value);
 	}
 	return nullptr;
 }
@@ -186,15 +190,17 @@ static inline llvm::ConstantInt* simplify_const_integer_to_32bit(llvm::ConstantI
 //! tries to simplify the specified integer value to 32-bit,
 //! returns the simplified value if one could be created, nullptr otherwise
 //! if "erase_unused_origin" is true, any originating values that are no longer used will be erased
+//! if "is_positive" is true, it is assumed postive and may be zero-extended
 //! if "func_cb" is specified, it will be called with the new simplified value prior to the "erase unused" check
 static inline llvm::Value* simplify_integer_to_32bit(llvm::Value& val, const bool erase_unused_origin = false,
+													 const bool is_positive = false,
 													 std::function<void(llvm::Value*)> func_cb = {}) {
 	if (!val.getType()->isIntegerTy()) {
 		return nullptr;
 	}
 	
 	if (auto const_val = dyn_cast_or_null<llvm::ConstantInt>(&val); const_val) {
-		auto new_const_val = simplify_const_integer_to_32bit(*const_val);
+		auto new_const_val = simplify_const_integer_to_32bit(*const_val, is_positive);
 		if (new_const_val && func_cb) {
 			func_cb(new_const_val);
 		}
@@ -203,28 +209,49 @@ static inline llvm::Value* simplify_integer_to_32bit(llvm::Value& val, const boo
 	
 	// dynamic integer value
 	if (auto cast_instr = dyn_cast_or_null<llvm::CastInst>(&val); cast_instr) {
-		switch (cast_instr->getOpcode()) {
+		const auto cast_opcode = cast_instr->getOpcode();
+		switch (cast_opcode) {
 			case llvm::Instruction::BitCast: {
 				break;
 			}
 			case llvm::Instruction::SExt:
 			case llvm::Instruction::ZExt: {
-				// if the original is a 32-bit integer, use that instead
-				auto orig_int = cast_instr->getOperand(0);
-				if (orig_int->getType()->isIntegerTy() &&
-					((const llvm::IntegerType*)orig_int->getType())->getBitWidth() <= 32) {
-					if (func_cb) {
-						func_cb(orig_int);
-					}
-					
-					// kill cast if we are the only user (left)
-					if (erase_unused_origin && cast_instr->getNumUses() == 0) {
-						cast_instr->eraseFromParent();
-					}
-					
-					return orig_int;
+				// if the original is a 32-bit integer or smaller, use that instead
+				auto repl_int = cast_instr->getOperand(0);
+				const auto int_type = dyn_cast_or_null<llvm::IntegerType>(repl_int->getType());
+				if (!int_type) {
+					break;
 				}
-				break;
+				
+				const auto bit_width = int_type->getBitWidth();
+				if (bit_width > 32) {
+					break;
+				} else if (bit_width < 32) {
+					// promote to i32
+					auto val_as_instr = dyn_cast_or_null<llvm::Instruction>(&val);
+					assert(val_as_instr && "value must be an Instruction at this point"); // otherwise it must be a constant?
+					if (!val_as_instr) {
+						break;
+					}
+					if (is_positive || cast_opcode == llvm::Instruction::ZExt) {
+						repl_int = new llvm::ZExtInst(repl_int, llvm::Type::getInt32Ty(val.getContext()),
+													  repl_int->getName() + ".idx_zext", val_as_instr);
+					} else {
+						repl_int = new llvm::SExtInst(repl_int, llvm::Type::getInt32Ty(val.getContext()),
+													  repl_int->getName() + ".idx_sext", val_as_instr);
+					}
+				}
+				
+				if (func_cb) {
+					func_cb(repl_int);
+				}
+				
+				// kill cast if we are the only user (left)
+				if (erase_unused_origin && cast_instr->getNumUses() == 0) {
+					cast_instr->eraseFromParent();
+				}
+				
+				return repl_int;
 			}
 			default:
 				// -> keep as-is
@@ -237,24 +264,26 @@ static inline llvm::Value* simplify_integer_to_32bit(llvm::Value& val, const boo
 //! simplifies GEP indices:
 //!  * convert constant integers into i32-typed constants if possible
 //!  * remove i32 -> i64 casts of indices (use original i32 index directly)
+//!  * promote types smaller than i32 to i32
 //! returns true if GEP was modified
 static inline bool simplify_gep_indices(llvm::LLVMContext& ctx, llvm::GetElementPtrInst &I) {
 	using namespace llvm;
 	
 	bool did_modify = false;
-	for (auto& op : I.operands()) {
-		if (op->getType()->isIntegerTy() && !op->getType()->isIntegerTy(32)) {
+	const bool is_in_bounds = I.isInBounds();
+	for (uint32_t i = 1, count = I.getNumIndices() + 1; i < count; ++i) {
+		auto idx = I.getOperand(i);
+		if (idx->getType()->isIntegerTy() && !idx->getType()->isIntegerTy(32)) {
 			// using the callback rather than the return value to allow for proper unused removal
-			simplify_integer_to_32bit(*op, true /* kill unused */,
-									  [&op, &did_modify](llvm::Value* new_op) {
-				op.set(new_op);
+			simplify_integer_to_32bit(*idx, true /* kill unused */, is_in_bounds,
+									  [&I, i, &did_modify](llvm::Value* new_op) {
+				I.setOperand(i, new_op);
 				did_modify = true;
 			});
 		}
 	}
 	return did_modify;
 }
-// TODO: should do the same for extractelement/insertelement/extractvalue/insertvalue
 
 //! returns the underlying bitcast operand of "val" if value is a bitcast,
 //! will recursively look through bitcasts if "val" contains a chain of bitcasts

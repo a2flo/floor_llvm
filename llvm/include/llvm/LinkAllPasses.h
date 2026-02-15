@@ -273,6 +273,7 @@ namespace {
       (void) llvm::createPropagateCoherencyPass();
       (void) llvm::createPropagateRangeInfoPass();
       (void) llvm::createFMACombinerPass();
+      (void) llvm::createFloorModuleCleanupPass();
     }
   } ForcePassLinking; // Force link by creating a global definition.
 }

@@ -1180,6 +1180,11 @@ void PassManagerBuilder::populateModulePassManager(
     MPM.add(createAggressiveDCEPass(false /* don't allow CFG removal */));
   }
 
+  // perform final module cleanup (this won't modify CFG)
+  if (EnableMetalPasses || EnableCUDAPasses || EnableSPIRPasses || EnableVulkanPasses) {
+	  MPM.add(createFloorModuleCleanupPass());
+  }
+
   if (EnableVerifySPIR) MPM.add(createSpirValidationPass());
 
   if (PrepareForLTO) {

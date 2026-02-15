@@ -493,6 +493,7 @@ void initializeVulkanFinalModuleCleanupPass(PassRegistry&);
 void initializePropagateCoherencyPass(PassRegistry&);
 void initializePropagateRangeInfoPass(PassRegistry&);
 void initializeFMACombinerPass(PassRegistry&);
+void initializeFloorModuleCleanupPass(PassRegistry&);
 
 } // end namespace llvm
 

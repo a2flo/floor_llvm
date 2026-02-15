@@ -56,6 +56,7 @@ void llvm::initializeLibFloor(PassRegistry &Registry) {
   initializePropagateCoherencyPass(Registry);
   initializePropagateRangeInfoPass(Registry);
   initializeFMACombinerPass(Registry);
+  initializeFloorModuleCleanupPass(Registry);
 }
 
 void LLVMAddAddressSpaceFixPass(LLVMPassManagerRef PM) {
@@ -140,4 +141,8 @@ void LLVMAddPropagateRangeInfoPass(LLVMPassManagerRef PM) {
 
 void LLVMAddFMACombinerPass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createFMACombinerPass());
+}
+
+void LLVMAddFloorModuleCleanupPass(LLVMPassManagerRef PM) {
+  unwrap(PM)->add(createFloorModuleCleanupPass());
 }

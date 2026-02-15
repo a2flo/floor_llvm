@@ -2625,7 +2625,7 @@ void CodeGenModule::ConstructAttributeList(StringRef Name,
                                  NumElemsParam);
     }
 
-    if (TargetDecl->hasAttr<ComputeKernelAttr>()) {
+    if (TargetDecl->hasAttr<ComputeKernelAttr>() && !getLangOpts().Metal) {
       if (getLangOpts().OpenCLVersion <= 120) {
         // OpenCL v1.2 Work groups are always uniform
         FuncAttrs.addAttribute("uniform-work-group-size", "true");

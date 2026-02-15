@@ -5,6 +5,7 @@ add_llvm_component_library(LLVMLibFloor
   CUDAFinal.cpp
   CUDAImage.cpp
   FMACombiner.cpp
+  FloorModuleCleanup.cpp
   FloorImage.cpp
   LibFloor.cpp
   MetalFinal.cpp

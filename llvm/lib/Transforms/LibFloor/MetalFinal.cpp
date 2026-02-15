@@ -405,6 +405,9 @@ namespace {
 						arg.addAttr(llvm::Attribute::get(*ctx, "air-buffer-no-alias"));
 						arg.removeAttr(Attribute::NoAlias);
 					}
+					if (metal_version >= 310 && arg.getType()->isPointerTy()) {
+						arg.addAttr(llvm::Attribute::NoCapture);
+					}
 					param_types.push_back(arg.getType());
 				}
 				auto new_func_type = FunctionType::get(F.getReturnType(), param_types, false);
@@ -412,15 +415,33 @@ namespace {
 				F.mutateFunctionType(new_func_type);
 				
 				// always remove "norecurse" and "min-legal-vector-width" on Metal < 3.1
+				// NOTE: for Metal 3.1+ we simply use the min-legal-vector-width that has been determined by LLVM (seems to be accurate)
 				if (metal_version < 310) {
 					F.removeFnAttr(Attribute::NoRecurse);
+					F.removeFnAttr("min-legal-vector-width");
 				}
-				F.removeFnAttr("min-legal-vector-width");
 				
-				// set our own "min-legal-vector-width" attribute on Metal 3.1+
-				if (metal_version >= 310) {
-					F.addFnAttr(llvm::Attribute::get(*ctx, "min-legal-vector-width", "64"));
+				// generally remove this
+				F.removeFnAttr("less-precise-fpmad");
+				
+				// add "max-work-group-size" attribute on Metal 3.1+
+				if (is_kernel_func) {
+					if (metal_version >= 310 &&
+						state.kernel_local_size[0] > 0 && state.kernel_local_size[1] > 0 && state.kernel_local_size[2] > 0) {
+						F.addFnAttr(llvm::Attribute::get(*ctx, "max-work-group-size",
+														 std::to_string(state.kernel_local_size[0] *
+																		state.kernel_local_size[1] *
+																		state.kernel_local_size[2])));
+					}
 				}
+				
+				// add "no-builtins" on Metal 3.1+
+				if (metal_version >= 310) {
+					F.addFnAttr("no-builtins");
+				}
+				
+				// always remove dso_local from entry points
+				F.setDSOLocal(false);
 			}
 			
 			// visit everything in this function
@@ -442,6 +463,14 @@ namespace {
 			}
 			
 			InstVisitor<MetalFinal>::visit(I);
+		}
+		
+		void visitBinaryOperator(BinaryOperator& I) {
+			// remove "nuw" and "nsw" from binary ops (not used by Metal)
+			if (isa<OverflowingBinaryOperator>(I)) {
+				I.setHasNoUnsignedWrap(false);
+				I.setHasNoSignedWrap(false);
+			}
 		}
 		
 		void visitIntrinsicInst(IntrinsicInst &I) {
@@ -1042,40 +1071,6 @@ namespace {
 			scalar_or_vector_conversion<Instruction::SIToFP>(I);
 		}
 		
-		// metal can only handle i32 indices
-		void visitExtractElement(ExtractElementInst& EEI) {
-			const auto idx_op = EEI.getIndexOperand();
-			const auto idx_type = idx_op->getType();
-			if(!idx_type->isIntegerTy(32)) {
-				if(const auto const_idx_op = dyn_cast_or_null<ConstantInt>(idx_op)) {
-					EEI.setOperand(1 /* idx op */, builder->getInt32((int32_t)const_idx_op->getValue().getZExtValue()));
-				}
-				else {
-					builder->SetInsertPoint(&EEI);
-					const auto i32_index = builder->CreateIntCast(idx_op, builder->getInt32Ty(), false);
-					EEI.setOperand(1 /* idx op */, i32_index);
-				}
-				was_modified = true;
-			}
-		}
-		
-		// metal can only handle i32 indices
-		void visitInsertElement(InsertElementInst& IEI) {
-			const auto idx_op = IEI.llvm::User::getOperand(2);
-			const auto idx_type = idx_op->getType();
-			if(!idx_type->isIntegerTy(32)) {
-				if(const auto const_idx_op = dyn_cast_or_null<ConstantInt>(idx_op)) {
-					IEI.setOperand(2 /* idx op */, builder->getInt32((int32_t)const_idx_op->getValue().getZExtValue()));
-				}
-				else {
-					builder->SetInsertPoint(&IEI);
-					const auto i32_index = builder->CreateIntCast(idx_op, builder->getInt32Ty(), false);
-					IEI.setOperand(2 /* idx op */, i32_index);
-				}
-				was_modified = true;
-			}
-		}
-		
 		void visitAllocaInst(AllocaInst &AI) {
 			if(!enable_intel_workarounds) return;
 			DBG(errs() << "alloca: " << AI << ", " << *AI.getType() << "\n";)
@@ -1206,7 +1201,7 @@ namespace {
 					phi_replace(PHI);
 				}
 			}
-			was_modified = !users.empty();
+			was_modified |= !users.empty();
 		}
 		
 	};
@@ -1270,7 +1265,7 @@ namespace {
 					continue;
 				}
 				
-				// we already emit the correct texture opaque texture type name -> find the corresponding Metal struct name
+				// we already emit the correct opaque texture type name -> find the corresponding Metal struct name
 				static const std::unordered_map<std::string, std::string> metal_name_lut {
 					{ "struct._texture_1d_t", "struct.metal::texture1d" },
 					{ "struct._texture_1d_array_t", "struct.metal::texture1d_array" },
@@ -1307,10 +1302,8 @@ namespace {
 			
 			bool module_modified = run_metal_name_replacement();
 			
-			// * strip floor_* calling convention from all functions and their users (replace it with C CC)
-			// * kill all functions named floor.*
-			// * strip debug info from declarations
 			for (auto func_iter = Mod.begin(); func_iter != Mod.end();) {
+				// kill all functions named floor.*
 				auto& func = *func_iter;
 				if (func.getName().startswith("floor.")) {
 					if (func.getNumUses() != 0) {
@@ -1322,6 +1315,7 @@ namespace {
 					continue;
 				}
 				
+				// strip floor_* calling convention from all functions and their users (replace it with C CC)
 				if (func.getCallingConv() != CallingConv::C) {
 					func.setCallingConv(CallingConv::C);
 					for (auto user : func.users()) {
@@ -1332,11 +1326,22 @@ namespace {
 					module_modified = true;
 				}
 				
+				// strip debug info from declarations
 				if (func.isDeclaration()) {
 					if (DISubprogram* sub_prog_dbg = func.getSubprogram(); sub_prog_dbg) {
 						func.setSubprogram(nullptr);
 						module_modified = true;
 					}
+				}
+				
+				// remove floor and frontend specific metadata
+				if (func.hasMetadata("kernel_dim")) {
+					func.eraseMetadata(ctx->getMDKindID("kernel_dim"));
+					module_modified = true;
+				}
+				if (func.hasMetadata("reqd_work_group_size")) {
+					func.eraseMetadata(ctx->getMDKindID("reqd_work_group_size"));
+					module_modified = true;
 				}
 				
 				++func_iter;

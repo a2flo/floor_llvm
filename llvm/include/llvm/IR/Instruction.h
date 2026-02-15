@@ -310,6 +310,9 @@ public:
   void setMetadata(unsigned KindID, MDNode *Node);
   void setMetadata(StringRef Kind, MDNode *Node);
 
+  // make public
+  using Value::eraseMetadata;
+
   /// Copy metadata from \p SrcInst to this instruction. \p WL, if not empty,
   /// specifies the list of meta data that needs to be copied. If \p WL is
   /// empty, all meta data will be copied.
