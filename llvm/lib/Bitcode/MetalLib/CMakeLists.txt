@@ -13,7 +13,6 @@ add_llvm_component_library(LLVMMetalLib
 
   DEPENDS
   intrinsics_gen
-  LLVMBitWriter50
   LLVMBitWriter140
 
   LINK_COMPONENTS

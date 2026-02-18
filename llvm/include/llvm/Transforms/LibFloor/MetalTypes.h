@@ -622,7 +622,7 @@ struct function_constant {
 	bool active { false };
 };
 
-//! returns the Metal language version of a module as major_version * 100 + minor_version * 10 (e.g. 310 for Metal 3.1)
+//! returns the Metal language version of a module as major_version * 100 + minor_version * 10 (e.g. 320 for Metal 3.2)
 static inline uint32_t get_metal_version(llvm::Module& M) {
 	llvm::NamedMDNode* AIRLangVersion = M.getNamedMetadata("air.language_version");
 	assert(AIRLangVersion);

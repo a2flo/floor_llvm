@@ -968,7 +968,6 @@ GetOutputStream(CompilerInstance &CI, StringRef InFile, BackendAction Action) {
     return CI.createDefaultOutputFile(false, InFile, "ll");
   case Backend_EmitBC:
   case Backend_EmitBC32:
-  case Backend_EmitBC50:
   case Backend_EmitBC140:
     return CI.createDefaultOutputFile(true, InFile, "bc");
   case Backend_EmitSPIRV:
@@ -1208,10 +1207,6 @@ EmitBCAction::EmitBCAction(llvm::LLVMContext *_VMContext)
 void EmitBC32Action::anchor() { }
 EmitBC32Action::EmitBC32Action(llvm::LLVMContext *_VMContext)
   : CodeGenAction(Backend_EmitBC32, _VMContext) {}
-
-void EmitBC50Action::anchor() { }
-EmitBC50Action::EmitBC50Action(llvm::LLVMContext *_VMContext)
-  : CodeGenAction(Backend_EmitBC50, _VMContext) {}
 
 void EmitBC140Action::anchor() { }
 EmitBC140Action::EmitBC140Action(llvm::LLVMContext *_VMContext)

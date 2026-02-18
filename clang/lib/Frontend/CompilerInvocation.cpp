@@ -2430,7 +2430,6 @@ static const auto &getFrontendActionTable() {
       {frontend::EmitAssembly, OPT_S},
       {frontend::EmitBC, OPT_emit_llvm_bc},
       {frontend::EmitBC32, OPT_emit_llvm_bc_32},
-      {frontend::EmitBC50, OPT_emit_llvm_bc_50},
       {frontend::EmitBC140, OPT_emit_llvm_bc_140},
       {frontend::EmitSPIRV, OPT_emit_spirv},
       {frontend::EmitSPIRVContainer, OPT_emit_spirv_container},
@@ -3178,7 +3177,7 @@ void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
       LangStd = LangStandard::lang_openclcpp10;
       break;
     case Language::Metal:
-      LangStd = LangStandard::lang_metal30;
+      LangStd = LangStandard::lang_metal32;
       break;
     case Language::Vulkan:
       LangStd = LangStandard::lang_vulkan13;
@@ -3262,20 +3261,14 @@ void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
     Opts.OpenCLCPlusPlusVersion = 202100;
 
   // as Metal is largely compiled as OpenCL, also enable + init opencl
-  if (LangStd == LangStandard::lang_metal30 ||
-      LangStd == LangStandard::lang_metal31 ||
-      LangStd == LangStandard::lang_metal32 ||
+  if (LangStd == LangStandard::lang_metal32 ||
       LangStd == LangStandard::lang_metal40 ||
       IK.getLanguage() == Language::Metal) {
     Opts.Metal = 1;
     Opts.OpenCL = 1;
     Opts.OpenCLVersion = 120;
 
-    if (LangStd == LangStandard::lang_metal30)
-      Opts.MetalVersion = 300;
-    else if (LangStd == LangStandard::lang_metal31)
-      Opts.MetalVersion = 310;
-    else if (LangStd == LangStandard::lang_metal32)
+    if (LangStd == LangStandard::lang_metal32)
       Opts.MetalVersion = 320;
     else if (LangStd == LangStandard::lang_metal40)
       Opts.MetalVersion = 400;
@@ -4296,7 +4289,6 @@ static bool isStrictlyPreprocessorAction(frontend::ActionKind Action) {
   case frontend::EmitAssembly:
   case frontend::EmitBC:
   case frontend::EmitBC32:
-  case frontend::EmitBC50:
   case frontend::EmitBC140:
   case frontend::EmitSPIRV:
   case frontend::EmitSPIRVContainer:

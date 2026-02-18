@@ -220,7 +220,7 @@ ENUM_LANGOPT(DefaultCallingConv, DefaultCallingConvention, 3, DCC_None, "default
 LANGOPT(ShortEnums        , 1, 0, "short enum types")
 
 LANGOPT(Metal             , 1, 0, "Metal")
-LANGOPT(MetalVersion      , 32, 300, "Metal version")
+LANGOPT(MetalVersion      , 32, 320, "Metal version")
 LANGOPT(Vulkan            , 1, 0, "Vulkan")
 LANGOPT(VulkanVersion     , 32, 130, "Vulkan version")
 LANGOPT(FloorHostCompute  , 1, 0, "floor host-compute")

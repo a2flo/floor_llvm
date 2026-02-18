@@ -513,7 +513,6 @@ static bool actionRequiresCodeGen(BackendAction Action) {
           Action != Backend_EmitBC &&
           Action != Backend_EmitLL &&
           Action != Backend_EmitBC32 &&
-          Action != Backend_EmitBC50 &&
           Action != Backend_EmitBC140 &&
           Action != Backend_EmitSPIRV &&
           Action != Backend_EmitSPIRVContainer &&
@@ -1145,10 +1144,6 @@ void EmitAssemblyHelper::EmitAssemblyWithLegacyPassManager(
     PerModulePasses.add(createBitcode32WriterPass(*OS));
     break;
 
-  case Backend_EmitBC50:
-    PerModulePasses.add(createBitcode50WriterPass(*OS));
-    break;
-
   case Backend_EmitBC140:
     if (CodeGenOpts.PrepareForThinLTO && !CodeGenOpts.DisableLLVMPasses) {
       if (!CodeGenOpts.ThinLinkBitcodeFile.empty()) {
@@ -1614,17 +1609,6 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
   case Backend_EmitBC32:
     MPM.addPass(Bitcode32WriterPass(*OS));
     break;
-
-  case Backend_EmitBC50: {
-    bool EmitLTOSummary =
-        (CodeGenOpts.PrepareForLTO &&
-         !CodeGenOpts.DisableLLVMPasses &&
-         llvm::Triple(TheModule->getTargetTriple()).getVendor() !=
-             llvm::Triple::Apple);
-    MPM.addPass(BitcodeWriterPass50(*OS, CodeGenOpts.EmitLLVMUseLists,
-                                    EmitLTOSummary));
-    break;
-  }
 
   case Backend_EmitBC140:
     if (CodeGenOpts.PrepareForThinLTO && !CodeGenOpts.DisableLLVMPasses) {

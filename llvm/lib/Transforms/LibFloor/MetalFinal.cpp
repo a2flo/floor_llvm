@@ -400,12 +400,12 @@ namespace {
 			if (is_kernel_func || is_vertex_func || is_fragment_func || is_tess_control_func || is_tess_eval_func) {
 				std::vector<Type*> param_types;
 				for (auto& arg : F.args()) {
-					// replace noalias LLVM attribute with "air-buffer-no-alias" string attribute on Metal 3.1+
-					if (metal_version >= 310 && arg.hasAttribute(Attribute::NoAlias)) {
+					// replace noalias LLVM attribute with "air-buffer-no-alias" string attribute
+					if (arg.hasAttribute(Attribute::NoAlias)) {
 						arg.addAttr(llvm::Attribute::get(*ctx, "air-buffer-no-alias"));
 						arg.removeAttr(Attribute::NoAlias);
 					}
-					if (metal_version >= 310 && arg.getType()->isPointerTy()) {
+					if (arg.getType()->isPointerTy()) {
 						arg.addAttr(llvm::Attribute::NoCapture);
 					}
 					param_types.push_back(arg.getType());
@@ -414,20 +414,12 @@ namespace {
 				F.mutateType(PointerType::get(new_func_type, 0));
 				F.mutateFunctionType(new_func_type);
 				
-				// always remove "norecurse" and "min-legal-vector-width" on Metal < 3.1
-				// NOTE: for Metal 3.1+ we simply use the min-legal-vector-width that has been determined by LLVM (seems to be accurate)
-				if (metal_version < 310) {
-					F.removeFnAttr(Attribute::NoRecurse);
-					F.removeFnAttr("min-legal-vector-width");
-				}
-				
 				// generally remove this
 				F.removeFnAttr("less-precise-fpmad");
 				
-				// add "max-work-group-size" attribute on Metal 3.1+
+				// add "max-work-group-size" attribute
 				if (is_kernel_func) {
-					if (metal_version >= 310 &&
-						state.kernel_local_size[0] > 0 && state.kernel_local_size[1] > 0 && state.kernel_local_size[2] > 0) {
+					if (state.kernel_local_size[0] > 0 && state.kernel_local_size[1] > 0 && state.kernel_local_size[2] > 0) {
 						F.addFnAttr(llvm::Attribute::get(*ctx, "max-work-group-size",
 														 std::to_string(state.kernel_local_size[0] *
 																		state.kernel_local_size[1] *
@@ -435,10 +427,8 @@ namespace {
 					}
 				}
 				
-				// add "no-builtins" on Metal 3.1+
-				if (metal_version >= 310) {
-					F.addFnAttr("no-builtins");
-				}
+				// add "no-builtins"
+				F.addFnAttr("no-builtins");
 				
 				// always remove dso_local from entry points
 				F.setDSOLocal(false);

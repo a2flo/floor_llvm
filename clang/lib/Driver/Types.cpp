@@ -298,7 +298,6 @@ types::ID types::lookupTypeForExtension(llvm::StringRef Ext) {
            .Case("s", TY_PP_Asm)
            .Case("bc", TY_LLVM_BC)
            .Case("bc32", TY_LLVM_BC_32) // not ideal
-           .Case("bc50", TY_LLVM_BC_50) // not ideal
            .Case("bc140", TY_LLVM_BC_140) // not ideal
            .Case("spv", TY_SPIRV)
            .Case("spvc", TY_SPIRVC)

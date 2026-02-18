@@ -571,12 +571,6 @@ void CGDebugInfo::CreateCompileUnit() {
     // override producer when targeting Metal
     switch (CGM.getLangOpts().MetalVersion) {
       default:
-      case 300:
-        Producer = "Apple metal version 31001.638 (metalfe-31001.638.1)";
-        break;
-      case 310:
-        Producer = "Apple metal version 32023.22 (metalfe-32023.22.4)";
-        break;
       case 320:
         Producer = "Apple metal version 32023.620 (metalfe-32023.620)";
         break;

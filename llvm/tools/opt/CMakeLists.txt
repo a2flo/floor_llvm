@@ -8,7 +8,6 @@ set(LLVM_LINK_COMPONENTS
   AsmParser
   BitWriter
   CFGuard
-  BitWriter50
   BitWriter140
   CodeGen
   Core

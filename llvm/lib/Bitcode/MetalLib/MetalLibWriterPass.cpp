@@ -15,7 +15,6 @@
 #include "llvm/Bitcode/BitcodeWriterPass.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
-#include "../Writer50/ValueEnumerator50.h"
 #include "../Writer140/ValueEnumerator140.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Module.h"
@@ -48,9 +47,6 @@ using namespace metal;
 #if defined(uuid_t)
 #undef uuid_t
 #endif
-
-// set this to 1 to emit LLVM 5.0 bitcode regardless of target version
-#define FORCE_EMIT_BC50 0
 
 PreservedAnalyses MetalLibWriterPass::run(Module &M, ModuleAnalysisManager &) {
   if (!WriteMetalLibToFile(M, OS)) {
@@ -376,10 +372,6 @@ static bool is_used_in_function(const Function *F, const GlobalVariable *GV) {
 static const unordered_map<uint32_t,
                            pair<array<uint32_t, 3>, array<uint32_t, 3>>>
     metal_versions{
-        // Metal 3.0 uses AIR 2.5
-        {250, {{{2, 5, 0}}, {{3, 0, 0}}}},
-        // Metal 3.1 uses AIR 2.6
-        {260, {{{2, 6, 0}}, {{3, 1, 0}}}},
         // Metal 3.2 uses AIR 2.7
         {270, {{{2, 7, 0}}, {{3, 2, 0}}}},
         // Metal 4.0 uses AIR 2.8
@@ -468,14 +460,10 @@ compress_source_archive(const void *archive_ptr, const uint32_t archive_size) {
 bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   // get metal version
   Triple TT(M.getTargetTriple());
-  uint32_t target_air_version = 250;
+  uint32_t target_air_version = 270;
   if (TT.isiOS()) {
     auto ios_version = TT.getiOSVersion();
-    if (ios_version.getMajor() == 16) {
-      target_air_version = 250;
-    } else if (ios_version.getMajor() == 17) {
-      target_air_version = 260;
-    } else if (ios_version.getMajor() == 18) {
+    if (ios_version.getMajor() == 18) {
       target_air_version = 270;
     } else if (ios_version.getMajor() >= 26) {
       target_air_version = 280;
@@ -491,22 +479,13 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     VersionTuple osx_version{};
     TT.getMacOSXVersion(osx_version);
     auto osx_major = osx_version.getMajor();
-    if (osx_major == 13) {
-      target_air_version = 250;
-    } else if (osx_major == 14) {
-      target_air_version = 260;
-    } else if (osx_major == 15) {
+    if (osx_major == 15) {
       target_air_version = 270;
     } else if (osx_major == 16 || osx_major >= 26) {
       target_air_version = 280;
     }
   }
   const auto &metal_version = *metal_versions.find(target_air_version);
-#if FORCE_EMIT_BC50
-  const bool emit_bc50 = true;
-#else
-  const auto emit_bc50 = (target_air_version == 250);
-#endif
 
   // gather entry point functions that we want to clone/emit
   unordered_map<string, FUNCTION_TYPE> function_set;
@@ -634,16 +613,10 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
             1, llvm::MDString::get(Context, working_dir));
       }
     };
-    if (emit_bc50) {
-      ValueEnumerator50 VE50(M, false);
-      for (const auto &md : VE50.getMetadataMap()) {
-        md_difile_exec(md);
-      }
-    } else {
-      ValueEnumerator140 VE140(M, false);
-      for (const auto &md : VE140.getMetadataMap()) {
-        md_difile_exec(md);
-      }
+
+    ValueEnumerator140 VE140(M, false);
+    for (const auto &md : VE140.getMetadataMap()) {
+      md_difile_exec(md);
     }
 
     // * read all source code (drop files that we can't read)
@@ -735,11 +708,7 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
         dependent_bc_file_name, ec,
         sys::fs::CreationDisposition::CD_CreateAlways);
     if (!ec) {
-      if (emit_bc50) {
-        WriteBitcode50ToFile(&M, dependent_bc_file);
-      } else {
-        WriteBitcodeToFile140(M, dependent_bc_file);
-      }
+      WriteBitcodeToFile140(M, dependent_bc_file);
       dependent_bc_file.flush();
     } else {
       errs() << "failed to write dependent debug file "
@@ -892,8 +861,6 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     if (auto llvm_ident = cloned_mod->getNamedMetadata("llvm.ident")) {
       if (MDNode *ident_op = llvm_ident->getOperand(0)) {
         static const std::unordered_map<uint32_t, const char *> ident_versions{
-            {250, "Apple metal version 31001.638 (metalfe-31001.638.1)"},
-            {260, "Apple metal version 32023.155 (metalfe-32023.155)"},
             {270, "Apple metal version 32023.620 (metalfe-32023.620)"},
             {280, "Apple metal version 32023.850 (metalfe-32023.850.10)"},
         };
@@ -1032,11 +999,7 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
 
     // write module / bitcode
     raw_string_ostream bitcode_stream{entry.bitcode_data};
-    if (emit_bc50) {
-      WriteBitcode50ToFile(cloned_mod.get(), bitcode_stream);
-    } else {
-      WriteBitcodeToFile140(*cloned_mod, bitcode_stream);
-    }
+    WriteBitcodeToFile140(*cloned_mod, bitcode_stream);
     bitcode_stream.flush();
 
     // hash module
@@ -1154,11 +1117,9 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   // header
   OS.write("MTLB", 4);
 
-  uint16_t container_version_bugfix = 7;
+  uint16_t container_version_bugfix = 8;
   if (target_air_version >= 280) {
     container_version_bugfix = 9;
-  } else if (target_air_version >= 270) {
-    container_version_bugfix = 8;
   }
   metallib_version header{
       .container_version_major = 1,
@@ -1210,9 +1171,7 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   // file length
   uint64_t ext_program_md_size = sizeof(TAG_TYPE) /* ENDT */;
   ext_program_md_size += (4 + 2 + 16) /* UUID */;
-  if (target_air_version >= 270) {
-    ext_program_md_size += (4 + 2 + 16) /* HDYN */;
-  }
+  ext_program_md_size += (4 + 2 + 16) /* HDYN */;
   if (emit_debug_info) {
     ext_program_md_size += (4 + 2 + 16) /* HSRD */;
   }
@@ -1233,11 +1192,8 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   const auto metallib_file_name_size =
       metallib_file_name.size() + sizeof(uint8_t) /* "0" */;
   const uint32_t dyn_header_block_length =
-      (target_air_version >= 270
-           ? (sizeof(TAG_TYPE) /* magic/tag */ +
-              sizeof(uint16_t) /* name length */ + metallib_file_name_size +
-              sizeof(TAG_TYPE) /* end tag */)
-           : 0);
+      (sizeof(TAG_TYPE) /* magic/tag */ + sizeof(uint16_t) /* name length */ +
+       metallib_file_name_size + sizeof(TAG_TYPE) /* end tag */);
   uint64_t file_length =
       (sizeof(metallib_header) + sizeof(uint32_t) /* #programs */ +
        entries_size + ext_program_md_size + extended_md_data_size +
@@ -1265,8 +1221,7 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   ctrl.bitcode_offset = ctrl.debug_offset + ctrl.debug_length;
   ctrl.bitcode_length = bitcode_data_size;
   const uint64_t dyn_header_offset = ctrl.bitcode_offset + ctrl.bitcode_length;
-  const uint64_t dyn_header_length =
-      (target_air_version >= 270 ? dyn_header_block_length : 0u);
+  const uint64_t dyn_header_length = dyn_header_block_length;
   const uint64_t src_archives_offset = dyn_header_offset + dyn_header_length;
   const uint64_t src_archives_length =
       (src_archive_header_length + src_archive_length);
@@ -1294,15 +1249,13 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       OS.write((const char *)&src_archives_length, sizeof(uint64_t));
     }
 
-    // write dynamic header metadata (Metal 3.2+)
-    if (target_air_version >= 270) {
-      const auto HDYN_tag = TAG_TYPE::HDYN;
-      OS.write((const char *)&HDYN_tag, sizeof(TAG_TYPE));
-      OS.write(0x10);
-      OS.write(0x0);
-      OS.write((const char *)&dyn_header_offset, sizeof(uint64_t));
-      OS.write((const char *)&dyn_header_length, sizeof(uint64_t));
-    }
+    // write dynamic header metadata
+    const auto HDYN_tag = TAG_TYPE::HDYN;
+    OS.write((const char *)&HDYN_tag, sizeof(TAG_TYPE));
+    OS.write(0x10);
+    OS.write(0x0);
+    OS.write((const char *)&dyn_header_offset, sizeof(uint64_t));
+    OS.write((const char *)&dyn_header_length, sizeof(uint64_t));
 
     // write RLST
     const auto RLST_tag = TAG_TYPE::RLST;
@@ -1353,16 +1306,14 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   }
 
   // write dynamic header
-  if (target_air_version >= 270) {
-    const auto NAME_tag = TAG_TYPE::NAME;
-    OS.write((const char *)&NAME_tag, sizeof(TAG_TYPE));
-    const auto len = (uint16_t)metallib_file_name_size;
-    OS.write((const char *)&len, sizeof(len));
-    OS.write(metallib_file_name.c_str(), metallib_file_name_size - 1);
-    OS.write(0x0); // \0
-    const auto END_tag = TAG_TYPE::END;
-    OS.write((const char *)&END_tag, sizeof(TAG_TYPE));
-  }
+  const auto NAME_tag = TAG_TYPE::NAME;
+  OS.write((const char *)&NAME_tag, sizeof(TAG_TYPE));
+  const auto len = (uint16_t)metallib_file_name_size;
+  OS.write((const char *)&len, sizeof(len));
+  OS.write(metallib_file_name.c_str(), metallib_file_name_size - 1);
+  OS.write(0x0); // \0
+  const auto END_tag = TAG_TYPE::END;
+  OS.write((const char *)&END_tag, sizeof(TAG_TYPE));
 
   // write embedded source code archives
   if (emit_debug_info) {

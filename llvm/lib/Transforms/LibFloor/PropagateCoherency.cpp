@@ -124,14 +124,7 @@ namespace {
 			func = &F;
 			was_modified = false;
 			
-			// we can only do this for Metal 3.2+
 			is_metal = (Triple(M->getTargetTriple()).getArch() == Triple::ArchType::air64);
-			if (is_metal) {
-				if (metal::get_metal_version(*M) < 320) {
-					return false;
-				}
-			}
-			
 			is_vulkan = (Triple(M->getTargetTriple()).getArch() == Triple::ArchType::spir64 &&
 						 Triple(M->getTargetTriple()).getEnvironment() == Triple::EnvironmentType::Vulkan);
 			
