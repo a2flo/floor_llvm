@@ -509,7 +509,7 @@ private:
     if (ClBlacklist.empty())
       return std::unique_ptr<SpecialCaseList>();
 
-    return SpecialCaseList::createOrDie({{ClBlacklist}},
+    return SpecialCaseList::createOrDie({{ClBlacklist.getValue()}},
                                         *vfs::getRealFileSystem());
   }
   std::unique_ptr<SpecialCaseList> DefaultBlacklist;

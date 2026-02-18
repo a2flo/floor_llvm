@@ -1,6 +1,7 @@
 add_llvm_component_library(LLVMMetalLib
   MetalLibWriter.cpp
   MetalLibWriterPass.cpp
+  MetalLibReflection.cpp
   bzip2/blocksort.c
   bzip2/bzlib.c
   bzip2/compress.c

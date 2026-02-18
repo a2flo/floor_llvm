@@ -288,7 +288,7 @@ class raw_ostream;
                              bool GenerateHash = false,
                              ModuleHash *ModHash = nullptr);
   
-  void WriteMetalLibToFile(Module &M, raw_ostream &OS);
+  bool WriteMetalLibToFile(Module &M, raw_ostream &OS);
 
   /// Write the specified thin link bitcode file (i.e., the minimized bitcode
   /// file) to the given raw output stream, where it will be written in a new

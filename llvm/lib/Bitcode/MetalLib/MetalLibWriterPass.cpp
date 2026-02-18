@@ -29,6 +29,7 @@
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/LibFloor/MetalTypes.h"
 #include "llvm/Transforms/LibFloor/FloorUtils.h"
+#include "MetalLibReflection.hpp"
 #include "sha256.hpp"
 #define BZ_NO_STDIO 1
 #include "bzip2/bzlib.h"
@@ -52,7 +53,9 @@ using namespace metal;
 #define FORCE_EMIT_BC50 0
 
 PreservedAnalyses MetalLibWriterPass::run(Module &M, ModuleAnalysisManager &) {
-  WriteMetalLibToFile(M, OS);
+  if (!WriteMetalLibToFile(M, OS)) {
+    M.getContext().emitError("failed to emit metallib");
+  }
   return PreservedAnalyses::all();
 }
 
@@ -67,7 +70,9 @@ public:
   StringRef getPassName() const override { return "Metal Library Writer"; }
 
   bool runOnModule(Module &M) override {
-    WriteMetalLibToFile(M, OS);
+    if (!WriteMetalLibToFile(M, OS)) {
+      M.getContext().emitError("failed to emit metallib");
+    }
     return false;
   }
 };
@@ -136,9 +141,9 @@ struct metallib_program_info {
   struct offset_info {
     // NOTE: these are all relative offsets -> add to metallib_header_control
     // offsets to get absolute offsets
-    uint64_t extended_md_offset;
-    uint64_t debug_offset;
-    uint64_t bitcode_offset;
+    uint64_t extended_md_offset{0u};
+    uint64_t debug_offset{0u};
+    uint64_t bitcode_offset{0u};
   };
   static_assert(sizeof(offset_info) == 3 * sizeof(uint64_t),
                 "invalid offset_info size");
@@ -152,7 +157,7 @@ struct metallib_program_info {
 
     sha256_hash hash;
 
-    offset_info offset{0, 0, 0};
+    offset_info offset{};
 
     // we need a separate stream for the actual bitcode data, since we need to
     // know
@@ -182,6 +187,15 @@ struct metallib_program_info {
 
     std::vector<vertex_attribute> vertex_attributes;
 
+    // reflection flatbuffer data
+    std::vector<uint8_t> reflection_data;
+    // data size + container/wrapper/padding
+    uint32_t reflection_size{0u};
+    // offset within the RLST
+    uint64_t reflection_offset{0u};
+    // amount of initial padding bytes
+    uint32_t reflection_padding{0u};
+
     // output in same order as Apple:
     //  * NAME
     //  * TYPE
@@ -190,11 +204,12 @@ struct metallib_program_info {
     //  * VERS
     //  * MDSZ
     //  * SOFF
+    //  * RFLT
     //  * ENDT
     void update_length() {
       length = 4;                     // length info itself
-      length += 7 * sizeof(TAG_TYPE); // 7 tags
-      length += 6 * sizeof(uint16_t); // tag lengths (except ENDT)
+      length += 8 * sizeof(TAG_TYPE); // 8 tags
+      length += 7 * sizeof(uint16_t); // tag lengths (except ENDT)
       if (emit_debug_info) {
         length += 1 * (sizeof(TAG_TYPE) + sizeof(uint16_t)); // SOFF tag
       }
@@ -213,11 +228,17 @@ struct metallib_program_info {
       if (emit_debug_info) {
         length += sizeof(uint64_t); // SOFF, always 8 bytes
       }
+      length += sizeof(uint64_t); // RFLT, always 8 bytes
 
       bitcode_size = bitcode_data.size();
       extended_md_size = extended_md_data.size();
       debug_size = debug_data.size();
+      // reflection data itself + container/wrapper (padding later)
+      reflection_size =
+          (reflection_data.size() + sizeof(TAG_TYPE) * 2u /* RBUF+ENDT */ +
+           sizeof(uint32_t) * 2u /* sizes */);
     }
+
     void update_offsets(uint64_t &running_ext_md_size,
                         uint64_t &running_dbg_size, uint64_t &running_bc_size) {
       offset.extended_md_offset = running_ext_md_size;
@@ -227,6 +248,21 @@ struct metallib_program_info {
       running_ext_md_size += extended_md_size;
       running_dbg_size += debug_size;
       running_bc_size += bitcode_size;
+    }
+
+    void update_reflection_placement(uint64_t &running_reflection_offset,
+                                     const uint64_t front_file_length) {
+      // reflection size and offset handling is a bit special, since it requires
+      // the flatbuffer payload to be 16-byte aligned *within* the metallib
+      const auto fb_pos =
+          (front_file_length + running_reflection_offset +
+           sizeof(TAG_TYPE) /* RBUF */ + sizeof(uint32_t) * 2u /* sizes */);
+      if (const auto rem = fb_pos % 16u; rem != 0u) {
+        reflection_padding = 16u - rem;
+      }
+      reflection_size += reflection_padding;
+      reflection_offset = running_reflection_offset;
+      running_reflection_offset += reflection_size;
     }
 
     template <typename data_type>
@@ -284,6 +320,11 @@ struct metallib_program_info {
         write_value(OS, debug_source_offset);
       }
 
+      // RFLT
+      write_value(OS, TAG_TYPE::RFLT);
+      write_value(OS, uint16_t(sizeof(uint64_t)));
+      write_value(OS, reflection_offset);
+
       // ENDT
       write_value(OS, TAG_TYPE::END);
     }
@@ -298,6 +339,21 @@ struct metallib_program_info {
 
     void write_debug(raw_ostream &OS) const {
       OS.write(debug_data.data(), debug_data.size());
+    }
+
+    void write_reflection(raw_ostream &OS) const {
+      const auto embedded_refl_data_size =
+          uint32_t(reflection_data.size() + reflection_padding);
+      write_value(OS, uint32_t(embedded_refl_data_size + sizeof(TAG_TYPE) * 2u +
+                               sizeof(uint32_t) * 2u));
+      write_value(OS, TAG_TYPE::RBUF);
+      write_value(OS, embedded_refl_data_size);
+      for (uint32_t i = 0; i < reflection_padding; ++i) {
+        OS.write(0u); // alignment padding
+      }
+      OS.write((const char *)reflection_data.data(),
+               uint32_t(reflection_data.size()));
+      write_value(OS, TAG_TYPE::END);
     }
   };
   vector<entry> entries;
@@ -409,7 +465,7 @@ compress_source_archive(const void *archive_ptr, const uint32_t archive_size) {
 }
 
 //
-void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
+bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   // get metal version
   Triple TT(M.getTargetTriple());
   uint32_t target_air_version = 250;
@@ -621,10 +677,10 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     // * create additional source archive entries
     if (working_dir.empty()) {
       errs() << "no valid 'llvm_utils.workingdir' metadata entry!\n";
-    } else {
-      source_files.emplace("metal-working-dir.txt",
-                           MemoryBuffer::getMemBuffer(working_dir));
+      return false;
     }
+    source_files.emplace("metal-working-dir.txt",
+                         MemoryBuffer::getMemBuffer(working_dir));
 
     StringRef cmd_line;
     if (auto cmd_line_md = M.getNamedMetadata("llvm.commandline");
@@ -642,11 +698,11 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     }
     if (cmd_line.empty()) {
       errs() << "no valid 'llvm.commandline' metadata entry!\n";
-    } else {
-      source_files.emplace("metal-options.txt",
-                           MemoryBuffer::getMemBuffer(cmd_line));
-      linker_cmd = cmd_line;
+      return false;
     }
+    source_files.emplace("metal-options.txt",
+                         MemoryBuffer::getMemBuffer(cmd_line));
+    linker_cmd = cmd_line;
 
     source_files.emplace("original-input-filename.txt",
                          MemoryBuffer::getMemBuffer(dependent_bc_file_name));
@@ -662,6 +718,9 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
 #endif
     source_archive_data =
         compress_source_archive(tar_data.data(), tar_data.size());
+    if (!source_archive_data.first) {
+      return false;
+    }
 #if 0
     {
       error_code ec;
@@ -685,7 +744,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     } else {
       errs() << "failed to write dependent debug file "
              << dependent_bc_file_name << "\n";
-      dependent_bc_file_name = "";
+      return false;
     }
   }
 
@@ -955,12 +1014,20 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
             if (vattr.type == DATA_TYPE::INVALID) {
               errs() << "invalid data type in control point vertex attribute: "
                      << vattr.name << ", index " << vattr.index << "\n";
-              continue;
+              return false;
             }
             entry.vertex_attributes.emplace_back(std::move(vattr));
           }
         }
       }
+    }
+
+    // extract metadata and build reflection data from it
+    entry.reflection_data = metal::reflection::create_reflection(*cloned_mod);
+    if (entry.reflection_data.empty()) {
+      errs() << "failed to create reflection data for " << M.getSourceFileName()
+             << "\n";
+      return false;
     }
 
     // write module / bitcode
@@ -1079,6 +1146,9 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     entry.update_offsets(running_ext_md_size, running_dbg_size,
                          running_bc_size);
   }
+  assert(extended_md_data_size == running_ext_md_size);
+  assert(debug_data_size == running_dbg_size);
+  assert(bitcode_data_size == running_bc_size);
 
   //// start writing
   // header
@@ -1146,6 +1216,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   if (emit_debug_info) {
     ext_program_md_size += (4 + 2 + 16) /* HSRD */;
   }
+  ext_program_md_size += (4 + 2 + 16) /* RLST */;
   const uint32_t src_archive_header_length =
       (emit_debug_info
            ? (sizeof(uint32_t) /* count */ + (linker_cmd.size() + 1) +
@@ -1167,11 +1238,20 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
               sizeof(uint16_t) /* name length */ + metallib_file_name_size +
               sizeof(TAG_TYPE) /* end tag */)
            : 0);
-  const uint64_t file_length =
+  uint64_t file_length =
       (sizeof(metallib_header) + sizeof(uint32_t) /* #programs */ +
        entries_size + ext_program_md_size + extended_md_data_size +
        debug_data_size + bitcode_data_size + dyn_header_block_length +
        src_archive_header_length + src_archive_length);
+
+  // compute total reflection size + individual entry offsets
+  uint64_t reflection_data_size = sizeof(uint32_t) /* #entries */;
+  for (uint32_t i = 0; i < function_count; ++i) {
+    prog_info.entries[i].update_reflection_placement(reflection_data_size,
+                                                     file_length);
+  }
+  file_length += reflection_data_size;
+
   OS.write((const char *)&file_length, sizeof(uint64_t));
 
   // header/block control
@@ -1190,6 +1270,7 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   const uint64_t src_archives_offset = dyn_header_offset + dyn_header_length;
   const uint64_t src_archives_length =
       (src_archive_header_length + src_archive_length);
+  const uint64_t reflection_offset = src_archives_offset + src_archives_length;
   OS.write((const char *)&ctrl, sizeof(metallib_header_control));
 
   // write entry headers/info
@@ -1222,6 +1303,14 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       OS.write((const char *)&dyn_header_offset, sizeof(uint64_t));
       OS.write((const char *)&dyn_header_length, sizeof(uint64_t));
     }
+
+    // write RLST
+    const auto RLST_tag = TAG_TYPE::RLST;
+    OS.write((const char *)&RLST_tag, sizeof(TAG_TYPE));
+    OS.write(0x10);
+    OS.write(0x0);
+    OS.write((const char *)&reflection_offset, sizeof(uint64_t));
+    OS.write((const char *)&reflection_data_size, sizeof(uint64_t));
 
     // write UUID
     // NOTE: Apple doesn't actually care about UUID variants and versions,
@@ -1302,4 +1391,14 @@ void llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     const auto END_tag = TAG_TYPE::END;
     OS.write((const char *)&END_tag, sizeof(TAG_TYPE));
   }
+
+  // write reflection data
+  const auto reflection_entry_count = uint32_t(prog_info.entries.size());
+  OS.write((const char *)&reflection_entry_count,
+           sizeof(reflection_entry_count));
+  for (const auto &entry : prog_info.entries) {
+    entry.write_reflection(OS);
+  }
+
+  return true;
 }

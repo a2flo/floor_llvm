@@ -33,6 +33,7 @@
 #include <array>
 #include <unordered_map>
 #include <optional>
+#include "llvm/IR/Constants.h"
 
 namespace metal {
 

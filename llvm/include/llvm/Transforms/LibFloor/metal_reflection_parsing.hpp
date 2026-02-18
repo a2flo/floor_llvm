@@ -10,29 +10,6 @@
 
 namespace metal::reflection {
 
-struct table_vtable_t {
-	uint16_t vtable_size;
-	uint16_t inline_data_size;
-};
-static_assert(sizeof(table_vtable_t) == 4);
-
-struct node_vtable_t : table_vtable_t {
-	uint16_t node_type_offset;
-	uint16_t node_indirection_offset;
-};
-static_assert(sizeof(node_vtable_t) == 8);
-
-struct table_root_t {
-	int32_t vtable_offset;
-};
-static_assert(sizeof(table_root_t) == 4);
-
-struct node_root_t : table_root_t {
-	NODE_TYPE type;
-	int32_t indirection_offset;
-};
-static_assert(sizeof(node_root_t) == 12);
-
 static inline std::unique_ptr<node_base_t> parse_node(const table_root_t& root, const table_vtable_t& vtable, const std::span<const uint8_t> refl_data);
 
 template <NODE_TYPE node_type>

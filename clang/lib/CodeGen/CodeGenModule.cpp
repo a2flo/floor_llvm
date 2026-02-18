@@ -2864,7 +2864,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 	
 	//
 	const PrintingPolicy &Policy = Context.getPrintingPolicy();
-	const std::function<std::string(const clang::QualType&)> make_type_name = [&Policy, &make_type_name](const clang::QualType& type) -> std::string {
+	const std::function<std::string(const clang::QualType&)> make_type_name = [&Policy, &make_type_name, this](const clang::QualType& type) -> std::string {
 		// NOTE: air wants the type w/o qualifiers
 		const auto base_unq_type = type.getTypePtr()->getBaseElementTypeUnsafe();
 		const auto unqualified_type = base_unq_type->getCanonicalTypeInternal();
@@ -3061,11 +3061,31 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			// use the underlying integer type for enums
 			return make_type_name(cast<EnumType>(unqualified_type.getTypePtr())->getDecl()->getIntegerType());
 		}
+		
 		type_name_str = strip_cvr(type_name_str);
+		
+		// strip (anonymous struct|union at ...) to just (anonymous)
+		size_t anon_pos = 0;
+		do {
+			anon_pos = type_name_str.find("(anonymous");
+			if (anon_pos == std::string::npos) {
+				break;
+			}
+			const auto end_pos = type_name_str.find(")", anon_pos + 11 /* +1 to ignore existing (anonymous) */);
+			if (end_pos == std::string::npos) {
+				// ignore and abort if end is not found
+				break;
+			}
+			type_name_str.erase(anon_pos + 10, (end_pos - anon_pos) - 10 + 1);
+			type_name_str.insert(anon_pos + 10, 1, ')');
+			anon_pos += 11;
+		} while (true);
+		
 		// turn "unsigned type" into "utype"
 		if (const auto pos = type_name_str.find("unsigned "); pos != std::string::npos) {
 			type_name_str.erase(pos + 1, 8);
 		}
+		
 		return type_name_str;
 	};
 	

@@ -160,7 +160,7 @@ FuzzySearch("fuzzy",
     [reflection list entry...]
         [tag: char[4] = "RBUF"]
         [tag length: uint32_t]
-        [(opt) zero-padding]
+        [(opt) zero-padding for 16-byte alignment]
         [reflection/AIRR data] // NOTE: uses a flatbuffers format
             [root offset: uint32_t]
             [magic: char[4] = "AIRR"]
@@ -382,9 +382,9 @@ static void hex_dump(raw_ostream& os, const char* ptr, const size_t length, cons
 
 //! parses RBUF contents
 static Expected<bool> parse_reflection_buffer(std::span<const uint8_t> refl_buf, std::optional<metal::reflection::reflection_t>& refl_entry) {
-	// skip zero padding (data is always 32-bit aligned in the metallib)
-	// NOTE: it is unclear to me what logic Apple is using here, because sometimes we have no padding at all if already aligned (as expected),
-	//       sometimes we have unnecessary padding even if the data is already aligned ...
+	// skip initial zero padding (AIRR data is always 16-byte aligned inside the metallib)
+	// NOTE: not checking the alignment requirement here, since our data might not actually be aligned to 16 bytes (just 4),
+	//       and our parser technically doesn't need any alignment at all
 	while (!refl_buf.empty() && refl_buf[0] == 0) {
 		refl_buf = refl_buf.subspan(1);
 	}

@@ -24,16 +24,14 @@ int LLVMWriteMetalLibToFile(LLVMModuleRef M, const char *Path) {
   if (EC)
     return -1;
 
-  WriteMetalLibToFile(*unwrap(M), OS);
-  return 0;
+  return WriteMetalLibToFile(*unwrap(M), OS) ? 0 : -1;
 }
 
 int LLVMWriteMetalLibToFD(LLVMModuleRef M, int FD, int ShouldClose,
                           int Unbuffered) {
   raw_fd_ostream OS(FD, ShouldClose, Unbuffered);
 
-  WriteMetalLibToFile(*unwrap(M), OS);
-  return 0;
+  return WriteMetalLibToFile(*unwrap(M), OS) ? 0 : -1;
 }
 
 int LLVMWriteMetalLibToFileHandle(LLVMModuleRef M, int FileHandle) {
