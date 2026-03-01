@@ -255,7 +255,9 @@ static inline node_id_t create_struct_type_info(const llvm::MDNode& md_node, ref
 		if (!array_entries) {
 			return invalid_node_id;
 		}
-		field.array_entries = *array_entries;
+		if (*array_entries > 0) {
+			field.array_entries = *array_entries;
+		}
 		
 		const auto type_name = md_get_next_string(md_node, md_iter);
 		if (!type_name) {
@@ -830,12 +832,12 @@ static inline node_id_t create_render_target_ret(const llvm::MDNode& md_node, re
 			if (!render_target_index) {
 				return false;
 			}
-			const auto raster_order_group = md_get_next_uint(md_node, iter);
-			if (!raster_order_group) {
+			const auto blend_source_index = md_get_next_uint(md_node, iter);
+			if (!blend_source_index) {
 				return false;
 			}
 			node.render_target_index = { *render_target_index };
-			node.raster_order_group = { *raster_order_group };
+			node.blend_source_index = { *blend_source_index };
 			return true;
 		} else if (type_str == "air.arg_type_name") {
 			if (const auto str = md_get_next_string(md_node, iter); str) {

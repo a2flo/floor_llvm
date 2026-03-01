@@ -213,6 +213,7 @@ namespace {
 							   const COMPARE_FUNCTION& compare_function,
 							   llvm::Value* compare_value_arg,
 							   const bool is_compare) override {
+			const auto metal_version = metal::get_metal_version(*M);
 			SmallVector<llvm::Type*, 16> func_arg_types;
 			SmallVector<llvm::Value*, 16> func_args;
 			
@@ -295,6 +296,38 @@ namespace {
 				
 				set_sampler_attrs = true;
 				sampler_param_idx = func_args.size() - 1;
+			} else if (metal_version >= 400) {
+				// even for reads, we still need a sampler now -> get it via air.get_read_sampler() call
+				auto get_read_sampler = M->getFunction("air.get_read_sampler");
+				if (!get_read_sampler) {
+					AttrBuilder attr_builder(*ctx);
+					attr_builder.addAttribute(llvm::Attribute::InaccessibleMemOnly);
+					attr_builder.addAttribute(llvm::Attribute::MustProgress);
+					attr_builder.addAttribute(llvm::Attribute::NoFree);
+					attr_builder.addAttribute(llvm::Attribute::NoUnwind);
+					attr_builder.addAttribute(llvm::Attribute::ReadOnly);
+					attr_builder.addAttribute(llvm::Attribute::WillReturn);
+					auto func_attrs = AttributeList::get(*ctx, ~0, attr_builder);
+					
+					auto sampler_type = llvm::StructType::getTypeByName(*ctx, "struct._sampler_t");
+					if (!sampler_type) {
+						sampler_type = llvm::StructType::create(*ctx, "struct._sampler_t");
+					}
+					auto sampler_ret_type = llvm::PointerType::get(sampler_type, 2);
+					const auto get_read_sampler_func_type = llvm::FunctionType::get(sampler_ret_type, false);
+					
+					get_read_sampler = (llvm::Function*)M->getOrInsertFunction("air.get_read_sampler", get_read_sampler_func_type,
+																			   func_attrs).getCallee();
+				}
+				
+				auto read_sampler_call = builder->CreateCall(get_read_sampler);
+				read_sampler_call->setOnlyAccessesInaccessibleMemory();
+				read_sampler_call->addFnAttr(Attribute::NoUnwind);
+				read_sampler_call->setOnlyReadsMemory();
+				read_sampler_call->addFnAttr(Attribute::WillReturn);
+				
+				func_arg_types.push_back(read_sampler_call->getType());
+				func_args.push_back(read_sampler_call);
 			}
 			
 			if(is_depth) {
@@ -373,6 +406,12 @@ namespace {
 			
 			// -> additional args: lod, bias, gradient, offset
 			if(!is_sample_call) {
+				// 2D/3D non-cube/non-msaa images: unknown zero init argument
+				if (metal_version >= 400 && !is_cube && !is_msaa && coord_vec_type->getNumElements() > 1) {
+					func_arg_types.push_back(coord_vec_type);
+					func_args.push_back(llvm::Constant::getNullValue(coord_vec_type));
+				}
+				
 				// -> read
 				if(!is_msaa) { // msaa is always lod 0, hence needs no arg
 					// -> lod
@@ -471,6 +510,7 @@ namespace {
 			attr_builder.addAttribute(llvm::Attribute::ArgMemOnly);
 			attr_builder.addAttribute(llvm::Attribute::NoUnwind);
 			attr_builder.addAttribute(llvm::Attribute::ReadOnly);
+			attr_builder.addAttribute(llvm::Attribute::WillReturn);
 			auto func_attrs = AttributeList::get(*ctx, ~0, attr_builder);
 			
 			// create the air call
@@ -480,6 +520,7 @@ namespace {
 			read_call->setOnlyAccessesArgMemory();
 			read_call->setDoesNotThrow();
 			read_call->setOnlyReadsMemory(); // all reads are readonly (can be optimized away if unused)
+			read_call->addFnAttr(Attribute::WillReturn);
 			read_call->setDebugLoc(I.getDebugLoc()); // keep debug loc
 			
 			// set sampler* cast attributes if necessary

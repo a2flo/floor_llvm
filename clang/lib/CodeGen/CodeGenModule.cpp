@@ -2908,13 +2908,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			const auto template_param = type_name_str.substr(type_param_start + 1, type_param_end - type_param_start - 1);
 			if (cxx_rdecl->hasAttr<VectorCompatAttr>()) {
 				// floor vector type
-				const auto vec_size = type_name_str.substr(type_param_start - 1, 1);
-				auto type_name = strip_cvr(template_param + vec_size);
-				// turn "unsigned type" into "utype"
-				if (const auto pos = type_name.find("unsigned "); pos != std::string::npos) {
-					type_name.erase(pos + 1, 8);
-				}
-				return type_name;
+				return make_type_name(getContext().get_compat_vector_type(cxx_rdecl).getCanonicalType());
 			} else if (type_name_str.starts_with("floor_image::image") ||
 					   type_name_str.starts_with("fl::floor_image::image")) {
 				// floor image type
@@ -8259,7 +8253,7 @@ llvm::Type* CodeGenModule::GraphicsExpandIOType(const QualType& type,
 												llvm::Type* llvm_type,
 												CodeGenTypes& CGT,
 												const bool create_packed,
-												const bool create_unnamed,
+												const bool create_unnamed_if_multi_field,
 												const bool is_floor_arg_buffer) {
 	const llvm::StructType* ST = dyn_cast<llvm::StructType>(llvm_type);
 	if(!ST) return llvm_type;
@@ -8309,7 +8303,7 @@ llvm::Type* CodeGenModule::GraphicsExpandIOType(const QualType& type,
 	}
 	
 	llvm::StructType* ret = nullptr;
-	if (!create_unnamed) {
+	if (!create_unnamed_if_multi_field || llvm_fields.size() <= 1) {
 		std::string name = "struct.floor.flat.";
 		if (is_vk_floor_arg_buffer) {
 			name += "arg_buffer.";
@@ -8317,7 +8311,6 @@ llvm::Type* CodeGenModule::GraphicsExpandIOType(const QualType& type,
 		name += cxx_rdecl->getName().str() + (create_packed ? ".packed" : "");
 		ret = llvm::StructType::create(llvm_fields, name, create_packed);
 	} else {
-		// TODO/NOTE: this can't handle complex types yet!
 		ret = llvm::StructType::get(CGT.getLLVMContext(), llvm_fields, create_packed);
 	}
 	ret->setGraphicsIOType(); // fix up alignment/sizes/offsets
@@ -8338,11 +8331,10 @@ void CodeGenModule::EmitGlobalFunctionDefinition(GlobalDecl GD,
     if (D->hasAttr<GraphicsVertexShaderAttr>() || D->hasAttr<GraphicsFragmentShaderAttr>() ||
         D->hasAttr<GraphicsTessellationControlShaderAttr>() || D->hasAttr<GraphicsTessellationEvaluationShaderAttr>() ||
         D->hasAttr<ComputeKernelAttr>()) {
-      //const bool is_metal_2_3 = (getLangOpts().MetalVersion >= 230); // TODO/NOTE: disabled for now, see above
-      const bool is_metal_2_3 = false;
       if (FI.getReturnType()->isStructureOrClassType()) {
         auto& retInfo = const_cast<ABIArgInfo&>(FI.getReturnInfo());
-        retInfo.setCoerceToType(GraphicsExpandIOType(FI.getReturnType(), retInfo.getCoerceToType(), getTypes(), true, is_metal_2_3));
+        retInfo.setCoerceToType(GraphicsExpandIOType(FI.getReturnType(), retInfo.getCoerceToType(), getTypes(), true,
+                                                     getLangOpts().Metal, false));
       }
       for (const auto& param : D->parameters()) {
         const auto param_type = param->getType();
@@ -8350,7 +8342,7 @@ void CodeGenModule::EmitGlobalFunctionDefinition(GlobalDecl GD,
           const auto is_vulkan_arg_buffer = (getLangOpts().Vulkan && param->hasAttr<FloorArgBufferAttr>());
           if (param->hasAttr<GraphicsStageInputAttr>() || is_vulkan_arg_buffer) {
             auto llvm_param_type = getTypes().ConvertType(param_type, !is_vulkan_arg_buffer, !is_vulkan_arg_buffer);
-            (void)GraphicsExpandIOType(param_type, llvm_param_type, getTypes(), false, is_metal_2_3, is_vulkan_arg_buffer);
+            (void)GraphicsExpandIOType(param_type, llvm_param_type, getTypes(), false, false, is_vulkan_arg_buffer);
           }
         }
       }

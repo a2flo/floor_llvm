@@ -1151,8 +1151,27 @@ CodeGenTypes::getCGRecordLayout(const RecordDecl *RD, llvm::Type* struct_type) {
   // check if there is a flattened layout for this llvm struct type,
   // return it if so, otherwise continue as usual
   if (struct_type != nullptr) {
-    const auto flat_layout = FlattenedCGRecordLayouts.lookup(struct_type);
-    if(flat_layout) return *flat_layout;
+    // -> find direct match first
+    const auto flat_iter = FlattenedCGRecordLayouts.find(RD);
+    if (flat_iter != FlattenedCGRecordLayouts.end() &&
+        flat_iter->second.first == struct_type &&
+        flat_iter->second.second) {
+      return *flat_iter->second.second;
+    }
+
+    // -> try to find an allowed alias (when RD is a base)
+    const auto alias_decl_iter = FlattenedCGRecordLayoutBaseAliases.find(RD);
+    if (alias_decl_iter != FlattenedCGRecordLayoutBaseAliases.end()) {
+      const auto alias_iter = alias_decl_iter->second.find(struct_type);
+      if (alias_iter != alias_decl_iter->second.end() &&
+          alias_iter->second) {
+        return *alias_iter->second;
+      }
+    }
+
+#ifndef NDEBUG
+    assert(should_have_flattened_layout.count(struct_type) == 0);
+#endif
   }
 
   const Type *Key = Context.getTagDeclType(RD).getTypePtr();

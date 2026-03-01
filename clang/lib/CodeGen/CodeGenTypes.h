@@ -72,9 +72,16 @@ class CodeGenTypes {
   /// Maps clang struct type with corresponding record layout info.
   llvm::DenseMap<const Type*, std::unique_ptr<CGRecordLayout>> CGRecordLayouts;
 
-  /// This maps special flattened llvm struct types
-  /// with the corresponding record layout info.
-  llvm::DenseMap<const llvm::Type*, CGRecordLayout *> FlattenedCGRecordLayouts;
+  /// This maps special RecordDecls to flattened LLVM struct types with the corresponding record layout info.
+  /// "FlattenedCGRecordLayouts" is for all direct mappings, while "FlattenedCGRecordLayoutBaseAliases" is for
+  /// any potential base decl/class aliases to derived RecordDecl flattened LLVM types
+  /// NOTE: since we also use this for unnamed struct types, this requires the original RecordDecl
+  llvm::DenseMap<const RecordDecl*, std::pair<const llvm::Type*, CGRecordLayout *>> FlattenedCGRecordLayouts;
+  llvm::DenseMap<const RecordDecl*, llvm::DenseMap<const llvm::Type*, CGRecordLayout *>> FlattenedCGRecordLayoutBaseAliases;
+#ifndef NDEBUG
+  /// for debugging purposes: keep track which LLVM types *should* have a flattened layout
+  llvm::DenseSet<const llvm::Type*> should_have_flattened_layout;
+#endif
 
   /// This maps CXX record decls to their special flattend llvm struct types
   llvm::DenseMap<const CXXRecordDecl*, llvm::Type*> FlattenedRecords;
@@ -340,8 +347,27 @@ public:
   uint32_t getMetalVulkanImplicitArgCount(const FunctionDecl* FD) const;
 
   // returns true if the specified LLVM type is a flattened type
-  bool is_flattened_struct_type(llvm::Type* Ty) const {
-    return FlattenedCGRecordLayouts.count(Ty) > 0;
+  bool is_flattened_struct_type(const RecordDecl* decl, const llvm::Type* Ty) const {
+	  const auto iter = FlattenedCGRecordLayouts.find(decl);
+	  if (iter != FlattenedCGRecordLayouts.end() && iter->second.first == Ty) {
+		  return true;
+	  }
+	  const auto aliases_iter = FlattenedCGRecordLayoutBaseAliases.find(decl);
+	  if (aliases_iter == FlattenedCGRecordLayoutBaseAliases.end()) {
+#ifndef NDEBUG
+		  assert(should_have_flattened_layout.count(Ty) == 0);
+#endif
+		  return false;
+	  }
+#ifndef NDEBUG
+	  if (aliases_iter->second.count(Ty) > 0) {
+		  return true;
+	  }
+	  assert(should_have_flattened_layout.count(Ty) == 0);
+	  return false;
+#else
+	  return (aliases_iter->second.count(Ty) > 0);
+#endif
   }
 
 

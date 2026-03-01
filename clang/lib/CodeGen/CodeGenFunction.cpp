@@ -659,9 +659,6 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
 		  AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.fast_math_enable")));
 		  AIRCompOpts->addOperand(llvm::MDNode::get(Context, llvm::MDString::get(Context, "air.compile.framebuffer_fetch_enable")));
 		  
-		  // insert empty sampler state, this will be filled in by MetalImage later on
-		  CGM.getModule().getOrInsertNamedMetadata("air.sampler_states");
-		  
 		  // emit debug info
 		  if (CGM.getCodeGenOpts().getDebugInfo() != codegenoptions::NoDebugInfo) {
 			  // emit "air.source_file_name"
@@ -755,6 +752,12 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
        (FD->hasAttr<GraphicsFragmentShaderAttr>() ? "air.fragment" : "air.kernel")));
   }
   MainMetadataNode->addOperand(kernelMDNode);
+
+  // metadata post main metadata node
+  if (CGM.getLangOpts().Metal) {
+    // insert empty sampler state, this will be filled in by MetalImage later on
+    CGM.getModule().getOrInsertNamedMetadata("air.sampler_states");
+  }
 
   // add soft-printf info
   if (CGM.getCodeGenOpts().MetalSoftPrintf > 0 || CGM.getCodeGenOpts().VulkanSoftPrintf > 0) {

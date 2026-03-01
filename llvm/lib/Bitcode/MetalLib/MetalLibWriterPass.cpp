@@ -889,8 +889,9 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
           GV.getAddressSpace() == 3 /* local memory */) {
         auto value_type = GV.getValueType();
         if (value_type && value_type->isSized() &&
-            DL.getTypeStoreSize(value_type) >= 16 && GV.getAlignment() < 16) {
-          // use at least 16-byte alignment
+            DL.getTypeStoreSize(value_type) >= 16 && GV.getAlignment() < 16 &&
+            !(GV.hasName() && GV.getName().startswith("__air_sampler_state"))) {
+          // use at least 16-byte alignment (unless sampler state)
           GV.setAlignment(MaybeAlign{16u});
         }
       }
@@ -898,6 +899,21 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
         // always use undef initializer (instead of zeroinitializer)
         GV.setInitializer(UndefValue::get(GV.getValueType()));
       }
+    }
+
+    // rename __air_sampler_state to have ascending names
+    uint32_t sampler_state_count = 0u;
+    for (auto &GV : cloned_mod->globals()) {
+      if (!GV.hasName() || !GV.getName().startswith("__air_sampler_state")) {
+        continue;
+      }
+      if (sampler_state_count == 0) {
+        GV.setName("__air_sampler_state");
+      } else {
+        GV.setName("__air_sampler_state." +
+                   std::to_string(sampler_state_count));
+      }
+      ++sampler_state_count;
     }
 
     // extract tessellation info

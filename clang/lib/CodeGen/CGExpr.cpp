@@ -4336,7 +4336,7 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
   llvm::Type* elem_type = Addr.getType()->getPointerElementType();
   const RecordDecl *rec = field->getParent();
   const CGRecordLayout &RL = CGM.getTypes().getCGRecordLayout(rec, elem_type);
-  const auto is_flattened_struct = CGM.getTypes().is_flattened_struct_type(elem_type);
+  const auto is_flattened_struct = CGM.getTypes().is_flattened_struct_type(rec, elem_type);
 
   if (field->isBitField()) {
     const CGBitFieldInfo &Info = RL.getBitFieldInfo(field);
