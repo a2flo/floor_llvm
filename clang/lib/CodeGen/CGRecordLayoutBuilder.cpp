@@ -1075,7 +1075,9 @@ void CodeGenTypes::create_flattened_cg_layout(const CXXRecordDecl* D, llvm::Stru
 	// for all parents (include "D"), add a direct entry to the RL + LLVM type
 	for (const auto& parent_decl : parent_decls) {
 		FlattenedCGRecordLayouts.insert({ parent_decl, { Ty, RL } });
+#ifndef NDEBUG
 		should_have_flattened_layout.insert({ Ty });
+#endif
 		if (is_floor_arg_buffer) {
 			FlattenedFloorArgBufferRecords.insert({ parent_decl, Ty });
 		} else {
