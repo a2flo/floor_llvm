@@ -175,6 +175,8 @@ def PTX90 : SubtargetFeature<"ptx90", "PTXVersion", "90",
                              "Use PTX version 9.0">;
 def PTX91 : SubtargetFeature<"ptx91", "PTXVersion", "91",
                              "Use PTX version 9.1">;
+def PTX92 : SubtargetFeature<"ptx92", "PTXVersion", "92",
+                             "Use PTX version 9.2">;
 
 //===----------------------------------------------------------------------===//
 // NVPTX supported processors.
