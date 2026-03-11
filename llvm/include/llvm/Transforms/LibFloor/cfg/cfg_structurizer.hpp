@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ 09b2677af3535316a8b98ac0a4dd01b96577718b
+// @ d05d96b263daa4fb347f58a8ff4367e1aad023fe
 //
 //===----------------------------------------------------------------------===//
 
@@ -109,6 +109,7 @@ private:
 
   struct LoopMergeAnalysis {
     CFGNode *merge;
+    CFGNode *weak_merge;
     CFGNode *dominated_merge;
     CFGNode *infinite_continue_ladder;
   };
@@ -123,6 +124,7 @@ private:
 
   static bool is_ordered(const CFGNode *a, const CFGNode *b, const CFGNode *c);
   bool serialize_interleaved_merge_scopes();
+  bool serialize_interleaved_early_returns();
   void split_merge_scopes();
   bool is_rewind_candidate_split_node(
       const std::vector<const CFGNode *> &visited_orphans, CFGNode *node,
@@ -311,8 +313,7 @@ private:
                                     bool collect_all_code_paths_to_pdom);
 
   void collect_and_dispatch_control_flow_from_anchor(
-      CFGNode *anchor, CFGNode *common_pdom,
-      const std::vector<CFGNode *> &constructs);
+      CFGNode *anchor, const std::vector<CFGNode *> &constructs);
 
   void sink_ssa_constructs();
   void sink_ssa_constructs_run(bool dry_run);

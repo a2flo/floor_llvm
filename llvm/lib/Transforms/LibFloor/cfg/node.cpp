@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ 09b2677af3535316a8b98ac0a4dd01b96577718b
+// @ d05d96b263daa4fb347f58a8ff4367e1aad023fe
 //
 //===----------------------------------------------------------------------===//
 
@@ -107,6 +107,25 @@ bool CFGNode::reaches_domination_frontier_before_merge(
       return true;
     }
   }
+  return false;
+}
+
+bool CFGNode::dominates_outer_continue(const CFGNode *loop_header) const {
+  if (loop_header->pred.empty())
+    return false;
+
+  loop_header = loop_header->immediate_dominator;
+  while (loop_header) {
+    if (loop_header->pred_back_edge && dominates(loop_header->pred_back_edge)) {
+      return true;
+    }
+
+    if (loop_header->pred.empty()) {
+      break;
+    }
+    loop_header = loop_header->immediate_dominator;
+  }
+
   return false;
 }
 
@@ -227,7 +246,7 @@ bool CFGNode::post_dominates_any_work(
   return false;
 }
 
-bool CFGNode::post_dominates_any_work() const {
+unsigned CFGNode::count_post_dominates_work_from_incoming_preds() const {
   auto *start_node = this;
   // Trivial back-trace as far as we can go.
   while (start_node->pred.size() == 1 && start_node->ir.operations.empty() &&
@@ -240,13 +259,19 @@ bool CFGNode::post_dominates_any_work() const {
     return true;
   }
 
+  unsigned num_post_dominated_preds = 0;
   std::unordered_set<const CFGNode *> node_cache;
+
   for (auto *p : start_node->pred) {
     if (start_node->post_dominates_any_work(p, node_cache)) {
-      return true;
+      ++num_post_dominated_preds;
     }
   }
-  return false;
+  return num_post_dominated_preds;
+}
+
+bool CFGNode::post_dominates_any_work() const {
+  return count_post_dominates_work_from_incoming_preds() != 0;
 }
 
 bool CFGNode::post_dominates(const CFGNode *start_node) const {
@@ -320,9 +345,9 @@ CFGNode *CFGNode::find_common_post_dominator(CFGNode *a, CFGNode *b) {
       // the entire CFG, so as a fallback we can do direct reachability and
       // domination analysis.
       if (b->post_dominates(a))
-        return const_cast<CFGNode *>(b);
+        return b;
       else if (a->post_dominates(b))
-        return const_cast<CFGNode *>(a);
+        return a;
 
       // If there is no clear domination relationship, then we need to iterate
       // both a and b. This is fine as we now know that neither a nor b can be
@@ -339,7 +364,8 @@ CFGNode *CFGNode::find_common_post_dominator(CFGNode *a, CFGNode *b) {
       b = b->immediate_post_dominator;
     }
   }
-  return const_cast<CFGNode *>(a);
+
+  return a;
 }
 
 CFGNode *CFGNode::find_common_dominator(CFGNode *a, CFGNode *b) {

@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ 09b2677af3535316a8b98ac0a4dd01b96577718b
+// @ d05d96b263daa4fb347f58a8ff4367e1aad023fe
 //
 //===----------------------------------------------------------------------===//
 
@@ -142,6 +142,7 @@ private:
   bool has_pred_back_edges() const;
   bool dominates(const CFGNode *other) const;
   bool reaches_domination_frontier_before_merge(const CFGNode *merge) const;
+  bool dominates_outer_continue(const CFGNode *loop_header) const;
   bool can_loop_merge_to(const CFGNode *other) const;
   bool post_dominates(const CFGNode *other) const;
   bool post_dominates_perfect_structured_construct() const;
@@ -158,6 +159,7 @@ private:
       const CFGNode *parent, const std::vector<CFGNode *> &block_nodes,
       std::unordered_set<const CFGNode *> &node_cache) const;
   bool post_dominates_any_work() const;
+  unsigned count_post_dominates_work_from_incoming_preds() const;
   bool post_dominates_any_work(
       const CFGNode *parent,
       std::unordered_set<const CFGNode *> &node_cache) const;
