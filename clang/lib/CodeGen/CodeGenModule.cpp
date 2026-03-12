@@ -8253,7 +8253,7 @@ llvm::Type* CodeGenModule::GraphicsExpandIOType(const QualType& type,
 												llvm::Type* llvm_type,
 												CodeGenTypes& CGT,
 												const bool create_packed,
-												const bool create_unnamed_if_multi_field,
+												const bool create_unnamed,
 												const bool is_floor_arg_buffer) {
 	const llvm::StructType* ST = dyn_cast<llvm::StructType>(llvm_type);
 	if(!ST) return llvm_type;
@@ -8303,7 +8303,7 @@ llvm::Type* CodeGenModule::GraphicsExpandIOType(const QualType& type,
 	}
 	
 	llvm::StructType* ret = nullptr;
-	if (!create_unnamed_if_multi_field || llvm_fields.size() <= 1) {
+	if (!create_unnamed) {
 		std::string name = "struct.floor.flat.";
 		if (is_vk_floor_arg_buffer) {
 			name += "arg_buffer.";

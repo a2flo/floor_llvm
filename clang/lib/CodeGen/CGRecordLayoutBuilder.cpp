@@ -1072,18 +1072,20 @@ void CodeGenTypes::create_flattened_cg_layout(const CXXRecordDecl* D, llvm::Stru
 		RL->FieldInfo.insert({ field.field_decl, field_idx++ });
 	}
 	
-	// for all parents (include "D"), add a direct entry to the RL + LLVM type
+	// for all parents (including "D"), add a direct entry to the RL + LLVM type
 	for (const auto& parent_decl : parent_decls) {
 		FlattenedCGRecordLayouts.insert({ parent_decl, { Ty, RL } });
-#ifndef NDEBUG
-		should_have_flattened_layout.insert({ Ty });
-#endif
-		if (is_floor_arg_buffer) {
-			FlattenedFloorArgBufferRecords.insert({ parent_decl, Ty });
-		} else {
-			FlattenedRecords.insert({ parent_decl, Ty });
-		}
 	}
+	// only add "D" to the direct flattended records
+	if (is_floor_arg_buffer) {
+		FlattenedFloorArgBufferRecords.insert({ D, Ty });
+	} else {
+		FlattenedRecords.insert({ D, Ty });
+	}
+	
+#ifndef NDEBUG
+	should_have_flattened_layout.insert({ Ty });
+#endif
 	
 	// for all bases, add an "allowed" alias for this LLVM type + associate its RL
 	for (const auto& base_alias_decl : base_alias_decls) {
