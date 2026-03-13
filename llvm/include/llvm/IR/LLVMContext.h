@@ -311,6 +311,17 @@ public:
   /// Whether typed pointers are supported. If false, all pointers are opaque.
   bool supportsTypedPointers() const;
 
+  /// LLVM libfloor options
+  struct libfloor_options_t {
+    //! emit an error when there still is an alloca at the end of all optimizations
+    uint32_t error_on_alloca : 1;
+    //! emit an error when there still is an alloca with a pointer type at the end of all optimizations
+    uint32_t error_on_ptr_type_alloca : 1;
+    uint32_t unused : 30;
+  };
+  const libfloor_options_t& get_libfloor_options() const;
+  libfloor_options_t& get_libfloor_options();
+
 private:
   // Module needs access to the add/removeModule methods.
   friend class Module;

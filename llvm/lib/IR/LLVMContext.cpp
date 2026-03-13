@@ -355,3 +355,10 @@ void LLVMContext::enableOpaquePointers() const {
 bool LLVMContext::supportsTypedPointers() const {
   return !pImpl->getOpaquePointers();
 }
+
+const LLVMContext::libfloor_options_t& LLVMContext::get_libfloor_options() const {
+	return pImpl->libfloor_options;
+}
+LLVMContext::libfloor_options_t& LLVMContext::get_libfloor_options() {
+	return pImpl->libfloor_options;
+}

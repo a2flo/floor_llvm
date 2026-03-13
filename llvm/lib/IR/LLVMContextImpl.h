@@ -1557,6 +1557,12 @@ public:
   bool getOpaquePointers();
   void setOpaquePointers(bool OP);
 
+  LLVMContext::libfloor_options_t libfloor_options {
+    .error_on_alloca = 0u,
+    .error_on_ptr_type_alloca = 0u,
+    .unused = 0u,
+  };
+
 private:
   Optional<bool> OpaquePointers;
 };

@@ -97,6 +97,17 @@ struct FloorModuleCleanup : public ModulePass, InstVisitor<FloorModuleCleanup> {
 		}
 	}
 	
+	
+	void visitAlloca(AllocaInst& alloca) {
+		if (ctx->get_libfloor_options().error_on_alloca) {
+			ctx->emitError(&alloca, "leftover alloca after optimization");
+		}
+		if (ctx->get_libfloor_options().error_on_ptr_type_alloca &&
+			alloca.getAllocatedType()->isPointerTy()) {
+			ctx->emitError(&alloca, "leftover alloca with a pointer type after optimization");
+		}
+	}
+	
 	bool runOnModule(Module& Mod) override {
 		M = &Mod;
 		ctx = &M->getContext();

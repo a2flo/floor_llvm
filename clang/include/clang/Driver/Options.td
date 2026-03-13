@@ -5943,6 +5943,10 @@ def floor_function_info : Joined<["-"], "floor-function-info=">,
   HelpText<"floor function info output file">;
 def floor_image_capabilities : Joined<["-"], "floor-image-capabilities=">,
   HelpText<"image read and write capabilities">;
+def floor_error_on_alloca : Flag<["-"], "floor-error-on-alloca">,
+  HelpText<"emit an error when there still is an alloca at the end of all optimizations">;
+def floor_error_on_ptr_type_alloca : Flag<["-"], "floor-error-on-ptr-type-alloca">,
+  HelpText<"emit an error when there still is an alloca with a pointer type at the end of all optimizations">;
 
 //===----------------------------------------------------------------------===//
 // OpenCL Options

@@ -1857,6 +1857,8 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
   Opts.GraphicsBarycentricCoord = Args.hasArg(OPT_graphics_barycentric_coord);
   Opts.floor_generating_spirv = (Args.hasArg(OPT_emit_spirv) ||
                                  Args.hasArg(OPT_emit_spirv_container));
+  Opts.LibFloorErrorOnAlloca = Args.hasArg(OPT_floor_error_on_alloca);
+  Opts.LibFloorErrorOnPtrTypeAlloca = Args.hasArg(OPT_floor_error_on_ptr_type_alloca);
 
   if (Args.getLastArg(OPT_femulated_tls) ||
       Args.getLastArg(OPT_fno_emulated_tls)) {

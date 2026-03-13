@@ -322,6 +322,14 @@ namespace clang {
       Ctx.setDiagnosticHandler(std::make_unique<ClangDiagnosticHandler>(
         CodeGenOpts, this));
 
+      // handle libfloor options for the backend / LLVM context
+      if (CodeGenOpts.LibFloorErrorOnAlloca) {
+        Ctx.get_libfloor_options().error_on_alloca = 1;
+      }
+      if (CodeGenOpts.LibFloorErrorOnPtrTypeAlloca) {
+        Ctx.get_libfloor_options().error_on_ptr_type_alloca = 1;
+      }
+
       Expected<std::unique_ptr<llvm::ToolOutputFile>> OptRecordFileOrErr =
           setupLLVMOptimizationRemarks(
               Ctx, CodeGenOpts.OptRecordFile, CodeGenOpts.OptRecordPasses,
