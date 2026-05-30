@@ -180,6 +180,8 @@ enum OpenCLTypeKind : uint8_t {
   OCLTK_ReserveID,
   OCLTK_Sampler,
   OCLTK_PatchControlPoint,
+  OCLTK_Mesh,
+  OCLTK_MeshGridProperties,
 };
 
 /// Exposes information about the current target.

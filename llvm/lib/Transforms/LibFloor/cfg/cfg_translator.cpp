@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 - 2025 Florian Ziesche
+ * Copyright 2021 - 2026 Florian Ziesche
  *
  * SPDX-License-Identifier: MIT
  *
@@ -69,6 +69,8 @@ static inline Terminator::Type get_terminator_type(Instruction &instr) {
       auto func_name = CI->getCalledFunction()->getName();
       if (func_name == "floor.discard_fragment") {
         return Terminator::Type::Kill;
+      } else if (func_name == "floor.mesh.emit_tasks") {
+        return Terminator::Type::MeshEmitTasks;
       } else if (func_name == "floor.exit") {
         return Terminator::Type::Exit;
       }
@@ -130,6 +132,7 @@ void cfg_translator::translate_bb(CFGNode &node) {
       case Terminator::Type::Unreachable:
       case Terminator::Type::Kill:
       case Terminator::Type::Exit:
+      case Terminator::Type::MeshEmitTasks:
         // NOTE: we don't have a specific terminator for Kill/Exit instructions
         // (reuses Unreachable)
         break;
@@ -295,6 +298,9 @@ void cfg_translator::add_or_update_terminator(CFGNode &node) {
     }
     break;
   }
+  case Terminator::Type::MeshEmitTasks: {
+    assert(false && "should not be here");
+  }
   }
 }
 
@@ -353,6 +359,7 @@ void cfg_translator::cfg_to_llvm_ir(CFGNode *updated_entry_block,
         case Terminator::Type::Unreachable:
         case Terminator::Type::Kill:
         case Terminator::Type::Exit:
+        case Terminator::Type::MeshEmitTasks:
           // no operands to check
           break;
         case Terminator::Type::Switch: {

@@ -330,6 +330,11 @@ public:
     case OCLTK_PatchControlPoint:
       return LangAS::opencl_global;
 
+    case OCLTK_Mesh:
+      return LangAS::metal_mesh;
+    case OCLTK_MeshGridProperties:
+      return LangAS::opencl_local;
+
     default:
       return TargetInfo::getOpenCLTypeAddrSpace(TK);
     }

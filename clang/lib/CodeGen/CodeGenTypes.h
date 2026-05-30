@@ -49,6 +49,20 @@ class CGRecordLayout;
 class CodeGenModule;
 class RequiredArgs;
 
+struct type_conversion_opts_t {
+  //! perform a deep graphics I/O type conversion
+  //! NOTE: this implies "vector_compat_conversion"
+  bool io_type_conversion { false };
+  //! directly convert struct types containing image/buffer arrays to native LLVM arrays
+  bool convert_array_image_or_buffer_type { true };
+  //! directly convert struct types containing arrays to native LLVM arrays
+  bool convert_array_type { false };
+  //! only single field array images/buffers should be convertible to an array image/buffer type
+  bool single_field_array_image_or_buffer_only { true };
+  //! struct types marked with a vector compat attribute should be converted to an LLVM vector type
+  bool vector_compat_conversion { false };
+};
+
 /// This class organizes the cross-module state that is used while lowering
 /// AST types to LLVM types.
 class CodeGenTypes {
@@ -89,6 +103,7 @@ class CodeGenTypes {
 
   /// Contains the LLVM IR type for any converted RecordDecl.
   llvm::DenseMap<const Type*, llvm::StructType *> RecordDeclTypes;
+  llvm::DenseMap<const Type*, llvm::StructType *> GraphicsIORecordDeclTypes;
 
   /// Hold memoized CGFunctionInfo results.
   llvm::FoldingSet<CGFunctionInfo> FunctionInfos;
@@ -138,12 +153,7 @@ public:
   CanQualType DeriveThisType(const CXXRecordDecl *RD, const CXXMethodDecl *MD);
 
   /// ConvertType - Convert type T into a llvm::Type.
-  /// "convert_array_image_or_buffer_type" signals if we want to directly convert struct
-  /// types containing image/buffer arrays to native LLVM arrays (default).
-  /// "single_field_array_image_or_buffer_only" signals that only single field array
-  /// images/buffers should be convertable to an array image/buffer type.
-  llvm::Type *ConvertType(QualType T, bool convert_array_image_or_buffer_type = true,
-                          bool single_field_array_image_or_buffer_only = true);
+  llvm::Type *ConvertType(QualType T, type_conversion_opts_t opts = type_conversion_opts_t {});
 
   /// ConvertTypeForMem - Convert type T into a llvm::Type.  This differs from
   /// ConvertType in that it is used to convert to the memory representation for
@@ -151,11 +161,9 @@ public:
   /// memory representation is usually i8 or i32, depending on the target.
   /// "ForRecordField" signals if this should be converted for a field type
   /// within a record/struct.
-  /// "single_field_array_image_or_buffer_only" signals that only single field array
-  /// images/buffers should be convertable to an array image/buffer type.
   llvm::Type *ConvertTypeForMem(QualType T, bool ForBitField = false,
                                 bool ForRecordField = false,
-                                bool single_field_array_image_or_buffer_only = true);
+                                type_conversion_opts_t opts = type_conversion_opts_t {});
 
   /// helper function to convert "Ty" into a graphics I/O type if it is one (returns nullptr otherwise),
   /// if "indirect_io_type_conversion" is true, this will also convert pointers/references to graphics I/O types
@@ -182,8 +190,7 @@ public:
   /// and/or incomplete argument types, this will return the opaque type.
   llvm::Type *GetFunctionTypeForVTable(GlobalDecl GD);
 
-  const CGRecordLayout &getCGRecordLayout(const RecordDecl*,
-										  llvm::Type* struct_type = nullptr);
+  const CGRecordLayout &getCGRecordLayout(const RecordDecl*, llvm::Type* struct_type = nullptr);
 
   /// Returns the flattend LLVM type of the specified CXX record decl,
   /// or nullptr if no flattened type exists.
@@ -305,12 +312,13 @@ public:
 
   /// Compute a new LLVM record layout object for the given record.
   std::unique_ptr<CGRecordLayout> ComputeRecordLayout(const RecordDecl *D,
-                                                      llvm::StructType *Ty);
+                                                      llvm::StructType *Ty,
+                                                      type_conversion_opts_t opts = type_conversion_opts_t {});
 
   /// addRecordTypeName - Compute a name from the given record decl with an
   /// optional suffix and name the given LLVM type using it.
   void addRecordTypeName(const RecordDecl *RD, llvm::StructType *Ty,
-                         StringRef suffix);
+                         StringRef suffix, const bool is_io_type);
 
   // will recurse through the specified class/struct decl, its base classes,
   // all its contained class/struct/union decls, all its contained arrays,
@@ -370,13 +378,24 @@ public:
 #endif
   }
 
+  /// Creates and returns a graphics backend (Metal/Vulkan) compatible I/O struct type from the specified clang "type".
+  /// If "create_unnamed" is true, this will create an unname struct type.
+  /// If "is_floor_arg_buffer" is true, argument buffer specific handling is enabled.
+  /// If "is_task_or_mesh" is true, task payload or mesh object specific handling is enabled.
+  llvm::Type* GraphicsExpandIOType(const QualType& type,
+                                   const bool create_unnamed = false,
+                                   const bool is_floor_arg_buffer = false,
+                                   const bool is_task_or_mesh = false);
+
 
 public:  // These are internal details of CGT that shouldn't be used externally.
   /// ConvertRecordDeclType - Lay out a tagged decl type like struct or union.
-  llvm::StructType *ConvertRecordDeclType(const RecordDecl *TD);
+  llvm::StructType *ConvertRecordDeclType(const RecordDecl *TD,
+                                          type_conversion_opts_t opts = type_conversion_opts_t {});
 
   llvm::Type *ConvertArrayImageType(const Type* Ty);
   llvm::Type *ConvertArrayBufferType(const Type* Ty);
+  llvm::Type *ConvertArrayType(const Type* Ty);
 
   /// getExpandedTypes - Expand the type \arg Ty into the LLVM
   /// argument types it would be passed as. See ABIArgInfo::Expand.

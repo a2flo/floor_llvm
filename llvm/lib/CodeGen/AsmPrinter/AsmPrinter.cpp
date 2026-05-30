@@ -472,6 +472,7 @@ void AsmPrinter::emitLinkage(const GlobalValue *GV, MCSymbol *GVSym) const {
       OutStreamer->emitSymbolAttribute(GVSym, MCSA_Weak);
     }
     return;
+  case GlobalValue::ExternallyRequiredLinkage:
   case GlobalValue::ExternalLinkage:
     OutStreamer->emitSymbolAttribute(GVSym, MCSA_Global);
     return;

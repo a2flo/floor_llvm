@@ -8,8 +8,10 @@ add_llvm_component_library(LLVMLibFloor
   FloorModuleCleanup.cpp
   FloorImage.cpp
   LibFloor.cpp
+  MeshShading.cpp
   MetalFinal.cpp
   MetalImage.cpp
+  PointerBCFixup.cpp
   PropagateCoherency.cpp
   PropagateRangeInfo.cpp
   SPIRFinal.cpp

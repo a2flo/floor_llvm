@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 - 2025 Florian Ziesche
+ * Copyright 2021 - 2026 Florian Ziesche
  *
  * SPDX-License-Identifier: MIT
  *

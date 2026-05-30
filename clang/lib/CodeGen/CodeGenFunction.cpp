@@ -211,12 +211,12 @@ CodeGenFunction::MakeNaturalAlignPointeeAddrLValue(llvm::Value *V, QualType T) {
 }
 
 
-llvm::Type *CodeGenFunction::ConvertTypeForMem(QualType T) {
-  return CGM.getTypes().ConvertTypeForMem(T);
+llvm::Type *CodeGenFunction::ConvertTypeForMem(QualType T, type_conversion_opts_t opts) {
+  return CGM.getTypes().ConvertTypeForMem(T, false, false, opts);
 }
 
-llvm::Type *CodeGenFunction::ConvertType(QualType T) {
-  return CGM.getTypes().ConvertType(T);
+llvm::Type *CodeGenFunction::ConvertType(QualType T, type_conversion_opts_t opts) {
+  return CGM.getTypes().ConvertType(T, opts);
 }
 
 TypeEvaluationKind CodeGenFunction::getEvaluationKind(QualType type) {
@@ -611,7 +611,9 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
       !FD->hasAttr<GraphicsVertexShaderAttr>() &&
 	  !FD->hasAttr<GraphicsFragmentShaderAttr>() &&
 	  !FD->hasAttr<GraphicsTessellationControlShaderAttr>() &&
-	  !FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
+	  !FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>() &&
+	  !FD->hasAttr<GraphicsTaskShaderAttr>() &&
+	  !FD->hasAttr<GraphicsMeshShaderAttr>()) {
     return;
   }
 
@@ -746,10 +748,20 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
     MainMetadataNode = CGM.getModule().getOrInsertNamedMetadata("opencl.kernels");
   } else {
     // NOTE: tess control acts as a kernel, tess eval as a vertex shader
-    MainMetadataNode = CGM.getModule().getOrInsertNamedMetadata(
-      (FD->hasAttr<GraphicsVertexShaderAttr>() ||
-       FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>() ? "air.vertex" :
-       (FD->hasAttr<GraphicsFragmentShaderAttr>() ? "air.fragment" : "air.kernel")));
+    const char* node_name = nullptr;
+    if (FD->hasAttr<GraphicsVertexShaderAttr>() ||
+        FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
+      node_name = "air.vertex";
+    } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
+      node_name = "air.fragment";
+    } else if (FD->hasAttr<GraphicsTaskShaderAttr>()) {
+      node_name = "air.object";
+    } else if (FD->hasAttr<GraphicsMeshShaderAttr>()) {
+      node_name = "air.mesh";
+    } else {
+      node_name = "air.kernel";
+    }
+    MainMetadataNode = CGM.getModule().getOrInsertNamedMetadata(node_name);
   }
   MainMetadataNode->addOperand(kernelMDNode);
 
@@ -790,6 +802,11 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
   // add Vulkan untyped pointers info
   if (CGM.getCodeGenOpts().VulkanUntypedPointers) {
     CGM.getModule().getOrInsertNamedMetadata("floor.vulkan_untyped_pointers");
+  }
+
+  // add Vulkan mesh shading info
+  if (CGM.getCodeGenOpts().VulkanMeshShading) {
+    CGM.getModule().getOrInsertNamedMetadata("floor.vulkan_mesh_shading");
   }
 
   // signal that we're generating SPIR-V in the end

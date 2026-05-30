@@ -325,6 +325,10 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
       if (!GO.isDiscardableIfUnused())
         MarkLive(GO);
 
+    if (GO.isRequired()) {
+      MarkLive(GO);
+    }
+
     UpdateGVDependencies(GO);
   }
 

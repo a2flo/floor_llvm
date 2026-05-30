@@ -731,6 +731,25 @@ static void instantiateDependentComputeKernelSIMDWidthAttr(
     S.AddComputeKernelSIMDWidthAttr(A->getLocation(), New, Result.getAs<Expr>(), *A);
 }
 
+static void instantiateDependentMeshMaxWorkGroupsAttr(
+    Sema &S, const MultiLevelTemplateArgumentList &TemplateArgs,
+    const MeshMaxWorkGroupsAttr *A, const Decl *Tmpl, Decl *New) {
+  // TODO: check Tmpl with isPotentialConstantExprUnevaluated?
+  EnterExpressionEvaluationContext Unevaluated(S, Sema::ExpressionEvaluationContext::ConstantEvaluated);
+
+  Expr* count = nullptr;
+
+  if (A->getCount()) {
+    ExprResult ResultCount = S.SubstExpr(A->getCount(), TemplateArgs);
+    if (ResultCount.isInvalid()) {
+      return;
+    }
+    count = ResultCount.getAs<Expr>();
+  }
+
+  S.AddMeshMaxWorkGroupsAttr(A->getLocation(), New, count, *A);
+}
+
 void Sema::InstantiateAttrs(const MultiLevelTemplateArgumentList &TemplateArgs,
                             const Decl *Tmpl, Decl *New,
                             LateInstantiatedAttrVec *LateAttrs,
@@ -877,6 +896,11 @@ void Sema::InstantiateAttrs(const MultiLevelTemplateArgumentList &TemplateArgs,
 
     if (auto *KernelSIMDWidth = dyn_cast<ComputeKernelSIMDWidthAttr>(TmplAttr)) {
       instantiateDependentComputeKernelSIMDWidthAttr(*this, TemplateArgs, KernelSIMDWidth, Tmpl, New);
+      continue;
+    }
+
+    if (auto *MeshMaxWorkGroups = dyn_cast<MeshMaxWorkGroupsAttr>(TmplAttr)) {
+      instantiateDependentMeshMaxWorkGroupsAttr(*this, TemplateArgs, MeshMaxWorkGroups, Tmpl, New);
       continue;
     }
 

@@ -942,6 +942,9 @@ static const LangASMap *getAddressSpaceMap(const TargetInfo &T,
         100,  // opencl_global_device
         101,  // opencl_global_host
         0,  // vulkan_input
+        0,  // vulkan_output
+        0,  // metal_mesh
+        0,  // task_payload
         7,  // cuda_device
         8,  // cuda_constant
         9,  // cuda_shared
@@ -1437,6 +1440,8 @@ void ASTContext::InitBuiltinTypes(const TargetInfo &Target,
     InitBuiltinType(OCLQueueTy, BuiltinType::OCLQueue);
     InitBuiltinType(OCLReserveIDTy, BuiltinType::OCLReserveID);
     InitBuiltinType(OCLPatchControlPointTy, BuiltinType::OCLPatchControlPoint);
+    InitBuiltinType(OCLMeshTy, BuiltinType::OCLMesh);
+    InitBuiltinType(OCLMeshGridPropertiesTy, BuiltinType::OCLMeshGridProperties);
 
 #define EXT_OPAQUE_TYPE(ExtType, Id, Ext) \
     InitBuiltinType(Id##Ty, BuiltinType::Id);
@@ -2197,6 +2202,8 @@ TypeInfo ASTContext::getTypeInfoImpl(const Type *T) const {
     case BuiltinType::OCLQueue:
     case BuiltinType::OCLReserveID:
     case BuiltinType::OCLPatchControlPoint:
+    case BuiltinType::OCLMesh:
+    case BuiltinType::OCLMeshGridProperties:
 #define IMAGE_TYPE(ImgType, Id, SingletonId, Access, Suffix) \
     case BuiltinType::Id:
 #include "clang/Basic/OpenCLImageTypes.def"
@@ -7310,6 +7317,12 @@ OpenCLTypeKind ASTContext::getOpenCLTypeKind(const Type *T) const {
   case BuiltinType::OCLPatchControlPoint:
     return OCLTK_PatchControlPoint;
 
+  case BuiltinType::OCLMesh:
+    return OCLTK_Mesh;
+
+  case BuiltinType::OCLMeshGridProperties:
+    return OCLTK_MeshGridProperties;
+
   default:
     return OCLTK_Default;
   }
@@ -7888,6 +7901,8 @@ static char getObjCEncodingForPrimitiveType(const ASTContext *C,
     case BuiltinType::OCLReserveID:
     case BuiltinType::OCLSampler:
     case BuiltinType::OCLPatchControlPoint:
+    case BuiltinType::OCLMesh:
+    case BuiltinType::OCLMeshGridProperties:
     case BuiltinType::Dependent:
 #define PPC_VECTOR_TYPE(Name, Id, Size) \
     case BuiltinType::Id:
@@ -12513,7 +12528,7 @@ ASTContext::get_aggregate_scalar_fields(const CXXRecordDecl* root_decl,
 					false
 				});
 			} else if (rdecl->hasAttr<VectorCompatAttr>() ||
-			    field_iter->hasAttr<GraphicsVertexPositionAttr>()) {
+					   field_iter->hasAttr<GraphicsVertexPositionAttr>()) {
 				const auto vec_type = get_compat_vector_type(rdecl);
 				
 				if (field_iter->hasAttr<GraphicsVertexPositionAttr>()) {
@@ -12539,9 +12554,7 @@ ASTContext::get_aggregate_scalar_fields(const CXXRecordDecl* root_decl,
 																 expand_array_other, merge_parent_field_decl);
 				// if we got a singular field (an we're the direct parent) and "merge_parent_field_decl" is enabled,
 				// overwrite the field decl with the current field decl (the parent)
-				if (merge_parent_field_decl &&
-					contained_ret.size() == 1 &&
-					contained_ret[0].parents.size() <= 1) {
+				if (merge_parent_field_decl && contained_ret.size() == 1) {
 					contained_ret[0].field_decl = *field_iter;
 					contained_ret[0].name = field_iter->getName().str();
 				}

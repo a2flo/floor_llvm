@@ -55,7 +55,8 @@ public:
     InternalLinkage,    ///< Rename collisions when linking (static functions).
     PrivateLinkage,     ///< Like Internal, but omit from symbol table.
     ExternalWeakLinkage,///< ExternalWeak linkage description.
-    CommonLinkage       ///< Tentative definitions.
+    CommonLinkage,       ///< Tentative definitions.
+    ExternallyRequiredLinkage,///< linkage to specify the GV must never be removed even if unused
   };
 
   /// An enumeration for the kinds of visibility of global values.
@@ -140,6 +141,7 @@ private:
     case AppendingLinkage:
     case InternalLinkage:
     case PrivateLinkage:
+    case ExternallyRequiredLinkage:
       return isInterposable();
     }
 
@@ -339,11 +341,14 @@ public:
   static bool isExternalWeakLinkage(LinkageTypes Linkage) {
     return Linkage == ExternalWeakLinkage;
   }
+  static bool isExternallyRequiredLinkage(LinkageTypes Linkage) {
+    return Linkage == ExternallyRequiredLinkage;
+  }
   static bool isCommonLinkage(LinkageTypes Linkage) {
     return Linkage == CommonLinkage;
   }
   static bool isValidDeclarationLinkage(LinkageTypes Linkage) {
-    return isExternalWeakLinkage(Linkage) || isExternalLinkage(Linkage);
+    return isExternalWeakLinkage(Linkage) || isExternalLinkage(Linkage) || isExternallyRequiredLinkage(Linkage);
   }
 
   /// Whether the definition of this global may be replaced by something
@@ -355,6 +360,7 @@ public:
     case LinkOnceAnyLinkage:
     case CommonLinkage:
     case ExternalWeakLinkage:
+    case ExternallyRequiredLinkage:
       return true;
 
     case AvailableExternallyLinkage:
@@ -371,9 +377,19 @@ public:
     llvm_unreachable("Fully covered switch above!");
   }
 
+  bool isRequired() const {
+    return (Linkage == ExternallyRequiredLinkage);
+  }
+  static bool isRequired(LinkageTypes Linkage) {
+    return (Linkage == ExternallyRequiredLinkage);
+  }
+
   /// Whether the definition of this global may be discarded if it is not used
   /// in its compilation unit.
   static bool isDiscardableIfUnused(LinkageTypes Linkage) {
+    if (isRequired(Linkage)) {
+      return false;
+    }
     return isLinkOnceLinkage(Linkage) || isLocalLinkage(Linkage) ||
            isAvailableExternallyLinkage(Linkage);
   }
@@ -385,7 +401,8 @@ public:
   static bool isWeakForLinker(LinkageTypes Linkage)  {
     return Linkage == WeakAnyLinkage || Linkage == WeakODRLinkage ||
            Linkage == LinkOnceAnyLinkage || Linkage == LinkOnceODRLinkage ||
-           Linkage == CommonLinkage || Linkage == ExternalWeakLinkage;
+           Linkage == CommonLinkage || Linkage == ExternalWeakLinkage ||
+           Linkage == ExternallyRequiredLinkage;
   }
 
   /// Return true if the currently visible definition of this global (if any) is

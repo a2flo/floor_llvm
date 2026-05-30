@@ -2421,6 +2421,8 @@ void Verifier::visitFunction(const Function &F) {
   }
   case CallingConv::AMDGPU_KERNEL:
   case CallingConv::FLOOR_KERNEL:
+  case CallingConv::FLOOR_TASK:
+  case CallingConv::FLOOR_MESH:
     Assert(F.getReturnType()->isVoidTy(),
            "Calling convention requires void return type", &F);
     LLVM_FALLTHROUGH;

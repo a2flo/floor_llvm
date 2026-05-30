@@ -3135,6 +3135,10 @@ StringRef BuiltinType::getName(const PrintingPolicy &Policy) const {
     return "reserve_id_t";
   case OCLPatchControlPoint:
     return "__patch_control_point_t";
+  case OCLMesh:
+    return "__mesh_t";
+  case OCLMeshGridProperties:
+    return "__mesh_grid_properties_t";
   case IncompleteMatrixIdx:
     return "<incomplete matrix index type>";
   case OMPArraySection:
@@ -3208,6 +3212,8 @@ StringRef FunctionType::getNameForCallConv(CallingConv CC) {
   case CC_FloorFragment: return "floor_fragment";
   case CC_FloorTessControl: return "floor_tessellation_control";
   case CC_FloorTessEval: return "floor_tessellation_evaluation";
+  case CC_FloorTask: return "floor_task";
+  case CC_FloorMesh: return "floor_mesh";
   case CC_Swift: return "swiftcall";
   case CC_SwiftAsync: return "swiftasynccall";
   case CC_PreserveMost: return "preserve_most";
@@ -3650,6 +3656,8 @@ bool AttributedType::isCallingConv() const {
   case attr::GraphicsFragmentShader:
   case attr::GraphicsTessellationControlShader:
   case attr::GraphicsTessellationEvaluationShader:
+  case attr::GraphicsTaskShader:
+  case attr::GraphicsMeshShader:
   case attr::ComputeKernel:
     return true;
   }
@@ -4198,6 +4206,8 @@ bool Type::canHaveNullability(bool ResultIfUnknown) const {
     case BuiltinType::OCLQueue:
     case BuiltinType::OCLReserveID:
     case BuiltinType::OCLPatchControlPoint:
+    case BuiltinType::OCLMesh:
+    case BuiltinType::OCLMeshGridProperties:
 #define SVE_TYPE(Name, Id, SingletonId) \
     case BuiltinType::Id:
 #include "clang/Basic/AArch64SVEACLETypes.def"
@@ -4656,4 +4666,217 @@ bool Type::isArrayBufferType() const {
     return false;
   }
   return (elem_type->getPointeeType().getAddressSpace() != LangAS::Default);
+}
+
+bool Type::isAggregateArrayType() const {
+  // simple C-style array?
+  if (isArrayType()) {
+    return true;
+  }
+
+  // if not a C array: must be struct or class, union is not allowed
+  if (!isStructureOrClassType()) return false;
+
+  // must be a cxx rdecl
+  const auto decl = getAsCXXRecordDecl();
+  if (!decl) return false;
+
+  // must have definition
+  if (!decl->hasDefinition()) return false;
+
+  // must have exactly one field
+  const auto field_count = std::distance(decl->field_begin(), decl->field_end());
+  if (field_count != 1) return false;
+
+  // field must be an (aggregate) array (may nest)
+  return decl->field_begin()->getType()->isAggregateArrayType();
+}
+
+bool Type::isMeshType() const {
+	// must be struct or class, union is not allowed
+	if (!isStructureOrClassType()) {
+		return false;
+	}
+	
+	const auto decl = getAsCXXRecordDecl();
+	if (!decl) {
+		return false;
+	}
+	
+	// * union is not allowed
+	// * must have a definition
+	// * must have exactly one field
+	// * must have no bases
+	// * field must be a mesh type
+	if (decl->isUnion() ||
+		!decl->hasDefinition() ||
+		std::distance(decl->field_begin(), decl->field_end()) != 1 ||
+		decl->getNumBases() != 0 ||
+		!decl->field_begin()->getType()->isMeshT()) {
+		return false;
+	}
+	// all passed
+	return true;
+}
+
+bool Type::isMeshGridPropertiesType() const {
+	// must be struct or class, union is not allowed
+	if (!isStructureOrClassType()) {
+		return false;
+	}
+	
+	const auto decl = getAsCXXRecordDecl();
+	if (!decl) {
+		return false;
+	}
+	
+	// * union is not allowed
+	// * must have a definition
+	// * must have exactly one field
+	// * must have no bases
+	// * field must be a mesh grid properties type
+	if (decl->isUnion() ||
+		!decl->hasDefinition() ||
+		std::distance(decl->field_begin(), decl->field_end()) != 1 ||
+		decl->getNumBases() != 0 ||
+		!decl->field_begin()->getType()->isMeshGridPropertiesT()) {
+		return false;
+	}
+	// all passed
+	return true;
+}
+
+static bool is_float4(const VectorType& vec_type) {
+	if (vec_type.getNumElements() != 4 || !vec_type.getElementType()->isFloatingType()) {
+		return false;
+	}
+	const auto BT = dyn_cast_or_null<BuiltinType>(vec_type.getElementType().getTypePtr());
+	return (!BT || BT->getKind() != BuiltinType::Kind::Float);
+}
+
+static const VectorType* get_underlying_vector_type(const QualType& type) {
+	if (const auto vec_type = dyn_cast_or_null<VectorType>(type.getTypePtr()); vec_type) {
+		return vec_type;
+	} else if (const auto cxx_rdecl = type->getAsCXXRecordDecl(); cxx_rdecl) {
+		if (!cxx_rdecl->hasAttr<VectorCompatAttr>()) {
+			return nullptr;
+		}
+		return dyn_cast_or_null<VectorType>(cxx_rdecl->getASTContext().get_compat_vector_type(cxx_rdecl).getTypePtr());
+	}
+	return nullptr;
+}
+
+static bool is_valid_mesh_scalar_type(const QualType& type, const bool is_bool_allowed) {
+	const auto BT = dyn_cast<BuiltinType>(type.getCanonicalType());
+	if (!BT) {
+		return false;
+	}
+	const auto kind = BT->getKind();
+	// NOTE: not all of these may be supported by the backend, but allow them for now
+	if (kind == BuiltinType::Kind::Char8 ||
+		kind == BuiltinType::Kind::UChar ||
+		kind == BuiltinType::Kind::Char16 ||
+		kind == BuiltinType::Kind::Char32 ||
+		kind == BuiltinType::Kind::Short ||
+		kind == BuiltinType::Kind::UShort ||
+		kind == BuiltinType::Kind::Int ||
+		kind == BuiltinType::Kind::UInt ||
+		kind == BuiltinType::Kind::Long ||
+		kind == BuiltinType::Kind::ULong ||
+		kind == BuiltinType::Kind::LongLong ||
+		kind == BuiltinType::Kind::ULongLong ||
+		kind == BuiltinType::Kind::Half ||
+		kind == BuiltinType::Kind::Float16 ||
+		kind == BuiltinType::Kind::BFloat16 ||
+		kind == BuiltinType::Kind::Float ||
+		(kind == BuiltinType::Kind::Bool && is_bool_allowed)) {
+		return true;
+	}
+	return false;
+}
+
+bool Type::IsValidMeshVertexType() const {
+	// * must be a float4 vector type
+	if (auto vec_type = get_underlying_vector_type(CanonicalType); vec_type) {
+		return is_float4(*vec_type);
+	}
+	
+	// * else: must be an aggregate (with additional requirements)
+	const auto cxx_rdecl = getAsCXXRecordDecl();
+	if (!cxx_rdecl) {
+		return false;
+	}
+	assert(!cxx_rdecl->hasAttr<VectorCompatAttr>()); // already handled above
+	const auto& ast_ctx = cxx_rdecl->getASTContext();
+	
+	// NOTE: same expansion as GraphicsExpandIOType for task/mesh usage, but we can't easily share this here
+	const auto fields = ast_ctx.get_aggregate_scalar_fields(cxx_rdecl, cxx_rdecl, nullptr, false, false, false,
+															/* do not expand image arrays if this is an arg buffer */
+															true,
+															/* do not expand non-image arrays if this is an arg buffer or task/mesh type */
+															false,
+															/* use array parent field decls for non-expanded arrays (-> unique) + singular childs */
+															true);
+	bool has_position = false;
+	for (const auto& field : fields) {
+		if (field.hasAttr<GraphicsVertexPositionAttr>()) {
+			// * must also be a float4
+			const auto pos_vec_type = get_underlying_vector_type(field.type);
+			if (!pos_vec_type || !is_float4(*pos_vec_type)) {
+				return false;
+			}
+			has_position = true;
+		} else {
+			// * must be a valid vector type (1D/2D/3D/4D) with a valid scalar element type (!bool)
+			// * or: must be a valid scalar element type (!bool)
+			if (const auto vec_type = get_underlying_vector_type(field.type); vec_type) {
+				if (vec_type->getNumElements() < 1u || vec_type->getNumElements() > 4u ||
+					!is_valid_mesh_scalar_type(vec_type->getElementType(), false)) {
+					return false;
+				}
+			} else if (!is_valid_mesh_scalar_type(field.type, false)) {
+				return false;
+			}
+		}
+	}
+	
+	return has_position;
+}
+
+bool Type::IsValidMeshPrimitiveType() const {
+	// * may be void (no primitive)
+	if (isVoidType()) {
+		return true;
+	}
+	
+	// * else: must be an aggregate (with additional requirements)
+	const auto cxx_rdecl = getAsCXXRecordDecl();
+	if (!cxx_rdecl) {
+		return false;
+	}
+	const auto& ast_ctx = cxx_rdecl->getASTContext();
+	
+	// NOTE: same expansion as GraphicsExpandIOType for task/mesh usage, but we can't easily share this here
+	const auto fields = ast_ctx.get_aggregate_scalar_fields(cxx_rdecl, cxx_rdecl, nullptr, false, false, false,
+															/* do not expand image arrays if this is an arg buffer */
+															true,
+															/* do not expand non-image arrays if this is an arg buffer or task/mesh type */
+															false,
+															/* use array parent field decls for non-expanded arrays (-> unique) + singular childs */
+															true);
+	
+	for (const auto& field : fields) {
+		// * must be a valid vector type (1D/2D/3D/4D) with a valid scalar element type (!bool)
+		// * or: must be a valid scalar element type (may be bool)
+		if (const auto vec_type = get_underlying_vector_type(field.type); vec_type) {
+			if (vec_type->getNumElements() < 1u || vec_type->getNumElements() > 4u ||
+				!is_valid_mesh_scalar_type(vec_type->getElementType(), false)) {
+				return false;
+			}
+		} else if (!is_valid_mesh_scalar_type(field.type, true)) {
+			return false;
+		}
+	}
+	
+	return true;
 }

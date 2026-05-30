@@ -1076,6 +1076,12 @@ enum PredefinedTypeIDs {
   /// \brief The '__patch_control_point_t' type
   PREDEF_TYPE_PATCH_CONTROL_POINT_ID = 75,
 
+  /// \brief The '__mesh_t' type
+  PREDEF_TYPE_MESH_ID = 76,
+
+  /// \brief The '__mesh_grid_properties_t' type
+  PREDEF_TYPE_MESH_GRID_PROPERTIES_ID = 77,
+
 /// OpenCL image types with auto numeration
 #define IMAGE_TYPE(ImgType, Id, SingletonId, Access, Suffix)                   \
   PREDEF_TYPE_##Id##_ID,

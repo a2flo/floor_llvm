@@ -2164,6 +2164,9 @@ public:
   bool isAggregateImageType() const;            // struct/class containing only image*_t members
   bool isArrayImageType(bool single_field_arr) const; // array of aggregate images
   bool isArrayBufferType() const;               // array of buffers
+  bool isAggregateArrayType() const;            // C array or aggregate containing one
+  bool isMeshType() const;                      // struct containing the Metal/Vulkan mesh type
+  bool isMeshGridPropertiesType() const;        // struct containing the Metal/Vulkan mesh grid properties type
 
   bool isSamplerT() const;                      // OpenCL sampler_t
   bool isEventT() const;                        // OpenCL event_t
@@ -2171,10 +2174,16 @@ public:
   bool isQueueT() const;                        // OpenCL queue_t
   bool isReserveIDT() const;                    // OpenCL reserve_id_t
   bool isExecType() const;                      // OpenCL 2.0 execution model types
-  bool isPatchControlPointT() const;            // Metal/Vulkan patch control point
+  bool isPatchControlPointT() const;            // Metal patch control point
+  bool isMeshT() const;                         // Metal/Vulkan mesh type
+  bool isMeshGridPropertiesT() const;           // Metal/Vulkan mesh grid properties type
 
   // libfloor argument buffer type (direct or with single ptr/ref indirection)
   bool isFloorArgBufferType() const;
+
+  // Metal/Vulkan mesh shading type traits
+  bool IsValidMeshVertexType() const;
+  bool IsValidMeshPrimitiveType() const;
 
 #define EXT_OPAQUE_TYPE(ExtType, Id, Ext) \
   bool is##Id##Type() const;
@@ -3627,7 +3636,8 @@ public:
   /// not produce the latter.
   class ExtParameterInfo {
     enum {
-      ABIMask = 0x0F,
+      ABIMask = 0x07,
+      IsFloorStageInput = 0x08,
       IsConsumed = 0x10,
       HasPassObjSize = 0x20,
       IsNoEscape = 0x40,
@@ -3679,6 +3689,13 @@ public:
     ExtParameterInfo withFloorArgBuffer() const {
       ExtParameterInfo Copy = *this;
       Copy.Data |= IsFloorArgBuffer;
+      return Copy;
+    }
+
+    bool isFloorStageInput() const { return Data & IsFloorStageInput; }
+    ExtParameterInfo withFloorStageInput() const {
+      ExtParameterInfo Copy = *this;
+      Copy.Data |= IsFloorStageInput;
       return Copy;
     }
 
@@ -6974,6 +6991,14 @@ inline bool Type::isPatchControlPointT() const {
   return isSpecificBuiltinType(BuiltinType::OCLPatchControlPoint);
 }
 
+inline bool Type::isMeshT() const {
+  return isSpecificBuiltinType(BuiltinType::OCLMesh);
+}
+
+inline bool Type::isMeshGridPropertiesT() const {
+  return isSpecificBuiltinType(BuiltinType::OCLMeshGridProperties);
+}
+
 inline bool Type::isFloorArgBufferType() const {
   if (hasAttr(attr::FloorArgBuffer)) {
     return true;
@@ -7024,7 +7049,8 @@ inline bool Type::isOCLExtOpaqueType() const {
 inline bool Type::isOpenCLSpecificType() const {
   return isSamplerT() || isEventT() || isImageType() || isClkEventT() ||
          isQueueT() || isReserveIDT() || isPipeType() || isOCLExtOpaqueType() ||
-         isPatchControlPointT() || isAggregateImageType();
+         isPatchControlPointT() || isAggregateImageType() ||
+         isMeshT() || isMeshGridPropertiesT();
 }
 
 inline bool Type::isTemplateTypeParmType() const {

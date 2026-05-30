@@ -844,6 +844,8 @@ void TypePrinter::printFunctionProtoBefore(const FunctionProtoType *T,
 
 StringRef clang::getParameterABISpelling(ParameterABI ABI) {
   switch (ABI) {
+  case ParameterABI::MaxParameterABI:
+    llvm_unreachable("invalid parameter ABI");
   case ParameterABI::Ordinary:
     llvm_unreachable("asking for spelling of ordinary parameter ABI");
   case ParameterABI::SwiftContext:
@@ -988,6 +990,12 @@ void TypePrinter::printFunctionAfter(const FunctionType::ExtInfo &Info,
       break;
     case CC_FloorTessEval:
       OS << "floor_tessellation_evaluation";
+      break;
+    case CC_FloorTask:
+      OS << "floor_task";
+      break;
+    case CC_FloorMesh:
+      OS << "floor_mesh";
       break;
     case CC_Swift:
       OS << " __attribute__((swiftcall))";
@@ -1707,6 +1715,8 @@ void TypePrinter::printAttributedAfter(const AttributedType *T,
   case attr::LocalAddressSpace:
   case attr::ConstantAddressSpace:
   case attr::GenericAddressSpace:
+  case attr::MeshAddressSpace:
+  case attr::TaskPayloadAddressSpace:
     // FIXME: Update printAttributedBefore to print these once we generate
     // AttributedType nodes for them.
     break;
@@ -1751,11 +1761,14 @@ void TypePrinter::printAttributedAfter(const AttributedType *T,
   case attr::GraphicsVertexShader: OS << "floor_vertex"; break;
   case attr::GraphicsTessellationControlShader: OS << "floor_tessellation_control"; break;
   case attr::GraphicsTessellationEvaluationShader: OS << "floor_tessellation_evaluation"; break;
+  case attr::GraphicsTaskShader: OS << "floor_task"; break;
+  case attr::GraphicsMeshShader: OS << "floor_mesh"; break;
   case attr::FloorArgBuffer: OS << "floor_arg_buffer"; break;
   case attr::FloorCoherent: OS << "floor_coherent"; break;
   case attr::ComputeKernelDim: OS << "kernel_dim()"; break;
   case attr::ComputeKernelWorkGroupSize: OS << "kernel_work_group_size()"; break;
   case attr::ComputeKernelSIMDWidth: OS << "kernel_simd_width()"; break;
+  case attr::MeshMaxWorkGroups: OS << "mesh_max_work_groups()"; break;
   case attr::Pcs: {
     OS << "pcs(";
    QualType t = T->getEquivalentType();
@@ -2189,6 +2202,14 @@ std::string Qualifiers::getAddrSpaceAsString(LangAS AS) {
   case LangAS::opencl_global_host:
   case LangAS::sycl_global_host:
     return "__global_host_as";
+  case LangAS::vulkan_input:
+    return "__vulkan_input__";
+  case LangAS::vulkan_output:
+    return "__vulkan_output__";
+  case LangAS::metal_mesh:
+    return "__metal_mesh__";
+  case LangAS::task_payload:
+    return "__task_payload__";
   case LangAS::cuda_device:
     return "__cuda_device__";
   case LangAS::cuda_constant:

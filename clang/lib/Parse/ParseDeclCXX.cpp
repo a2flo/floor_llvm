@@ -1566,7 +1566,9 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
                   tok::kw___is_union,
                   tok::kw___is_unsigned,
                   tok::kw___is_void,
-                  tok::kw___is_volatile))
+                  tok::kw___is_volatile,
+                  tok::kw___libfloor_is_valid_mesh_vertex_type,
+                  tok::kw___libfloor_is_valid_mesh_primitive_type))
     // GNU libstdc++ 4.2 and libc++ use certain intrinsic names as the
     // name of struct templates, but some are keywords in GCC >= 4.3
     // and Clang. Therefore, when we see the token sequence "struct

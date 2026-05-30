@@ -882,6 +882,10 @@ ANNOTATION(module_end)
 // into the name of a header unit.
 ANNOTATION(header_unit)
 
+// Metal/Vulkan mesh shading type traits
+TYPE_TRAIT_1(__libfloor_is_valid_mesh_vertex_type, LibFloorIsValidMeshVertex, KEYALL)
+TYPE_TRAIT_1(__libfloor_is_valid_mesh_primitive_type, LibFloorIsValidMeshPrimitive, KEYALL)
+
 #undef PRAGMA_ANNOTATION
 #undef ANNOTATION
 #undef TESTING_KEYWORD

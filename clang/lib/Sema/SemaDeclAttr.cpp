@@ -3307,6 +3307,63 @@ void Sema::AddComputeKernelSIMDWidthAttr(SourceRange AttrRange, Decl *D, Expr *E
   D->addAttr(::new (Context) ComputeKernelSIMDWidthAttr(TmpAttr));
 }
 
+static void handleMeshMaxWorkGroupsAttr(Sema &S, Decl *D, const ParsedAttr &Attr) {
+  if (!Attr.checkExactlyNumArgs(S, 1)) {
+    Attr.setInvalid();
+    return;
+  }
+  S.AddMeshMaxWorkGroupsAttr(Attr.getRange(), D, Attr.getArgAsExpr(0), Attr);
+}
+
+void Sema::AddMeshMaxWorkGroupsAttr(SourceRange AttrRange, Decl *D,
+                                    Expr *count_expr, const AttributeCommonInfo &CI) {
+  if (!count_expr) {
+    return;
+  }
+
+  MeshMaxWorkGroupsAttr TmpAttr(Context, CI, count_expr);
+  SourceLocation AttrLoc = AttrRange.getBegin();
+
+  QualType T;
+  if (ValueDecl *VD = dyn_cast<ValueDecl>(D))
+    T = VD->getType();
+  else {
+    Diag(AttrLoc, diag::err_attribute_argument_type) <<
+      &TmpAttr << AANT_ArgumentIntegerConstant;
+    return;
+  }
+
+  assert(count_expr);
+  if (!count_expr->isValueDependent()) {
+	  // TODO: might want to use/check isPotentialConstantExprUnevaluated
+	  
+	  llvm::APSInt Count(32);
+	  Count = 1;
+	  
+	  ExprResult ICE = VerifyIntegerConstantExpression(count_expr, &Count, AllowFoldKind::AllowFold);
+	  if (ICE.isInvalid()) {
+		  return;
+	  }
+	  if (Count.getExtValue() <= 0) {
+		  unsigned diagID = Diags.getCustomDiagID(DiagnosticsEngine::Error, "%0");
+		  Diags.Report(AttrRange.getBegin(), diagID) << "max mesh work-group count must be >= 1";
+		  return;
+	  }
+	  Expr* count_res = ICE.get();
+	  
+	  const auto wg_count = uint32_t(Count.getZExtValue());
+	  
+	  // all okay, add attribute
+	  auto mesh_max_wg_attr = ::new (Context) MeshMaxWorkGroupsAttr(Context, CI, count_res);
+	  mesh_max_wg_attr->setMaxWorkGroups(wg_count);
+	  D->addAttr(mesh_max_wg_attr);
+	  return;
+  }
+
+  // Save dependent expressions in the AST to be instantiated.
+  D->addAttr(::new (Context) MeshMaxWorkGroupsAttr(TmpAttr));
+}
+
 static void handleGraphicsEarlyFragmentTestsAttr(Sema &S, Decl *D, const ParsedAttr &Attr) {
   if (!Attr.checkAtMostNumArgs(S, 0)) {
     Attr.setInvalid();
@@ -5622,6 +5679,8 @@ bool Sema::CheckCallingConvAttr(const ParsedAttr &Attrs, CallingConv &CC,
   case ParsedAttr::AT_GraphicsFragmentShader: CC = CC_FloorFragment; break;
   case ParsedAttr::AT_GraphicsTessellationControlShader: CC = CC_FloorTessControl; break;
   case ParsedAttr::AT_GraphicsTessellationEvaluationShader: CC = CC_FloorTessEval; break;
+  case ParsedAttr::AT_GraphicsTaskShader: CC = CC_FloorTask; break;
+  case ParsedAttr::AT_GraphicsMeshShader: CC = CC_FloorMesh; break;
   case ParsedAttr::AT_ComputeKernel: CC = CC_FloorKernel; break;
   default: llvm_unreachable("unexpected attribute kind");
   }
@@ -5746,6 +5805,9 @@ void Sema::AddParameterABIAttr(Decl *D, const AttributeCommonInfo &CI,
   }
 
   switch (abi) {
+  case ParameterABI::MaxParameterABI:
+    llvm_unreachable("invalid parameter ABI");
+
   case ParameterABI::Ordinary:
     llvm_unreachable("explicit attribute for ordinary parameter ABI?");
 
@@ -8949,6 +9011,12 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
   case ParsedAttr::AT_GraphicsTessellationEvaluationShader:
     handleSimpleAttribute<GraphicsTessellationEvaluationShaderAttr>(S, D, AL);
     break;
+  case ParsedAttr::AT_GraphicsTaskShader:
+    handleSimpleAttribute<GraphicsTaskShaderAttr>(S, D, AL);
+    break;
+  case ParsedAttr::AT_GraphicsMeshShader:
+    handleSimpleAttribute<GraphicsMeshShaderAttr>(S, D, AL);
+    break;
   case ParsedAttr::AT_GraphicsTessellationPatch:
     handleGraphicsTessellationPatchAttr(S, D, AL);
     break;
@@ -8982,6 +9050,9 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
   case ParsedAttr::AT_ComputeKernelSIMDWidth:
     handleComputeKernelSIMDWidthAttr(S, D, AL);
     break;
+  case ParsedAttr::AT_MeshMaxWorkGroups:
+    handleMeshMaxWorkGroupsAttr(S, D, AL);
+    break;
   case ParsedAttr::AT_GraphicsEarlyFragmentTests:
     handleGraphicsEarlyFragmentTestsAttr(S, D, AL);
     break;
@@ -8999,6 +9070,12 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
     break;
   case ParsedAttr::AT_GraphicsInterpolateFlat:
     handleSimpleAttribute<GraphicsInterpolateFlatAttr>(S, D, AL);
+    break;
+  case ParsedAttr::AT_GraphicsPrimitiveCulled:
+    handleSimpleAttribute<GraphicsPrimitiveCulledAttr>(S, D, AL);
+    break;
+  case ParsedAttr::AT_GraphicsPerPrimitive:
+    handleSimpleAttribute<GraphicsPerPrimitiveAttr>(S, D, AL);
     break;
   case ParsedAttr::AT_GraphicsStageInput:
     handleSimpleAttribute<GraphicsStageInputAttr>(S, D, AL);
@@ -9284,7 +9361,8 @@ void Sema::ProcessDeclAttributeList(Scope *S, Decl *D,
   // good to have a way to specify "these attributes must appear as a group",
   // for these. Additionally, it would be good to have a way to specify "these
   // attribute must never appear as a group" for attributes like cold and hot.
-  if (!D->hasAttr<ComputeKernelAttr>() && !D->hasAttr<GraphicsTessellationControlShaderAttr>()) {
+  if (!D->hasAttr<ComputeKernelAttr>() && !D->hasAttr<GraphicsTessellationControlShaderAttr>() &&
+      !D->hasAttr<GraphicsTaskShaderAttr>() && !D->hasAttr<GraphicsMeshShaderAttr>()) {
     // These attributes cannot be applied to a non-kernel function.
     if (const auto *A = D->getAttr<ReqdWorkGroupSizeAttr>()) {
       // FIXME: This emits a different error message than

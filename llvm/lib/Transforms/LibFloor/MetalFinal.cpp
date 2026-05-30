@@ -33,6 +33,8 @@
 #include "llvm/Analysis/BasicAliasAnalysis.h"
 #include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/Analysis/TargetTransformInfo.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/CallingConv.h"
@@ -64,6 +66,7 @@
 #include "llvm/Transforms/LibFloor.h"
 #include "llvm/Transforms/LibFloor/FloorUtils.h"
 #include "llvm/Transforms/LibFloor/MetalTypes.h"
+#include "llvm/Transforms/Utils/LowerMemIntrinsics.h"
 #include <algorithm>
 #include <cstdarg>
 #include <memory>
@@ -97,11 +100,6 @@ namespace {
 		LLVMContext* ctx { nullptr };
 		
 		bool was_modified { false };
-		bool is_vertex_func { false };
-		bool is_fragment_func { false };
-		bool is_kernel_func { false };
-		bool is_tess_control_func { false };
-		bool is_tess_eval_func { false };
 		
 		MetalFirst(const bool enable_intel_workarounds_ = false) :
 		FunctionPass(ID),
@@ -117,12 +115,6 @@ namespace {
 			M = F.getParent();
 			ctx = &M->getContext();
 			
-			is_vertex_func = F.getCallingConv() == CallingConv::FLOOR_VERTEX;
-			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
-			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
-			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
-			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
-			
 			// NOTE: for now, this is no longer needed
 			was_modified = false;
 			//visit(F);
@@ -134,6 +126,126 @@ namespace {
 		using InstVisitor<MetalFirst>::visit;
 		void visit(Instruction& /* I */) {
 			//InstVisitor<MetalFirst>::visit(I);
+		}
+	};
+
+	// MetalMemopLowering
+	// NOTE: also see VulkanPreFinal, the main difference here is that Metal/AIR supports LLVM memops, so we can fall back to them if needed
+	struct MetalMemopLowering : public FunctionPass, InstVisitor<MetalMemopLowering> {
+		friend class InstVisitor<MetalMemopLowering>;
+		
+		static char ID; // Pass identification, replacement for typeid
+		
+		Module* M { nullptr };
+		LLVMContext* ctx { nullptr };
+		Function* func { nullptr };
+		
+		bool was_modified { false };
+		
+		// gathered memory intrinsics
+		std::vector<MemIntrinsic*> mem_instrs;
+		
+		MetalMemopLowering() : FunctionPass(ID) {
+			initializeMetalMemopLoweringPass(*PassRegistry::getPassRegistry());
+		}
+		
+		void getAnalysisUsage(AnalysisUsage &AU) const override {
+			AU.addRequired<AAResultsWrapperPass>();
+			AU.addRequired<GlobalsAAWrapperPass>();
+			AU.addRequired<AssumptionCacheTracker>();
+			AU.addRequired<TargetLibraryInfoWrapperPass>();
+			AU.addRequired<AssumptionCacheTracker>();
+			AU.addRequired<DominatorTreeWrapperPass>();
+			AU.addRequired<TargetTransformInfoWrapperPass>();
+		}
+		
+		bool runOnFunction(Function &F) override {
+			if (F.empty()) {
+				return false;
+			}
+			
+			M = F.getParent();
+			ctx = &M->getContext();
+			func = &F;
+			
+			was_modified = false;
+			mem_instrs.clear();
+			
+			visit(F);
+			
+			if (!mem_instrs.empty()) {
+				lower_mem_instructions();
+			}
+			
+			return was_modified;
+		}
+		
+		// InstVisitor overrides...
+		using InstVisitor<MetalMemopLowering>::visit;
+		void visit(Instruction& I) {
+			InstVisitor<MetalMemopLowering>::visit(I);
+		}
+		
+		void visitMemIntrinsic(MemIntrinsic& I) {
+			mem_instrs.push_back(&I);
+		}
+		
+		void lower_mem_instructions() {
+			for (auto& mem_instr : mem_instrs) {
+				if (auto memcpy_instr = dyn_cast_or_null<MemCpyInst>(mem_instr)) {
+					was_modified |= lower_memcpy(*memcpy_instr);
+				} else if (auto memmove_instr = dyn_cast_or_null<MemMoveInst>(mem_instr)) {
+					// ignore
+					(void)memmove_instr;
+				} else if (auto memset_instr = dyn_cast_or_null<MemSetInst>(mem_instr)) {
+					was_modified |= lower_memset(*memset_instr);
+				} else {
+					// ignore
+				}
+			}
+		}
+		
+		//! tries to lower "memcpy_instr" to LLVM instructions,
+		//! returns true if the lowering happened
+		bool lower_memcpy(MemCpyInst& memcpy_instr) {
+			auto [src, dst, const_len_op, len_op, override_loop_op_type, _, __] = libfloor_utils::compute_memop_lower_info(*M, memcpy_instr);
+			if (!src || !dst || !len_op) {
+				return false;
+			}
+			
+			const TargetTransformInfo& TTI = getAnalysis<TargetTransformInfoWrapperPass>().getTTI(*func);
+			if (!const_len_op) {
+				// -> on Metal, llvm.memcpy is supported, and we should use it if the copy length is dynamic
+				return false;
+			}
+			
+			createMemCpyLoopKnownSize(&memcpy_instr, src, dst, const_len_op,
+									  memcpy_instr.getSourceAlign().valueOrOne(), memcpy_instr.getDestAlign().valueOrOne(),
+									  memcpy_instr.isVolatile(), memcpy_instr.isVolatile(), TTI, override_loop_op_type);
+			memcpy_instr.eraseFromParent();
+			
+			return true;
+		}
+		
+		//! tries to lower "memset_instr" to LLVM instructions,
+		//! returns true if the lowering happened
+		bool lower_memset(MemSetInst& memset_instr) {
+			auto [src, dst, const_len_op, len_op, override_loop_op_type, _, __] = libfloor_utils::compute_memop_lower_info(*M, memset_instr);
+			if (!src || !dst || !len_op) {
+				return false;
+			}
+			
+			if (!const_len_op) {
+				// -> on Metal, llvm.memset is supported, and we should use it if the copy length is dynamic
+				return false;
+			}
+			
+			createMemSetLoopKnownSize(&memset_instr, dst, const_len_op, src,
+									  memset_instr.getDestAlign().valueOrOne(),
+									  memset_instr.isVolatile(), override_loop_op_type);
+			memset_instr.eraseFromParent();
+			
+			return true;
 		}
 	};
 	
@@ -157,6 +269,8 @@ namespace {
 		bool is_fragment_func { false };
 		bool is_tess_control_func { false };
 		bool is_tess_eval_func { false };
+		bool is_task_func { false };
+		bool is_mesh_func { false };
 		
 		struct per_function_state_t {
 			uint32_t kernel_dim { 1 };
@@ -253,7 +367,9 @@ namespace {
 		
 		bool runOnFunction(Function &F) override {
 			// exit if empty function
-			if(F.empty()) return false;
+			if (F.empty()) {
+				return false;
+			}
 			
 			//
 			M = F.getParent();
@@ -291,17 +407,19 @@ namespace {
 			// get args if this is a kernel function
 			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
 			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
-			if(is_kernel_func || is_tess_control_func) {
+			is_task_func = F.getCallingConv() == CallingConv::FLOOR_TASK;
+			is_mesh_func = F.getCallingConv() == CallingConv::FLOOR_MESH;
+			if (is_kernel_func || is_tess_control_func || is_task_func || is_mesh_func) {
 				auto kernel_dim_node = F.getMetadata("kernel_dim");
 				assert(kernel_dim_node);
 				if (kernel_dim_node->getNumOperands() > 0) {
 					auto& op = kernel_dim_node->getOperand(0);
 					state.kernel_dim = (uint32_t)mdconst::extract<ConstantInt>(op)->getZExtValue();
-					assert((is_kernel_func && state.kernel_dim >= 1 && state.kernel_dim <= 3) ||
+					assert(((is_kernel_func || is_task_func || is_mesh_func) && state.kernel_dim >= 1 && state.kernel_dim <= 3) ||
 						   (is_tess_control_func && state.kernel_dim == 1));
 				}
 				
-				if (is_kernel_func) {
+				if (is_kernel_func || is_task_func || is_mesh_func) {
 					auto kernel_simd_width_node = F.getMetadata("kernel_simd_width");
 					if (kernel_simd_width_node && kernel_simd_width_node->getNumOperands() == 1) {
 						auto& op = kernel_simd_width_node->getOperand(0);
@@ -334,7 +452,16 @@ namespace {
 						state.soft_printf = get_arg_by_idx(rev_idx--);
 					}
 				} else {
-					errs() << "invalid " << (is_kernel_func ? "kernel" : "tessellation-control");
+					errs() << "invalid ";
+					if (is_kernel_func) {
+						errs() << "kernel";
+					} else if (is_tess_eval_func) {
+						errs() << "tessellation-control";
+					} else if (is_task_func) {
+						errs() << "task";
+					} else if (is_mesh_func) {
+						errs() << "mesh";
+					}
 					errs() << " function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
 				}
 			}
@@ -397,12 +524,17 @@ namespace {
 			}
 			
 			// update function signature / param list
-			if (is_kernel_func || is_vertex_func || is_fragment_func || is_tess_control_func || is_tess_eval_func) {
+			if (is_kernel_func || is_vertex_func || is_fragment_func || is_tess_control_func || is_tess_eval_func ||
+				is_task_func || is_mesh_func) {
 				std::vector<Type*> param_types;
 				for (auto& arg : F.args()) {
 					// replace noalias LLVM attribute with "air-buffer-no-alias" string attribute
 					if (arg.hasAttribute(Attribute::NoAlias)) {
-						arg.addAttr(llvm::Attribute::get(*ctx, "air-buffer-no-alias"));
+						if (const auto address_space = arg.getType()->getPointerAddressSpace();
+							address_space >= uint32_t(metal::ADDRESS_SPACE::GLOBAL) &&
+							address_space <= uint32_t(metal::ADDRESS_SPACE::LOCAL)) {
+							arg.addAttr(llvm::Attribute::get(*ctx, "air-buffer-no-alias"));
+						}
 						arg.removeAttr(Attribute::NoAlias);
 					}
 					if (arg.getType()->isPointerTy()) {
@@ -418,7 +550,7 @@ namespace {
 				F.removeFnAttr("less-precise-fpmad");
 				
 				// add "max-work-group-size" attribute
-				if (is_kernel_func) {
+				if (is_kernel_func || is_task_func || is_mesh_func) {
 					if (state.kernel_local_size[0] > 0 && state.kernel_local_size[1] > 0 && state.kernel_local_size[2] > 0) {
 						F.addFnAttr(llvm::Attribute::get(*ctx, "max-work-group-size",
 														 std::to_string(state.kernel_local_size[0] *
@@ -429,9 +561,6 @@ namespace {
 				
 				// add "no-builtins"
 				F.addFnAttr("no-builtins");
-				
-				// always remove dso_local from entry points
-				F.setDSOLocal(false);
 			}
 			
 			// visit everything in this function
@@ -659,7 +788,9 @@ namespace {
 				!is_vertex_func &&
 				!is_fragment_func &&
 				!is_tess_control_func &&
-				!is_tess_eval_func) {
+				!is_tess_eval_func &&
+				!is_task_func &&
+				!is_mesh_func) {
 				return;
 			}
 			
@@ -835,7 +966,7 @@ namespace {
 			}
 			else if(func_name == "floor.builtin.get_printf_buffer") {
 				if(state.soft_printf == nullptr) {
-					DBG(printf("failed to get printf_buffer arg, probably not in a kernel/vertex/fragment/tessellation function?\n"); fflush(stdout);)
+					DBG(printf("failed to get printf_buffer arg, probably not in a kernel/vertex/fragment/tessellation/task/mesh function?\n"); fflush(stdout);)
 					return;
 				}
 				
@@ -874,7 +1005,7 @@ namespace {
 					discard_func->addFnAttr(Attribute::NoReturn);
 					auto discard_call = CallInst::Create(func_type, discard_func, "", &I);
 					discard_call->setDebugLoc(I.getDebugLoc());
-				} else if (is_kernel_func || is_tess_control_func || func->getReturnType()->isVoidTy()) {
+				} else if (is_kernel_func || is_tess_control_func || is_task_func || is_mesh_func || func->getReturnType()->isVoidTy()) {
 					assert(func->getReturnType()->isVoidTy());
 					ReturnInst::Create(*ctx, I.getParent());
 				} else {
@@ -1290,7 +1421,10 @@ namespace {
 			M = &Mod;
 			ctx = &M->getContext();
 			
-			bool module_modified = run_metal_name_replacement();
+			// revert data layout back to the one used by Metal
+			Mod.setDataLayout("e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32");
+			
+			run_metal_name_replacement();
 			
 			for (auto func_iter = Mod.begin(); func_iter != Mod.end();) {
 				// kill all functions named floor.*
@@ -1301,7 +1435,6 @@ namespace {
 					}
 					++func_iter; // inc before erase
 					func.eraseFromParent();
-					module_modified = true;
 					continue;
 				}
 				
@@ -1313,30 +1446,29 @@ namespace {
 							CB->setCallingConv(CallingConv::C);
 						}
 					}
-					module_modified = true;
 				}
+				
+				// remove dso_local from all functions
+				func.setDSOLocal(false);
 				
 				// strip debug info from declarations
 				if (func.isDeclaration()) {
 					if (DISubprogram* sub_prog_dbg = func.getSubprogram(); sub_prog_dbg) {
 						func.setSubprogram(nullptr);
-						module_modified = true;
 					}
 				}
 				
 				// remove floor and frontend specific metadata
 				if (func.hasMetadata("kernel_dim")) {
 					func.eraseMetadata(ctx->getMDKindID("kernel_dim"));
-					module_modified = true;
 				}
 				if (func.hasMetadata("reqd_work_group_size")) {
 					func.eraseMetadata(ctx->getMDKindID("reqd_work_group_size"));
-					module_modified = true;
 				}
 				
 				++func_iter;
 			}
-			return module_modified;
+			return true;
 		}
 		
 	};
@@ -1349,6 +1481,19 @@ FunctionPass *llvm::createMetalFirstPass(const bool enable_intel_workarounds) {
 }
 INITIALIZE_PASS_BEGIN(MetalFirst, "MetalFirst", "MetalFirst Pass", false, false)
 INITIALIZE_PASS_END(MetalFirst, "MetalFirst", "MetalFirst Pass", false, false)
+
+char MetalMemopLowering::ID = 0;
+FunctionPass *llvm::createMetalMemopLoweringPass() {
+	return new MetalMemopLowering();
+}
+INITIALIZE_PASS_BEGIN(MetalMemopLowering, "MetalMemopLowering", "MetalMemopLowering Pass", false, false)
+INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(GlobalsAAWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
+INITIALIZE_PASS_DEPENDENCY(CallGraphWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(TargetLibraryInfoWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
+INITIALIZE_PASS_END(MetalMemopLowering, "MetalMemopLowering", "MetalMemopLowering Pass", false, false)
 
 char MetalFinal::ID = 0;
 FunctionPass *llvm::createMetalFinalPass(const bool enable_intel_workarounds) {

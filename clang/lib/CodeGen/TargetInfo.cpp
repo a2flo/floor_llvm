@@ -10487,7 +10487,7 @@ void SPIRVABIInfo::computeInfo(CGFunctionInfo &FI) const {
     FI.getReturnInfo() = classifyReturnType(FI.getReturnType());
 
   for (auto &I : FI.arguments()) {
-    if (CC == llvm::CallingConv::FLOOR_KERNEL) {
+    if (llvm::CallingConv::isFloorEntryPoint(CC)) {
       I.info = classifyKernelArgumentType(I.type);
     } else {
       I.info = classifyArgumentType(I.type);
@@ -10657,11 +10657,7 @@ ABIArgInfo VulkanABIInfo::classifyReturnType(QualType RetTy, unsigned int CC) co
 ABIArgInfo VulkanABIInfo::classifyArgumentType(QualType Ty, unsigned int CC,
                                                FunctionProtoType::ExtParameterInfo ext_info) const {
   if (ext_info.isFloorArgBuffer()) {
-    if (CC == llvm::CallingConv::FLOOR_VERTEX ||
-        CC == llvm::CallingConv::FLOOR_FRAGMENT ||
-        CC == llvm::CallingConv::FLOOR_KERNEL ||
-        CC == llvm::CallingConv::FLOOR_TESS_CONTROL ||
-        CC == llvm::CallingConv::FLOOR_TESS_EVAL) {
+    if (llvm::CallingConv::isFloorEntryPoint(CC)) {
       // for entry points: use expand with argument buffer specific handling
       return ABIArgInfo::getExpandFloorArgBuffer();
     } else if (CC == llvm::CallingConv::FLOOR_FUNC &&
@@ -10679,11 +10675,7 @@ ABIArgInfo VulkanABIInfo::classifyArgumentType(QualType Ty, unsigned int CC,
   // -> expand all aggregates
   if (CodeGenFunction::hasAggregateEvaluationKind(Ty) &&
       Ty->isStructureOrClassType() &&
-      (CC == llvm::CallingConv::FLOOR_VERTEX ||
-       CC == llvm::CallingConv::FLOOR_FRAGMENT ||
-       CC == llvm::CallingConv::FLOOR_KERNEL ||
-       CC == llvm::CallingConv::FLOOR_TESS_CONTROL ||
-       CC == llvm::CallingConv::FLOOR_TESS_EVAL)) {
+      llvm::CallingConv::isFloorEntryPoint(CC)) {
     return ABIArgInfo::getExpand();
   }
 

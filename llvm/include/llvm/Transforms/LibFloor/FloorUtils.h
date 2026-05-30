@@ -30,6 +30,7 @@
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Value.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 
 namespace libfloor_utils {
 
@@ -345,16 +346,17 @@ struct call_options_t {
 	bool is_nounwind { true };
 	bool is_noreturn { false };
 	bool is_tail_call { false };
+	bool is_will_return { false };
 	llvm::CallingConv::ID calling_convention { llvm::CallingConv::C };
 };
 
-//! replaces the specified "instr" with a new function call using the specified parameters
-static inline llvm::CallInst* replace_instruction_with_call(llvm::Instruction& instr, llvm::Module& M,
-															const std::string& function_name, const std::string& call_var_name,
-															llvm::Type* return_type,
-															llvm::ArrayRef<llvm::Type*> func_arg_types,
-															llvm::ArrayRef<llvm::Value*> func_args,
-															const call_options_t opts) {
+//! creates a new function call using the specified parameters
+static inline llvm::CallInst* create_call(llvm::Instruction& insert_before, llvm::Module& M,
+										  const std::string& function_name, const std::string& call_var_name,
+										  llvm::Type* return_type,
+										  llvm::ArrayRef<llvm::Type*> func_arg_types,
+										  llvm::ArrayRef<llvm::Value*> func_args,
+										  const call_options_t opts) {
 	auto ctx = &M.getContext();
 	
 	llvm::AttrBuilder attr_builder(*ctx);
@@ -376,17 +378,18 @@ static inline llvm::CallInst* replace_instruction_with_call(llvm::Instruction& i
 	if (opts.is_noreturn) {
 		attr_builder.addAttribute(llvm::Attribute::NoReturn);
 	}
+	if (opts.is_will_return) {
+		attr_builder.addAttribute(llvm::Attribute::WillReturn);
+	}
 	auto func_attrs = llvm::AttributeList::get(*ctx, ~0, attr_builder);
 	
 	const auto func_type = llvm::FunctionType::get(return_type, func_arg_types, false);
-	auto call = llvm::CallInst::Create(M.getOrInsertFunction(function_name, func_type, func_attrs), func_args, call_var_name, &instr);
+	auto call = llvm::CallInst::Create(M.getOrInsertFunction(function_name, func_type, func_attrs), func_args, call_var_name,
+									   &insert_before);
+	
 	if (opts.calling_convention != llvm::CallingConv::C) {
 		call->setCallingConv(opts.calling_convention);
 	}
-	
-	// keep metadata and debug location
-	call->copyMetadata(instr);
-	call->setDebugLoc(instr.getDebugLoc());
 	if (opts.is_convergent) {
 		call->setConvergent();
 	}
@@ -409,10 +412,200 @@ static inline llvm::CallInst* replace_instruction_with_call(llvm::Instruction& i
 		call->setTailCall();
 	}
 	
+	return call;
+}
+
+//! replaces the specified "instr" with a new function call using the specified parameters
+static inline llvm::CallInst* replace_instruction_with_call(llvm::Instruction& instr, llvm::Module& M,
+															const std::string& function_name, const std::string& call_var_name,
+															llvm::Type* return_type,
+															llvm::ArrayRef<llvm::Type*> func_arg_types,
+															llvm::ArrayRef<llvm::Value*> func_args,
+															const call_options_t opts) {
+	auto call = create_call(instr, M, function_name, call_var_name, return_type, func_arg_types, func_args, opts);
+	
+	// keep metadata and debug location
+	call->copyMetadata(instr);
+	call->setDebugLoc(instr.getDebugLoc());
+	
 	instr.replaceAllUsesWith(call);
 	instr.eraseFromParent();
 	
 	return call;
+}
+
+struct memop_lower_info_t {
+	//! the source value that should be used for lowering
+	llvm::Value* src { nullptr };
+	//! the destination value that should be used for lowering
+	llvm::Value* dst { nullptr };
+	//! if set, specifies the constant integer length of the memop
+	llvm::ConstantInt* const_len_op { nullptr };
+	//! specifies the (potentially) dynamic integer length of the memop
+	//! NOTE: still set even when "const_len_op" is set
+	llvm::Value* len_op { nullptr };
+	//! if set, specifies the preferred type that should be used instead of i8 when lowering the memop
+	llvm::Type* override_loop_op_type { nullptr };
+	
+	//! specifies the type of the original source value
+	//! NOTE: may be i8 if this couldn't be determined
+	llvm::Type* src_orig_type { nullptr };
+	//! specifies the type of the original destination value
+	//! NOTE: may be i8 if this couldn't be determined
+	llvm::Type* dst_orig_type { nullptr };
+};
+
+//! computes lowering info for memory operations (memcpy/memset),
+//! figurering out the constant length if there is one, looking behind src/dst bitcasts,
+//! and possible finding a more appropriate/efficient type that should be used for memop lowering (instead of i8)
+template <typename memop_instr_type>
+static inline memop_lower_info_t compute_memop_lower_info(llvm::Module& M, memop_instr_type& memop) {
+	auto& ctx = M.getContext();
+	
+	auto len_op = memop.getLength();
+	auto const_len_op = dyn_cast_or_null<llvm::ConstantInt>(len_op);
+	
+	// optimize length operand
+	if (const_len_op) {
+		if (auto simplified_len = libfloor_utils::simplify_const_integer_to_32bit(*const_len_op); simplified_len) {
+			const_len_op = simplified_len;
+		}
+	} else {
+		if (auto simplified_len = libfloor_utils::simplify_integer_to_32bit(*len_op); simplified_len) {
+			len_op = simplified_len;
+		}
+	}
+	
+	// try to use the original type for the memcpy
+	llvm::Value* src = nullptr;
+	if constexpr (std::is_same_v<memop_instr_type, llvm::MemCpyInst>) {
+		src = memop.getRawSource();
+	} else if constexpr (std::is_same_v<memop_instr_type, llvm::MemSetInst>) {
+		src = memop.getValue();
+	} else {
+		assert(false);
+		ctx.emitError(&memop, "unhandled memop");
+		return {};
+	}
+	assert(src);
+	auto dst = memop.getRawDest();
+	auto src_orig_type = src->getType();
+	auto dst_orig_type = dst->getType();
+	auto src_bitcast_op = libfloor_utils::get_underlying_bitcast_operand_or_null(src);
+	auto dst_bitcast_op = libfloor_utils::get_underlying_bitcast_operand_or_null(dst);
+	if (src_bitcast_op) {
+		src_orig_type = src_bitcast_op->getType();
+	}
+	if (dst_bitcast_op) {
+		dst_orig_type = dst_bitcast_op->getType();
+	}
+	
+	llvm::Type* override_loop_op_type = nullptr;
+	auto elem_type = dst_orig_type->getPointerElementType();
+	if constexpr (std::is_same_v<memop_instr_type, llvm::MemCpyInst>) {
+		const auto src_elem_type = src_orig_type->getPointerElementType();
+		if (elem_type == src_elem_type && elem_type->isSized()) {
+			auto elem_size = M.getDataLayout().getTypeStoreSize(elem_type).getFixedValue();
+			if (elem_size > 1) {
+				// original source and destination types are compatible -> copy based on this type instead
+				src = (src_bitcast_op ? src_bitcast_op : src);
+				dst = (dst_bitcast_op ? dst_bitcast_op : dst);
+				override_loop_op_type = elem_type;
+				if (const_len_op && (const_len_op->getZExtValue() % elem_size) != 0u) {
+					ctx.emitError(&memop, "can't handle uneven memcpy element type");
+					return {};
+				}
+			}
+		} else {
+			const auto dst_vec_type = dyn_cast_or_null<llvm::FixedVectorType>(elem_type);
+			const auto dst_st_type = dyn_cast_or_null<llvm::StructType>(elem_type);
+			const auto dst_st_name = (dst_st_type && dst_st_type->hasName() ? dst_st_type->getName() : "");
+			const auto src_vec_type = dyn_cast_or_null<llvm::FixedVectorType>(src_elem_type);
+			const auto src_st_type = dyn_cast_or_null<llvm::StructType>(src_elem_type);
+			const auto src_st_name = (src_st_type && src_st_type->hasName() ? src_st_type->getName() : "");
+			const auto dst_size = M.getDataLayout().getTypeStoreSize(elem_type).getFixedValue();
+			const auto src_size = M.getDataLayout().getTypeStoreSize(src_elem_type).getFixedValue();
+			if ((dst_vec_type && src_st_type) || (dst_st_type && src_vec_type)) {
+				// we have a native vector type <-> struct type memcpy
+				// -> if the size matches directly and this is a libfloor struct/class type,
+				//    assume that we can directly use the vector type
+				if (dst_size == src_size &&
+					((dst_st_type && dst_st_name.startswith("class.fl::")) ||
+					 (src_st_type && src_st_name.startswith("class.fl::")))) {
+					// NOTE: overriding the type here with the vector type seems to just work w/o further intervention,
+					//       if it shouldn't work for some more complex scenarios in the future, it would probably
+					//       be better to emit our own load+store+bitcasting loop rather than using memcpy
+					override_loop_op_type = (dst_vec_type ? dst_vec_type : src_vec_type);
+					if (const_len_op && (const_len_op->getZExtValue() % dst_size) != 0u) {
+						ctx.emitError(&memop, "can't handle uneven memcpy element type");
+						return {};
+					}
+				}
+			} else if (dst_st_type && src_st_type && dst_size == src_size) {
+				// we have a struct <-> struct type memcpy with compatible type sizes
+				// -> if either of the struct types is a libfloor graphics I/O type,
+				//    assume that we can directly use the graphics I/O type
+				const auto dst_is_io = dst_st_name.startswith("struct.floor.io.");
+				const auto src_is_io = src_st_name.startswith("struct.floor.io.");
+				if (dst_is_io || src_is_io) {
+					override_loop_op_type = (dst_is_io ? dst_st_type : src_st_type);
+					if (const_len_op && (const_len_op->getZExtValue() % dst_size) != 0u) {
+						ctx.emitError(&memop, "can't handle uneven memcpy element type");
+						return {};
+					}
+				}
+			}
+		}
+	} else if constexpr (std::is_same_v<memop_instr_type, llvm::MemSetInst>) {
+		if (elem_type->isSized()) {
+			auto elem_size = M.getDataLayout().getTypeStoreSize(elem_type).getFixedValue();
+			if (elem_size > 1) {
+				// memset based on this type instead
+				dst = (dst_bitcast_op ? dst_bitcast_op : dst);
+				override_loop_op_type = elem_type;
+				if (const_len_op && (const_len_op->getZExtValue() % elem_size) != 0u) {
+					ctx.emitError(&memop, "can't handle uneven memset element type");
+					return {};
+				}
+				
+				// update src/set value and type
+				src = (src_bitcast_op ? src_bitcast_op : src);
+				auto src_type = src->getType();
+				if (src_type != elem_type) {
+					auto src_elem_size = M.getDataLayout().getTypeStoreSize(src_type).getFixedValue();
+					if ((elem_size % src_elem_size) != 0u) {
+						ctx.emitError(&memop, "can't handle uneven memset set/src type extension");
+						return {};
+					}
+					
+					if (auto src_constant = dyn_cast_or_null<llvm::ConstantInt>(src); src_constant) {
+						// extend src value to new element type
+						const auto src_value = src_constant->getZExtValue();
+						const auto iters = (elem_size / src_elem_size);
+						const auto shift = src_elem_size * 8u;
+						uint64_t extended_src_value = src_value;
+						for (uint32_t i = 1; i < iters; ++i) {
+							extended_src_value |= src_value << (shift * i);
+						}
+						src = llvm::ConstantInt::get(elem_type, extended_src_value);
+					} else {
+						ctx.emitError(&memop, "can't handle memset src extension with dynamic value yet");
+						return {};
+					}
+				}
+			}
+		}
+	}
+	
+	return {
+		.src = src,
+		.dst = dst,
+		.const_len_op = const_len_op,
+		.len_op = len_op,
+		.override_loop_op_type = override_loop_op_type,
+		.src_orig_type = src_orig_type,
+		.dst_orig_type = dst_orig_type,
+	};
 }
 
 } // namespace libfloor_utils

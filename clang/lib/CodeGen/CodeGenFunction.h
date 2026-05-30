@@ -2400,10 +2400,10 @@ public:
   /// a terminate scope encloses a try.
   llvm::BasicBlock *getTerminateHandler();
 
-  llvm::Type *ConvertTypeForMem(QualType T);
-  llvm::Type *ConvertType(QualType T);
-  llvm::Type *ConvertType(const TypeDecl *T) {
-    return ConvertType(getContext().getTypeDeclType(T));
+  llvm::Type *ConvertTypeForMem(QualType T, type_conversion_opts_t opts = type_conversion_opts_t {});
+  llvm::Type *ConvertType(QualType T, type_conversion_opts_t opts = type_conversion_opts_t {});
+  llvm::Type *ConvertType(const TypeDecl *T, type_conversion_opts_t opts = type_conversion_opts_t {}) {
+    return ConvertType(getContext().getTypeDeclType(T), opts);
   }
 
   /// LoadObjCSelf - Load the value of self. This function is only valid while

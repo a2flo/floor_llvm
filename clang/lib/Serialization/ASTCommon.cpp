@@ -238,6 +238,12 @@ serialization::TypeIdxFromBuiltin(const BuiltinType *BT) {
   case BuiltinType::OCLPatchControlPoint:
     ID = PREDEF_TYPE_PATCH_CONTROL_POINT_ID;
     break;
+  case BuiltinType::OCLMesh:
+    ID = PREDEF_TYPE_MESH_ID;
+    break;
+  case BuiltinType::OCLMeshGridProperties:
+    ID = PREDEF_TYPE_MESH_GRID_PROPERTIES_ID;
+    break;
 #define SVE_TYPE(Name, Id, SingletonId) \
   case BuiltinType::Id: \
     ID = PREDEF_TYPE_##Id##_ID; \

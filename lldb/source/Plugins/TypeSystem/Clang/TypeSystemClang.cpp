@@ -4911,6 +4911,8 @@ lldb::Encoding TypeSystemClang::GetEncoding(lldb::opaque_compiler_type_t type,
     case clang::BuiltinType::Kind::OCLReserveID:
     case clang::BuiltinType::Kind::OCLSampler:
     case clang::BuiltinType::Kind::OCLPatchControlPoint:
+    case clang::BuiltinType::Kind::OCLMesh:
+    case clang::BuiltinType::Kind::OCLMeshGridProperties:
     case clang::BuiltinType::Kind::OMPArraySection:
     case clang::BuiltinType::Kind::OMPArrayShaping:
     case clang::BuiltinType::Kind::OMPIterator:

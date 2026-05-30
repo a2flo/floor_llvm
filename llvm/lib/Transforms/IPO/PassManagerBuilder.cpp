@@ -890,6 +890,13 @@ void PassManagerBuilder::populateModulePassManager(
   if (OptLevel > 2)
     MPM.add(createArgumentPromotionPass()); // Scalarize uninlined fn args
 
+  // run mesh shading transformations now as this will likely require an SROA pass which is done next (func simplification)
+  if (EnableMetalPasses) {
+    MPM.add(createMetalMeshPass());
+  } else if (EnableVulkanPasses) {
+    MPM.add(createVulkanMeshPass());
+  }
+
   addExtensionsToPM(EP_CGSCCOptimizerLate, MPM);
   addFunctionSimplificationPasses(MPM);
 
@@ -903,13 +910,12 @@ void PassManagerBuilder::populateModulePassManager(
   // with constants potentially changing/improving the behavior and allowing
   // additional checking (like oob offsets).
   if(EnableCUDAPasses || EnableMetalPasses || EnableSPIRPasses) {
-    if(EnableCUDAPasses) MPM.add(createCUDAImagePass(floor_image_capabilities));
-    if(EnableMetalPasses) MPM.add(createMetalImagePass(floor_image_capabilities));
-    if(EnableSPIRPasses) {
-      if(!EnableVulkanPasses) {
+    if (EnableCUDAPasses) MPM.add(createCUDAImagePass(floor_image_capabilities));
+    if (EnableMetalPasses) MPM.add(createMetalImagePass(floor_image_capabilities));
+    if (EnableSPIRPasses) {
+      if (!EnableVulkanPasses) {
         MPM.add(createSPIRImagePass(floor_image_capabilities, EnableSPIRIntelWorkarounds));
-      }
-      else {
+      } else {
         MPM.add(createVulkanImagePass(floor_image_capabilities));
       }
     }
@@ -1130,7 +1136,7 @@ void PassManagerBuilder::populateModulePassManager(
     MPM.add(createVulkanPreFinalPass()); // yes, run again
 
     // try to fix invalid pointer bitcasts (must be done after memcpy lowering)
-    MPM.add(createVulkanPreFinalPointerBCFixupPass());
+    MPM.add(createPointerBCFixupPass());
 
     // run attribute inference again so that we can safely assume which arguments are read-only/write-only/read-write
     MPM.add(createInferFunctionAttrsLegacyPass());
@@ -1155,6 +1161,15 @@ void PassManagerBuilder::populateModulePassManager(
     MPM.add(createVulkanFinalModuleCleanupPass());
   }
   if (EnableMetalPasses) {
+    // perform memop lowering (where beneficial) + loop+vector passes for cleanup
+    MPM.add(createMetalMemopLoweringPass());
+    MPM.add(createSimpleLoopUnrollPass(OptLevel, DisableUnrollLoops, ForgetAllSCEVInLoopUnroll));
+    MPM.add(createLoopDistributePass());
+    addVectorPasses(MPM, /* IsFullLTO */ false);
+    addVectorPasses(MPM, true);
+
+    // remaining final passes
+    MPM.add(createPointerBCFixupPass());
     MPM.add(createFMACombinerPass());
     MPM.add(createMetalFinalPass(EnableMetalIntelWorkarounds));
     MPM.add(createPropagateCoherencyPass());

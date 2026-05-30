@@ -1851,6 +1851,7 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
   Opts.VulkanLowDescriptorSetCount = Args.hasArg(OPT_vulkan_low_descriptor_set_count);
   Opts.VulkanPtrWorkarounds = Args.hasArg(OPT_vulkan_ptr_workarounds);
   Opts.VulkanUntypedPointers = Args.hasArg(OPT_vulkan_untyped_pointers);
+  Opts.VulkanMeshShading = Args.hasArg(OPT_vulkan_mesh_shading);
   Opts.SPIRVVersion = getLastArgUInt64Value(Args, OPT_spirv_version_EQ, 0x10000u);
   Opts.SPIRCompileOptions = Args.getLastArgValue(OPT_cl_spir_compile_options).trim("\t\n\v\f\r\" ");
   Opts.GraphicsPrimitiveID = Args.hasArg(OPT_graphics_primitive_id);
@@ -1859,6 +1860,7 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
                                  Args.hasArg(OPT_emit_spirv_container));
   Opts.LibFloorErrorOnAlloca = Args.hasArg(OPT_floor_error_on_alloca);
   Opts.LibFloorErrorOnPtrTypeAlloca = Args.hasArg(OPT_floor_error_on_ptr_type_alloca);
+  Opts.LibFloorErrorOnPtrIntCasts = Args.hasArg(OPT_floor_error_on_ptr_int_casts);
 
   if (Args.getLastArg(OPT_femulated_tls) ||
       Args.getLastArg(OPT_fno_emulated_tls)) {

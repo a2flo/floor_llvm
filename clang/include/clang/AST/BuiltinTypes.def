@@ -257,8 +257,12 @@ BUILTIN_TYPE(OCLQueue, OCLQueueTy)
 // OpenCL reserve_id_t.
 BUILTIN_TYPE(OCLReserveID, OCLReserveIDTy)
 
-// Metal/Vulkan __patch_control_point_t.
+// Metal __patch_control_point_t.
 BUILTIN_TYPE(OCLPatchControlPoint, OCLPatchControlPointTy)
+
+// Metal/Vulkan mesh shading types
+BUILTIN_TYPE(OCLMesh, OCLMeshTy)
+BUILTIN_TYPE(OCLMeshGridProperties, OCLMeshGridPropertiesTy)
 
 // This represents the type of an expression whose type is
 // totally unknown, e.g. 'T::foo'.  It is permitted for this to

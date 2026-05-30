@@ -643,6 +643,10 @@ public:
       return LangAS::opencl_private;
     case ParsedAttr::AT_GenericAddressSpace:
       return LangAS::opencl_generic;
+    case ParsedAttr::AT_MeshAddressSpace:
+      return LangAS::metal_mesh;
+    case ParsedAttr::AT_TaskPayloadAddressSpace:
+      return LangAS::task_payload;
     default:
       return LangAS::Default;
     }

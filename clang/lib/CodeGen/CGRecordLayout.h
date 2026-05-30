@@ -200,6 +200,10 @@ public:
     return FieldInfo.lookup(FD);
   }
 
+  bool isField(const FieldDecl *FD) const {
+    return (FieldInfo.count(FD) != 0);
+  }
+
   unsigned getNonVirtualBaseLLVMFieldNo(const CXXRecordDecl *RD) const {
     assert(NonVirtualBases.count(RD) && "Invalid non-virtual base!");
     return NonVirtualBases.lookup(RD);

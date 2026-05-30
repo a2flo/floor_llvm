@@ -269,6 +269,28 @@ public:
 		}
 		return crtp_base_class::getCastInstrCost(Opcode, Dst, Src, CCH, CostKind, I);
 	}
+	
+	static bool is_legal_to_ldst_vectorize_type(const Type* type) {
+		// opaque/unsized types?
+		if (!type->isSized()) {
+			return false;
+		}
+		
+		// any kind of pointer?
+		if (isa<PointerType>(type)) {
+			return false;
+		}
+		
+		return true;
+	}
+	
+	bool isLegalToVectorizeLoad(LoadInst *LI) const {
+		return is_legal_to_ldst_vectorize_type(LI->getType());
+	}
+	
+	bool isLegalToVectorizeStore(StoreInst *SI) const {
+		return is_legal_to_ldst_vectorize_type(SI->getValueOperand()->getType());
+	}
 
 protected:
 	const clang::CodeGenOptions& CodeGenOpts;

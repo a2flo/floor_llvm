@@ -41,18 +41,21 @@ void llvm::initializeLibFloor(PassRegistry &Registry) {
   initializeMetalFirstPass(Registry);
   initializeMetalFinalPass(Registry);
   initializeMetalFinalModuleCleanupPass(Registry);
+  initializeMetalMemopLoweringPass(Registry);
   initializeMetalImagePass(Registry);
+  initializeMetalMeshPass(Registry);
   initializeSPIRFinalPass(Registry);
   initializeSPIRFinalModulePass(Registry);
   initializeSPIRImagePass(Registry);
   initializeCFGStructurizationPass(Registry);
   initializeVulkanEarlyArgBufferFunctionClonePass(Registry);
   initializeVulkanImagePass(Registry);
+  initializeVulkanMeshPass(Registry);
   initializeVulkanFinalPass(Registry);
   initializeVulkanBuiltinParamHandlingPass(Registry);
   initializeVulkanPreFinalPass(Registry);
-  initializeVulkanPreFinalPointerBCFixupPass(Registry);
   initializeVulkanFinalModuleCleanupPass(Registry);
+  initializePointerBCFixupPass(Registry);
   initializePropagateCoherencyPass(Registry);
   initializePropagateRangeInfoPass(Registry);
   initializeFMACombinerPass(Registry);
@@ -83,8 +86,16 @@ void LLVMAddMetalFinalModuleCleanupPass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createMetalFinalModuleCleanupPass());
 }
 
+void LLVMAddMetalMemopLoweringPass(LLVMPassManagerRef PM) {
+  unwrap(PM)->add(createMetalMemopLoweringPass());
+}
+
 void LLVMAddMetalImagePass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createMetalImagePass());
+}
+
+void LLVMAddMetalMeshPass(LLVMPassManagerRef PM) {
+  unwrap(PM)->add(createMetalMeshPass());
 }
 
 void LLVMAddSPIRFinalPass(LLVMPassManagerRef PM) {
@@ -111,6 +122,10 @@ void LLVMAddVulkanImagePass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createVulkanImagePass());
 }
 
+void LLVMAddVulkanMeshPass(LLVMPassManagerRef PM) {
+  unwrap(PM)->add(createVulkanMeshPass());
+}
+
 void LLVMAddVulkanFinalPass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createVulkanFinalPass());
 }
@@ -123,16 +138,16 @@ void LLVMAddVulkanPreFinalPass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createVulkanPreFinalPass());
 }
 
-void LLVMAddVulkanPreFinalPointerBCFixupPass(LLVMPassManagerRef PM) {
-  unwrap(PM)->add(createVulkanPreFinalPointerBCFixupPass());
-}
-
 void LLVMAddVulkanFinalModuleCleanupPass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createVulkanFinalModuleCleanupPass());
 }
 
 void LLVMAddPropagateCoherencyPass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createPropagateCoherencyPass());
+}
+
+void LLVMAddPointerBCFixupPass(LLVMPassManagerRef PM) {
+  unwrap(PM)->add(createPointerBCFixupPass());
 }
 
 void LLVMAddPropagateRangeInfoPass(LLVMPassManagerRef PM) {

@@ -132,7 +132,9 @@ static void diagnoseBadTypeAttribute(Sema &S, const ParsedAttr &attr,
   case ParsedAttr::AT_GraphicsVertexShader:                                    \
   case ParsedAttr::AT_GraphicsFragmentShader:                                  \
   case ParsedAttr::AT_GraphicsTessellationControlShader:                       \
-  case ParsedAttr::AT_GraphicsTessellationEvaluationShader
+  case ParsedAttr::AT_GraphicsTessellationEvaluationShader:                    \
+  case ParsedAttr::AT_GraphicsTaskShader:                                      \
+  case ParsedAttr::AT_GraphicsMeshShader
 
 // Function type attributes.
 #define FUNCTION_TYPE_ATTRS_CASELIST                                           \
@@ -1729,6 +1731,12 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
   case DeclSpec::TST_patch_control_point_t:
     Result = Context.OCLPatchControlPointTy;
     break;
+  case DeclSpec::TST_mesh_t:
+    Result = Context.OCLMeshTy;
+    break;
+  case DeclSpec::TST_mesh_grid_properties_t:
+    Result = Context.OCLMeshGridPropertiesTy;
+    break;
 
 #define GENERIC_IMAGE_TYPE(ImgType, Id)                                        \
   case DeclSpec::TST_##ImgType##_t: {                                          \
@@ -2840,6 +2848,9 @@ static void checkExtParameterInfos(Sema &S, ArrayRef<QualType> paramTypes,
   for (size_t paramIndex = 0, numParams = paramTypes.size();
           paramIndex != numParams; ++paramIndex) {
     switch (EPI.ExtParameterInfos[paramIndex].getABI()) {
+    case ParameterABI::MaxParameterABI:
+      llvm_unreachable("invalid parameter ABI");
+
     // Nothing interesting to check for orindary-ABI parameters.
     case ParameterABI::Ordinary:
       continue;
@@ -3977,6 +3988,12 @@ static CallingConv getCCForDeclaratorChunk(
         break;
       } else if (AL.getKind() == ParsedAttr::AT_GraphicsTessellationEvaluationShader) {
         CC = CC_FloorTessEval;
+        break;
+      } else if (AL.getKind() == ParsedAttr::AT_GraphicsTaskShader) {
+        CC = CC_FloorTask;
+        break;
+      } else if (AL.getKind() == ParsedAttr::AT_GraphicsMeshShader) {
+        CC = CC_FloorMesh;
         break;
       }
     }
@@ -5397,6 +5414,11 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
 
           if (Param->hasAttr<FloorArgBufferAttr>()) {
             ExtParameterInfos[i] = ExtParameterInfos[i].withFloorArgBuffer();
+            HasAnyInterestingExtParameterInfos = true;
+          }
+
+          if (Param->hasAttr<GraphicsStageInputAttr>()) {
+            ExtParameterInfos[i] = ExtParameterInfos[i].withFloorStageInput();
             HasAnyInterestingExtParameterInfos = true;
           }
 
@@ -7519,6 +7541,10 @@ static Attr *getCCTypeAttr(ASTContext &Ctx, ParsedAttr &Attr) {
     return createSimpleAttr<GraphicsTessellationControlShaderAttr>(Ctx, Attr);
   case ParsedAttr::AT_GraphicsTessellationEvaluationShader:
     return createSimpleAttr<GraphicsTessellationEvaluationShaderAttr>(Ctx, Attr);
+  case ParsedAttr::AT_GraphicsTaskShader:
+    return createSimpleAttr<GraphicsTaskShaderAttr>(Ctx, Attr);
+  case ParsedAttr::AT_GraphicsMeshShader:
+    return createSimpleAttr<GraphicsMeshShaderAttr>(Ctx, Attr);
   case ParsedAttr::AT_ComputeKernel:
     return createSimpleAttr<ComputeKernelAttr>(Ctx, Attr);
   }
@@ -8212,7 +8238,9 @@ static bool isAddressSpaceKind(const ParsedAttr &attr) {
          attrKind == ParsedAttr::AT_GlobalAddressSpace ||
          attrKind == ParsedAttr::AT_LocalAddressSpace ||
          attrKind == ParsedAttr::AT_ConstantAddressSpace ||
-         attrKind == ParsedAttr::AT_GenericAddressSpace;
+         attrKind == ParsedAttr::AT_GenericAddressSpace ||
+         attrKind == ParsedAttr::AT_MeshAddressSpace ||
+         attrKind == ParsedAttr::AT_TaskPayloadAddressSpace;
 }
 
 static void processTypeAttrs(TypeProcessingState &state, QualType &type,
@@ -8299,6 +8327,8 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
     case ParsedAttr::AT_LocalAddressSpace:
     case ParsedAttr::AT_ConstantAddressSpace:
     case ParsedAttr::AT_GenericAddressSpace:
+    case ParsedAttr::AT_MeshAddressSpace:
+    case ParsedAttr::AT_TaskPayloadAddressSpace:
     case ParsedAttr::AT_AddressSpace:
       HandleAddressSpaceTypeAttribute(type, attr, state);
       attr.setUsedAsTypeAttr();
@@ -8344,12 +8374,15 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
     case ParsedAttr::AT_GraphicsVertexPosition:
     case ParsedAttr::AT_GraphicsPointSize:
     case ParsedAttr::AT_GraphicsInterpolateFlat:
+    case ParsedAttr::AT_GraphicsPrimitiveCulled:
+    case ParsedAttr::AT_GraphicsPerPrimitive:
     case ParsedAttr::AT_GraphicsStageInput:
     case ParsedAttr::AT_GraphicsTessellationPatch:
     case ParsedAttr::AT_GraphicsEarlyFragmentTests:
     case ParsedAttr::AT_ComputeKernelDim:
     case ParsedAttr::AT_ComputeKernelWorkGroupSize:
     case ParsedAttr::AT_ComputeKernelSIMDWidth:
+    case ParsedAttr::AT_MeshMaxWorkGroups:
       attr.setUsedAsTypeAttr();
       break;
     case ParsedAttr::AT_FloorArgBuffer: {

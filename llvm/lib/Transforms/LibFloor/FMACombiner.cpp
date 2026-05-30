@@ -84,11 +84,6 @@ namespace {
 		Module* M { nullptr };
 		LLVMContext* ctx { nullptr };
 		Function* func { nullptr };
-		bool is_kernel_func { false };
-		bool is_vertex_func { false };
-		bool is_fragment_func { false };
-		bool is_tess_control_func { false };
-		bool is_tess_eval_func { false };
 		
 		std::unordered_set<Instruction*> unreachable_kill_list;
 		
@@ -98,19 +93,12 @@ namespace {
 		
 		bool runOnFunction(Function &F) override {
 			// exit if empty function
-			if(F.empty()) return false;
+			if (F.empty()) {
+				return false;
+			}
 			
-			// determine this function type + exit if it isn't a kernel or shader function
-			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
-			is_vertex_func = F.getCallingConv() == CallingConv::FLOOR_VERTEX;
-			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
-			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
-			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
-			if (!is_kernel_func &&
-				!is_vertex_func &&
-				!is_fragment_func &&
-				!is_tess_control_func &&
-				!is_tess_eval_func) {
+			// exit if this is not an entry point
+			if (!llvm::CallingConv::isFloorEntryPoint(F.getCallingConv())) {
 				return false;
 			}
 			

@@ -1025,6 +1025,7 @@ void ModuleBitcodeWriter::writeTypeTable() {
 
 static unsigned getEncodedLinkage(const GlobalValue::LinkageTypes Linkage) {
   switch (Linkage) {
+  case GlobalValue::ExternallyRequiredLinkage:
   case GlobalValue::ExternalLinkage:
     return 0;
   case GlobalValue::WeakAnyLinkage:

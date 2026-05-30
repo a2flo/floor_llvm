@@ -3727,7 +3727,13 @@ static Address emitArraySubscriptGEP(CodeGenFunction &CGF, Address addr,
                                                         idx, DbgInfo);
   }
 
-  return Address(eltPtr, CGF.ConvertTypeForMem(eltType), eltAlign);
+  // handle use and conversion of graphics I/O types
+  const auto elem_type = eltPtr->getType()->getPointerElementType();
+  const auto st_elem_type = dyn_cast_or_null<llvm::StructType>(elem_type);
+  const type_conversion_opts_t conv_opts {
+    .io_type_conversion = (st_elem_type && st_elem_type->isGraphicsIOType()),
+  };
+  return Address(eltPtr, CGF.ConvertTypeForMem(eltType, conv_opts), eltAlign);
 }
 
 LValue CodeGenFunction::EmitArraySubscriptExpr(const ArraySubscriptExpr *E,
@@ -4483,8 +4489,21 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
   // for both unions and structs.  A union needs a bitcast, a struct element
   // will need a bitcast if the LLVM type laid out doesn't match the desired
   // type.
+  // NOTE: for libfloor graphics types: we need to a) take care of special Vulkan argument buffer handling,
+  //       and b) take *very* special care of graphics I/O type conversions -> we only want to enable this
+  //       when we know that the contained type is an I/O type (struct.floor.io.*),
+  //       otherwise normal conversion has to be used instead
   const auto is_vk_arg_buffer = (is_floor_arg_buffer && getLangOpts().Vulkan);
-  auto llvm_elem_type = CGM.getTypes().ConvertTypeForMem(FieldType, false, false, !is_vk_arg_buffer);
+  const auto contains_io_type = Addr.getType()->getPointerElementType()->containsGraphicsIOType();
+  const type_conversion_opts_t conv_opts {
+    .io_type_conversion = contains_io_type,
+    .convert_array_image_or_buffer_type = false,
+    // convert top level types containing arrays directly to arrays
+    .convert_array_type = is_vk_arg_buffer && is_flattened_struct,
+    .single_field_array_image_or_buffer_only = !is_vk_arg_buffer,
+    .vector_compat_conversion = contains_io_type,
+  };
+  auto llvm_elem_type = CGM.getTypes().ConvertTypeForMem(FieldType, false, false, conv_opts);
   // for expanded Vulkan argument buffers, we need to take care of additional type/value conversion/handling
   if (getLangOpts().Vulkan) {
 	  bool is_base_load = false;

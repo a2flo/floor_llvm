@@ -328,6 +328,8 @@ void Sema::Initialize() {
 
   if (getLangOpts().Metal || getLangOpts().Vulkan || getLangOpts().OpenCL) {
     addImplicitTypedef("__patch_control_point_t", Context.OCLPatchControlPointTy);
+    addImplicitTypedef("__mesh_t", Context.OCLMeshTy);
+    addImplicitTypedef("__mesh_grid_properties_t", Context.OCLMeshGridPropertiesTy);
   }
 
   // Initialize predefined OpenCL types and supported extensions and (optional)

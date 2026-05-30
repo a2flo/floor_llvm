@@ -1112,6 +1112,8 @@ ExprResult Parser::ParseCastExpression(CastParseKind ParseKind,
           REVERTIBLE_TYPE_TRAIT(__is_unsigned);
           REVERTIBLE_TYPE_TRAIT(__is_void);
           REVERTIBLE_TYPE_TRAIT(__is_volatile);
+          REVERTIBLE_TYPE_TRAIT(__libfloor_is_valid_mesh_vertex_type);
+          REVERTIBLE_TYPE_TRAIT(__libfloor_is_valid_mesh_primitive_type);
 #undef REVERTIBLE_TYPE_TRAIT
 #undef RTT_JOIN
         }

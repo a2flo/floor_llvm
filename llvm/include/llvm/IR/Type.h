@@ -289,6 +289,16 @@ public:
   /// Return true if this is a flattened libfloor argument buffer type.
   bool isFlattenedFloorArgBufferType() const;
 
+  /// Return true if this is a builtin mesh type.
+  bool isMeshType() const;
+
+  /// Return true if this is a builtin mesh-grid-properties type.
+  bool isMeshGridPropertiesType() const;
+
+  /// Return true if the most immediate struct type is a graphics I/O type.
+  /// NOTE: this will look behind pointers and arrays.
+  bool containsGraphicsIOType() const;
+
   /// Return the basic size of this type if it is a primitive type. These are
   /// fixed by LLVM and are not target-dependent.
   /// This will return zero if the type does not have a size or is not a

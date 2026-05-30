@@ -998,17 +998,27 @@ bool Vectorizer::vectorizeStoreChain(
     SmallPtrSet<Instruction *, 16> *InstructionsProcessed) {
   StoreInst *S0 = cast<StoreInst>(Chain[0]);
 
-  // If the vector has an int element, default to int for the whole store.
+  // prefer the first element type that is not bitcasted
   Type *StoreTy = nullptr;
   for (Instruction *I : Chain) {
-    StoreTy = cast<StoreInst>(I)->getValueOperand()->getType();
-    if (StoreTy->isIntOrIntVectorTy())
+    auto SI = cast<StoreInst>(I);
+    if (!isa<BitCastInst>(SI->getPointerOperand())) {
+      StoreTy = SI->getValueOperand()->getType();
       break;
+    }
+  }
+  if (!StoreTy) {
+    // otherwise: If the vector has an int element, default to int for the whole store.
+    for (Instruction *I : Chain) {
+      StoreTy = cast<StoreInst>(I)->getValueOperand()->getType();
+      if (StoreTy->isIntOrIntVectorTy())
+        break;
 
-    if (StoreTy->isPtrOrPtrVectorTy()) {
-      StoreTy = Type::getIntNTy(F.getParent()->getContext(),
-                                DL.getTypeSizeInBits(StoreTy));
-      break;
+      if (StoreTy->isPtrOrPtrVectorTy()) {
+        StoreTy = Type::getIntNTy(F.getParent()->getContext(),
+                                  DL.getTypeSizeInBits(StoreTy));
+        break;
+      }
     }
   }
   assert(StoreTy && "Failed to find store type");
@@ -1158,17 +1168,27 @@ bool Vectorizer::vectorizeLoadChain(
     SmallPtrSet<Instruction *, 16> *InstructionsProcessed) {
   LoadInst *L0 = cast<LoadInst>(Chain[0]);
 
-  // If the vector has an int element, default to int for the whole load.
+  // prefer the first element type that is not bitcasted
   Type *LoadTy = nullptr;
   for (const auto &V : Chain) {
-    LoadTy = cast<LoadInst>(V)->getType();
-    if (LoadTy->isIntOrIntVectorTy())
+    auto LI = cast<LoadInst>(V);
+    if (!isa<BitCastInst>(LI->getPointerOperand())) {
+      LoadTy = LI->getType();
       break;
+    }
+  }
+  if (!LoadTy) {
+    // otherwise: If the vector has an int element, default to int for the whole load.
+    for (const auto &V : Chain) {
+      LoadTy = cast<LoadInst>(V)->getType();
+      if (LoadTy->isIntOrIntVectorTy())
+        break;
 
-    if (LoadTy->isPtrOrPtrVectorTy()) {
-      LoadTy = Type::getIntNTy(F.getParent()->getContext(),
-                               DL.getTypeSizeInBits(LoadTy));
-      break;
+      if (LoadTy->isPtrOrPtrVectorTy()) {
+        LoadTy = Type::getIntNTy(F.getParent()->getContext(),
+                                 DL.getTypeSizeInBits(LoadTy));
+        break;
+      }
     }
   }
   assert(LoadTy && "Can't determine LoadInst type from chain");

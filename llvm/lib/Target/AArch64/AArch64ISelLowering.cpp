@@ -5346,6 +5346,8 @@ CCAssignFn *AArch64TargetLowering::CCAssignFnForCall(CallingConv::ID CC,
   case CallingConv::FLOOR_FRAGMENT:
   case CallingConv::FLOOR_TESS_CONTROL:
   case CallingConv::FLOOR_TESS_EVAL:
+  case CallingConv::FLOOR_TASK:
+  case CallingConv::FLOOR_MESH:
     if (Subtarget->isTargetWindows() && IsVarArg)
       return CC_AArch64_Win64_VarArg;
     if (!Subtarget->isTargetDarwin())

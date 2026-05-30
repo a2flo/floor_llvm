@@ -95,7 +95,9 @@ namespace clang {
     TST_queue_t,          // OpenCL queue_t
     TST_clk_event_t,      // OpenCL clk_event_t
     TST_reserve_id_t,     // OpenCL reserve_id_t
-    TST_patch_control_point_t, // Metal/Vulkan __patch_control_point_t
+    TST_patch_control_point_t,  // Metal __patch_control_point_t
+    TST_mesh_t,                 // Metal/Vulkan __mesh_t
+    TST_mesh_grid_properties_t, // Metal/Vulkan __mesh_grid_properties_t
     TST_error // erroneous type
   };
 
@@ -285,12 +287,28 @@ namespace clang {
     CC_FloorFragment, // inferred for Metal/AIR and Vulkan/SPIR-V fragment shaders
     CC_FloorTessControl, // inferred for Metal/AIR and Vulkan/SPIR-V tessellation control shaders
     CC_FloorTessEval, // inferred for Metal/AIR and Vulkan/SPIR-V tessellation evaluation shaders
+    CC_FloorTask, // inferred for Metal/AIR and Vulkan/SPIR-V task shaders
+    CC_FloorMesh, // inferred for Metal/AIR and Vulkan/SPIR-V mesh shaders
     CC_Swift,        // __attribute__((swiftcall))
     CC_SwiftAsync,        // __attribute__((swiftasynccall))
     CC_PreserveMost, // __attribute__((preserve_most))
     CC_PreserveAll,  // __attribute__((preserve_all))
     CC_AArch64VectorCall, // __attribute__((aarch64_vector_pcs))
   };
+
+  //! returns true if the specified "CC" calling convention is a device entry point
+  static inline bool isFloorEntryPoint(CallingConv CC) {
+    if (CC == CC_FloorKernel ||
+        CC == CC_FloorVertex ||
+        CC == CC_FloorFragment ||
+        CC == CC_FloorTessControl ||
+        CC == CC_FloorTessEval ||
+        CC == CC_FloorTask ||
+        CC == CC_FloorMesh) {
+      return true;
+    }
+    return false;
+  }
 
   /// Checks whether the given calling convention supports variadic
   /// calls. Unprototyped calls also use the variadic call rules.
@@ -308,6 +326,8 @@ namespace clang {
     case CC_FloorFragment:
     case CC_FloorTessControl:
     case CC_FloorTessEval:
+    case CC_FloorTask:
+    case CC_FloorMesh:
     case CC_Swift:
     case CC_SwiftAsync:
       return false;
@@ -376,7 +396,11 @@ namespace clang {
     /// Swift asynchronous context-pointer ABI treatment.  There can be at
     /// most one parameter on a given function that uses this treatment.
     SwiftAsyncContext,
+
+    MaxParameterABI,
   };
+  // NOTE: ParameterABI must fit into 3 bits -> max must be <= 8
+  static_assert(int(ParameterABI::MaxParameterABI) <= 8);
 
   /// Assigned inheritance model for a class in the MS C++ ABI. Must match order
   /// of spellings in MSInheritanceAttr.

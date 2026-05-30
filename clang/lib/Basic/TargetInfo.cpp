@@ -497,6 +497,12 @@ LangAS TargetInfo::getOpenCLTypeAddrSpace(OpenCLTypeKind TK) const {
   case OCLTK_Sampler:
     return LangAS::opencl_constant;
 
+  case OCLTK_Mesh:
+    return LangAS::metal_mesh;
+
+  case OCLTK_MeshGridProperties:
+    return LangAS::opencl_local;
+
   default:
     return LangAS::Default;
   }

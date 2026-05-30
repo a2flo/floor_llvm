@@ -1895,6 +1895,7 @@ LLVMBool LLVMIsDeclaration(LLVMValueRef Global) {
 
 LLVMLinkage LLVMGetLinkage(LLVMValueRef Global) {
   switch (unwrap<GlobalValue>(Global)->getLinkage()) {
+  case GlobalValue::ExternallyRequiredLinkage:
   case GlobalValue::ExternalLinkage:
     return LLVMExternalLinkage;
   case GlobalValue::AvailableExternallyLinkage:

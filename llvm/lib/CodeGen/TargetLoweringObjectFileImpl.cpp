@@ -2477,6 +2477,7 @@ TargetLoweringObjectFileXCOFF::getStorageClassForGlobal(const GlobalValue *GV) {
   case GlobalValue::InternalLinkage:
   case GlobalValue::PrivateLinkage:
     return XCOFF::C_HIDEXT;
+  case GlobalValue::ExternallyRequiredLinkage:
   case GlobalValue::ExternalLinkage:
   case GlobalValue::CommonLinkage:
   case GlobalValue::AvailableExternallyLinkage:

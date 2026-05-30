@@ -93,6 +93,19 @@ enum class FUNCTION_TYPE : uint8_t {
 	NONE = 255
 };
 
+//! supported memory address spaces
+enum class ADDRESS_SPACE : uint8_t {
+	PRIVATE = 0u,
+	GLOBAL = 1u,
+	CONSTANT = 2u,
+	LOCAL = 3u,
+	IMAGEBLOCK = 4u,
+	RAY = 5u,
+	TASK = 6u,
+	MESH = 7u,
+	INTERSECTION_RESULT = 9u,
+};
+
 //! Apple platform targets
 //! in recent LLVM versions, this is defined here: https://github.com/llvm/llvm-project/blob/main/llvm/include/llvm/BinaryFormat/MachO.def#L123
 enum class APPLE_PLATFORM : uint32_t {

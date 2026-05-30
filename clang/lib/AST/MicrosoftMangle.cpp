@@ -2448,6 +2448,14 @@ void MicrosoftCXXNameMangler::mangleType(const BuiltinType *T, Qualifiers,
     Out << "PA";
     mangleArtificialTagType(TTK_Struct, "__patch_control_point_t");
     break;
+  case BuiltinType::OCLMesh:
+    Out << "PA";
+    mangleArtificialTagType(TTK_Struct, "__mesh_t");
+    break;
+  case BuiltinType::OCLMeshGridProperties:
+    Out << "PA";
+    mangleArtificialTagType(TTK_Struct, "__mesh_grid_properties_t");
+    break;
 #define EXT_OPAQUE_TYPE(ExtType, Id, Ext) \
   case BuiltinType::Id: \
     mangleArtificialTagType(TTK_Struct, "ocl_" #ExtType); \

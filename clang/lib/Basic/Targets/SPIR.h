@@ -32,6 +32,9 @@ static const unsigned SPIRDefIsPrivMap[] = {
     100, // opencl_global_device
     101, // opencl_global_host
     0, // vulkan_input
+    0, // vulkan_output
+    0, // metal_mesh
+    0, // task_payload
     0, // cuda_device
     0, // cuda_constant
     0, // cuda_shared
@@ -58,6 +61,9 @@ static const unsigned SPIRDefIsGenMap[] = {
     0, // opencl_global_device
     0, // opencl_global_host
     0, // vulkan_input
+    0, // vulkan_output
+    0, // metal_mesh
+    0, // task_payload
     // cuda_* address space mapping is intended for HIPSPV (HIP to SPIR-V
     // translation). This mapping is enabled when the language mode is HIP.
     1, // cuda_device
@@ -87,6 +93,37 @@ static const unsigned VulkanAddrSpaceMap[] = {
     0, // opencl_global_device
     0, // opencl_global_host
     6, // vulkan_input == SPIRAS_Input
+    7, // vulkan_output == SPIRAS_Output
+    0, // metal_mesh
+    5402, // task_payload == SPIRAS_TaskPayloadWorkgroup
+    0, // cuda_device
+    0, // cuda_constant
+    0, // cuda_shared
+    // SYCL address space values for this map are dummy
+    0, // sycl_global
+    0, // sycl_global_device
+    0, // sycl_global_host
+    0, // sycl_local
+    0, // sycl_private
+    0, // ptr32_sptr
+    0, // ptr32_uptr
+    0  // ptr64
+};
+
+// Used by AIR targets.
+static const unsigned AIRAddrSpaceMap[] = {
+    0, // Default
+    1, // opencl_global
+    3, // opencl_local
+    2, // opencl_constant
+    0, // opencl_private
+    0, // opencl_generic
+    0, // opencl_global_device
+    0, // opencl_global_host
+    0, // vulkan_input
+    0, // vulkan_output
+    7, // metal_mesh
+    6, // task_payload
     0, // cuda_device
     0, // cuda_constant
     0, // cuda_shared
@@ -174,7 +211,9 @@ public:
         CC == CC_FloorFragment ||
         CC == CC_FloorKernel ||
         CC == CC_FloorTessControl ||
-        CC == CC_FloorTessEval) {
+        CC == CC_FloorTessEval ||
+        CC == CC_FloorTask ||
+        CC == CC_FloorMesh) {
         return CCCR_OK;
     }
     return CCCR_Warning;
@@ -266,9 +305,12 @@ public:
     PointerWidth = PointerAlign = 64;
     SizeType = TargetInfo::UnsignedLong;
     PtrDiffType = IntPtrType = TargetInfo::SignedLong;
-    resetDataLayout("e-p:64:64-i64:64-v16:16-v24:32-v32:32-v48:64-"
-                    "v96:128-v192:256-v256:256-v512:512-v1024:1024"
-                    "-n8:16:32:64");
+    if (isVulkan()) {
+      // for initial compilation and optimization, allow more liberal vector alignment to enable better libfloor vector <-> LLVM vector replacements/casting/optimizations
+      resetDataLayout("e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:8:8-v24:8:8-v32:8:8-v48:8:8-v64:8:8-v96:8:8-v128:8:8-v192:8:8-v256:8:8-v512:8:8-v1024:8:8-n8:16:32");
+    } else {
+      resetDataLayout("e-p:64:64-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-n8:16:32:64");
+    }
   }
 
   void getTargetDefines(const LangOptions &Opts,
@@ -296,6 +338,7 @@ public:
   }
 };
 
+//! NOTE: not actually used
 class LLVM_LIBRARY_VISIBILITY SPIRV32TargetInfo : public SPIRVTargetInfo {
 public:
   SPIRV32TargetInfo(const llvm::Triple &Triple, const TargetOptions &Opts)
@@ -313,6 +356,7 @@ public:
                         MacroBuilder &Builder) const override;
 };
 
+//! NOTE: not actually used
 class LLVM_LIBRARY_VISIBILITY SPIRV64TargetInfo : public SPIRVTargetInfo {
 public:
   SPIRV64TargetInfo(const llvm::Triple &Triple, const TargetOptions &Opts)
@@ -337,11 +381,10 @@ public:
     PointerWidth = PointerAlign = 64;
     SizeType     = TargetInfo::UnsignedLong;
     PtrDiffType = IntPtrType = TargetInfo::SignedLong;
-    if(Triple.getOS() == llvm::Triple::IOS) {
-      resetDataLayout("e-i64:64-f80:128-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-n8:16:32");
-    } else { // macOS, or default
-      resetDataLayout("e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-f80:128:128-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-f80:128:128-n8:16:32");
-    }
+    // for initial compilation and optimization, allow more liberal vector alignment to enable better libfloor vector <-> LLVM vector replacements/casting/optimizations
+    // -> this will later be reset during MetalFinalModuleCleanup in MetalFinal
+    resetDataLayout("e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:8:8-v24:8:8-v32:8:8-v48:8:8-v64:8:8-v96:8:8-v128:8:8-v192:8:8-v256:8:8-v512:8:8-v1024:8:8-n8:16:32");
+    AddrSpaceMap = &AIRAddrSpaceMap;
   }
   
   void getTargetDefines(const LangOptions &Opts,
@@ -353,7 +396,9 @@ public:
         CC == CC_FloorFragment ||
         CC == CC_FloorKernel ||
         CC == CC_FloorTessControl ||
-        CC == CC_FloorTessEval) {
+        CC == CC_FloorTessEval ||
+        CC == CC_FloorTask ||
+        CC == CC_FloorMesh) {
         return CCCR_OK;
     }
     return CCCR_Warning;
@@ -361,6 +406,11 @@ public:
 
   CallingConv getDefaultCallingConv() const override {
     return CC_FloorFunction;
+  }
+
+  void adjust(DiagnosticsEngine &Diags, LangOptions &Opts) override {
+    TargetInfo::adjust(Diags, Opts);
+    // NOTE: always keep the address space map as-is
   }
 };
 

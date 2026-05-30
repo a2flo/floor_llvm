@@ -2626,6 +2626,19 @@ void CXXNameMangler::mangleQualifiers(Qualifiers Quals, const DependentAddressSp
       case LangAS::opencl_generic:
         ASString = "CLgeneric";
         break;
+      //
+      case LangAS::vulkan_input:
+        ASString = "VKinput";
+        break;
+      case LangAS::vulkan_output:
+        ASString = "VKoutput";
+        break;
+      case LangAS::metal_mesh:
+        ASString = "MTLmesh";
+        break;
+      case LangAS::task_payload:
+        ASString = "task_payload";
+        break;
       //  <SYCL-addrspace> ::= "SY" [ "global" | "local" | "private" |
       //                              "device" | "host" ]
       case LangAS::sycl_global:
@@ -2889,21 +2902,22 @@ void CXXNameMangler::mangleNameOrStandardSubstitution(const NamedDecl *ND) {
 void CXXNameMangler::mangleMetalFieldName(const FieldDecl *D, const CXXRecordDecl* RD) {
 	const DeclContext *DC = Context.getEffectiveDeclContext(D);
 	const DeclContext *PDC = Context.getEffectiveDeclContext(RD);
+	const auto is_mesh_output_type = RD->getName().equals("mesh_output_type");
 	
-	if(const auto II = D->getIdentifier()) {
+	if (const auto II = D->getIdentifier()) {
 		// TODO: need actual parent field entry for all nested types
-		if(DC->getParent()->Equals(PDC)) {
+		if (DC->getParent()->Equals(PDC) || is_mesh_output_type) {
 			mangleSourceName(II);
 		}
 	}
 	
 	// top level: mangle directly (without enclosing record decl / PDC)
 	// all else: mangle nested type as well
-	if(!DC->getParent()->Equals(PDC)) {
+	// also: ignore enclosing mesh_output_type
+	if (!DC->getParent()->Equals(PDC) && !is_mesh_output_type) {
 		if (GetLocalClassDecl(D)) {
 			mangleLocalName(D, nullptr);
-		}
-		else {
+		} else {
 			mangleNestedName(D, DC, nullptr);
 		}
 	}
@@ -3111,6 +3125,12 @@ void CXXNameMangler::mangleType(const BuiltinType *T) {
   case BuiltinType::OCLPatchControlPoint:
     Out << "24__patch_control_point_t";
     break;
+  case BuiltinType::OCLMesh:
+    Out << "9__mesh_t";
+    break;
+  case BuiltinType::OCLMeshGridProperties:
+    Out << "25__mesh_grid_properties_t";
+    break;
 #define EXT_OPAQUE_TYPE(ExtType, Id, Ext) \
   case BuiltinType::Id: \
     type_name = "ocl_" #ExtType; \
@@ -3168,6 +3188,8 @@ StringRef CXXNameMangler::getCallingConvQualifierName(CallingConv CC) {
   case CC_FloorFragment:
   case CC_FloorTessControl:
   case CC_FloorTessEval:
+  case CC_FloorTask:
+  case CC_FloorMesh:
   case CC_PreserveMost:
   case CC_PreserveAll:
     // FIXME: we should be mangling all of the above.
@@ -3222,6 +3244,9 @@ CXXNameMangler::mangleExtParameterInfo(FunctionProtoType::ExtParameterInfo PI) {
   // have trouble with this if the parameter type is fully substituted.
 
   switch (PI.getABI()) {
+  case ParameterABI::MaxParameterABI:
+    llvm_unreachable("invalid parameter ABI");
+
   case ParameterABI::Ordinary:
     break;
 

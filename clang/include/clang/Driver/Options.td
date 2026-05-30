@@ -5947,6 +5947,8 @@ def floor_error_on_alloca : Flag<["-"], "floor-error-on-alloca">,
   HelpText<"emit an error when there still is an alloca at the end of all optimizations">;
 def floor_error_on_ptr_type_alloca : Flag<["-"], "floor-error-on-ptr-type-alloca">,
   HelpText<"emit an error when there still is an alloca with a pointer type at the end of all optimizations">;
+def floor_error_on_ptr_int_casts : Flag<["-"], "floor-error-on-ptr-int-casts">,
+  HelpText<"emit an error when there is any inttoptr or ptrtoint instruction">;
 
 //===----------------------------------------------------------------------===//
 // OpenCL Options
@@ -6016,6 +6018,8 @@ def vulkan_ptr_workarounds : Flag<["-"], "vulkan-ptr-workarounds">,
   HelpText<"Enables Vulkan specific pointer workarounds">;
 def vulkan_untyped_pointers : Flag<["-"], "vulkan-untyped-pointers">,
   HelpText<"Enables support of SPV_KHR_untyped_pointers">;
+def vulkan_mesh_shading : Flag<["-"], "vulkan-mesh-shading">,
+  HelpText<"Enables support of SPV_EXT_mesh_shader">;
 
 //===----------------------------------------------------------------------===//
 // Graphics Options

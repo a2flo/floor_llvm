@@ -1225,6 +1225,18 @@ def GraphicsTessellationEvaluationShader : DeclOrTypeAttr {
   let SimpleHandler = 1;
 }
 
+def GraphicsTaskShader : DeclOrTypeAttr {
+  let Spellings = [GNU<"task_shader">, CXX11<"","task_shader", 200809>];
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+
+def GraphicsMeshShader : DeclOrTypeAttr {
+  let Spellings = [GNU<"mesh_shader">, CXX11<"","mesh_shader", 200809>];
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+
 // compute kernel dimensionality (1, 2 or 3)
 def ComputeKernelDim : DeclOrTypeAttr {
   let Spellings = [GNU<"kernel_dim">, CXX11<"","kernel_dim", 200809>];
@@ -1276,6 +1288,23 @@ def ComputeKernelSIMDWidth : DeclOrTypeAttr {
   }
   void setWidth(unsigned int simd_width_) {
     simd_width = simd_width_;
+  }
+  }];
+  let Subjects = SubjectList<[Function], ErrorDiag>;
+  let Documentation = [Undocumented];
+}
+
+def MeshMaxWorkGroups : DeclOrTypeAttr {
+  let Spellings = [GNU<"mesh_max_work_groups">, CXX11<"","mesh_max_work_groups", 200809>];
+  let Args = [ExprArgument<"Count">];
+  let TemplateDependent = 1;
+  let AdditionalMembers = [{
+  unsigned int max_work_groups { 0 };
+  auto getMaxWorkGroups() const {
+    return max_work_groups;
+  }
+  void setMaxWorkGroups(unsigned int max_work_groups_) {
+    max_work_groups = max_work_groups_;
   }
   }];
   let Subjects = SubjectList<[Function], ErrorDiag>;
@@ -1334,6 +1363,16 @@ def ConstantAddressSpace : TypeAttr {
 def GenericAddressSpace : TypeAttr {
   let Spellings = [GNU<"generic_as">, CXX11<"","generic_as", 200809>];
   let Documentation = [OpenCLAddressSpaceGenericDocs];
+}
+
+def MeshAddressSpace : TypeAttr {
+  let Spellings = [GNU<"mesh_as">, CXX11<"","mesh_as", 200809>];
+  let Documentation = [Undocumented];
+}
+
+def TaskPayloadAddressSpace : TypeAttr {
+  let Spellings = [GNU<"task_payload_as">, CXX11<"","task_payload_as", 200809>];
+  let Documentation = [Undocumented];
 }
 
 // CUDA address space attrs are not type attrs, so they need to be handled specially
@@ -1449,6 +1488,20 @@ def GraphicsPointSize : InheritableAttr {
 // explicit vertex -> fragment flat interpolation
 def GraphicsInterpolateFlat : InheritableAttr {
   let Spellings = [GNU<"flat">, CXX11<"","flat", 200809>];
+  let Documentation = [Undocumented];
+}
+
+// mesh shading is-primitive-culled flag
+def GraphicsPrimitiveCulled : InheritableAttr {
+  let Spellings = [GNU<"culled">, CXX11<"","culled", 200809>];
+  let Documentation = [Undocumented];
+}
+
+// mesh shading per-primitive interpolation flag (only required in Vulkan)
+def GraphicsPerPrimitive : InheritableAttr {
+  let Spellings = [GNU<"per_primitive">, CXX11<"","per_primitive", 200809>];
+  // specified on parent/containing struct member/field -> will propagate to all child fields
+  let Subjects = SubjectList<[Field]>;
   let Documentation = [Undocumented];
 }
 

@@ -47,6 +47,9 @@ const LangASMap AMDGPUTargetInfo::AMDGPUDefIsGenMap = {
     Global,   // opencl_global_device
     Global,   // opencl_global_host
     Generic,  // vulkan_input
+    Generic,  // vulkan_output
+    Generic,  // metal_mesh
+    Generic,  // task_payload
     Global,   // cuda_device
     Constant, // cuda_constant
     Local,    // cuda_shared
@@ -70,6 +73,9 @@ const LangASMap AMDGPUTargetInfo::AMDGPUDefIsPrivMap = {
     Global,   // opencl_global_device
     Global,   // opencl_global_host
     Generic,  // vulkan_input
+    Generic,  // vulkan_output
+    Generic,  // metal_mesh
+    Generic,  // task_payload
     Global,   // cuda_device
     Constant, // cuda_constant
     Local,    // cuda_shared

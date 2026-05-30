@@ -139,7 +139,8 @@ static std::optional<uint32_t> md_get_next_uint(const llvm::MDNode& md_node, llv
 }
 
 template <typename node_type>
-static inline bool generic_create_type_name_and_name(node_type& node, const llvm::MDNode& md_node, reflection_state_t& state) {
+static inline bool generic_create_type_name_and_name(node_type& node, const llvm::MDNode& md_node, reflection_state_t& state,
+													 const uint32_t start_idx = 2u /* for most direct nodes */) {
 	if (!md_node_iterate(md_node, [&node, &md_node](llvm::StringRef type_str, llvm::MDNode::op_iterator& iter) {
 		if (type_str == "air.arg_type_name") {
 			if (const auto str = md_get_next_string(md_node, iter); str) {
@@ -153,7 +154,7 @@ static inline bool generic_create_type_name_and_name(node_type& node, const llvm
 			}
 		}
 		return false;
-	})) {
+	}, start_idx)) {
 		return false;
 	}
 	return true;
@@ -564,9 +565,175 @@ static inline node_id_t create_instance_id(const llvm::MDNode& md_node, reflecti
 	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
 }
 
+static inline node_id_t create_mesh_type_info(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_mesh_type_info_t>();
+	
+	auto md_iter = md_node.op_begin();
+	
+	const auto mesh_type_info = md_get_string(md_node, md_iter);
+	if (!mesh_type_info || !mesh_type_info->equals("air.mesh_type_info")) {
+		return invalid_node_id;
+	}
+	
+	const auto vertex_info_md_node = md_get_next_mdnode(md_node, md_iter);
+	if (!vertex_info_md_node || vertex_info_md_node->getNumOperands() == 0) {
+		return invalid_node_id;
+	}
+	node.vertex_types = std::vector<node_id_t> {};
+	for (auto vert_iter = vertex_info_md_node->op_begin(); vert_iter != vertex_info_md_node->op_end(); ++vert_iter) {
+		const auto vert_node = llvm::dyn_cast_or_null<llvm::MDNode>(*vert_iter);
+		if (!vert_node || vert_node->getNumOperands() < 5) {
+			llvm::errs() << "reflection: unexpected or invalid mesh vertex metadata type in: " << vertex_info_md_node << "\n";
+			return invalid_node_id;
+		}
+		const auto vert_type_str = llvm::dyn_cast_or_null<llvm::MDString>(*vert_node->op_begin());
+		if (!vert_type_str) {
+			llvm::errs() << "reflection: invalid mesh vertex metadata type name in: " << vert_node << "\n";
+			return invalid_node_id;
+		}
+		const auto vert_node_id = create_node(*vert_node, vert_type_str->getString().str(), state, true /* is return type */);
+		if (vert_node_id.id == invalid_node_id.id) {
+			llvm::errs() << "reflection: failed to handle mesh vertex type node in: " << vert_node << "\n";
+			return invalid_node_id;
+		}
+		node.vertex_types->emplace_back(vert_node_id);
+	}
+	
+	// NOTE: this must be present even for void primitive types, but will contain 0 operands
+	const auto prim_info_md_node = md_get_next_mdnode(md_node, md_iter);
+	if (!prim_info_md_node) {
+		return invalid_node_id;
+	}
+	node.primitive_types = std::vector<node_id_t> {};
+	for (auto prim_iter = prim_info_md_node->op_begin(); prim_iter != prim_info_md_node->op_end(); ++prim_iter) {
+		const auto prim_node = llvm::dyn_cast_or_null<llvm::MDNode>(*prim_iter);
+		if (!prim_node || prim_node->getNumOperands() < 5) {
+			llvm::errs() << "reflection: unexpected or invalid mesh primitive metadata type in: " << prim_info_md_node << "\n";
+			return invalid_node_id;
+		}
+		const auto prim_type_str = llvm::dyn_cast_or_null<llvm::MDString>(*prim_node->op_begin());
+		if (!prim_type_str) {
+			llvm::errs() << "reflection: invalid mesh primitive metadata type name in: " << prim_node << "\n";
+			return invalid_node_id;
+		}
+		const auto prim_node_id = create_node(*prim_node, prim_type_str->getString().str(), state, true /* is return type */);
+		if (prim_node_id.id == invalid_node_id.id) {
+			llvm::errs() << "reflection: failed to handle mesh primitive type node in: " << prim_node << "\n";
+			return invalid_node_id;
+		}
+		node.primitive_types->emplace_back(prim_node_id);
+	}
+	
+	const auto max_vert_count = md_get_next_uint(md_node, md_iter);
+	if (!max_vert_count) {
+		return invalid_node_id;
+	}
+	node.max_vertices = *max_vert_count;
+	
+	const auto max_prim_count = md_get_next_uint(md_node, md_iter);
+	if (!max_prim_count) {
+		return invalid_node_id;
+	}
+	node.max_primitives = *max_prim_count;
+	
+	const auto topo = md_get_next_string(md_node, md_iter);
+	if (!topo) {
+		return invalid_node_id;
+	}
+	if (topo->equals("air.triangle")) {
+		node.topology = TOPOLOGY::TRIANGLE;
+	} else if (topo->equals("air.line")) {
+		node.topology = TOPOLOGY::LINE;
+	} else if (topo->equals("air.point")) {
+		node.topology = TOPOLOGY::POINT;
+	} else {
+		assert(false);
+		node.topology = TOPOLOGY::INVALID;
+	}
+	
+	return node_id;
+}
+
+static inline node_id_t create_mesh(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_mesh_arg_t>();
+	if (!md_node_iterate(md_node, [&node, &md_node, &state](llvm::StringRef type_str, llvm::MDNode::op_iterator& iter) {
+		if (type_str == "air.mesh") {
+			const auto mesh_info_md_node = md_get_next_mdnode(md_node, iter);
+			if (!mesh_info_md_node) {
+				return false;
+			}
+			if (const auto mesh_info_node_id = create_mesh_type_info(*mesh_info_md_node, state);
+				mesh_info_node_id.id != invalid_node_id.id) {
+				node.mesh_type_info = mesh_info_node_id;
+				return true;
+			}
+		} else if (type_str == "air.arg_type_name") {
+			if (const auto str = md_get_next_string(md_node, iter); str) {
+				node.type_name = str->str();
+				return true;
+			}
+		} else if (type_str == "air.arg_name") {
+			if (const auto str = md_get_next_string(md_node, iter); str) {
+				node.name = str->str();
+				return true;
+			}
+		}
+		return false;
+	}, 1u /* start at #1 for mesh type */)) {
+		return invalid_node_id;
+	}
+   return node_id;
+}
+
+static inline node_id_t create_mesh_grid_properties(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_mesh_grid_properties_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
 static inline node_id_t create_patch_id(const llvm::MDNode& md_node, reflection_state_t& state) {
 	auto [node, node_id] = state.create_node<node_patch_id_arg_t>();
 	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_payload(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_payload_arg_t>();
+	if (!md_node_iterate(md_node, [&node, &md_node, &state](llvm::StringRef type_str, llvm::MDNode::op_iterator& iter) {
+		if (type_str == "air.struct_type_info") {
+			const auto st_info_md_node = md_get_next_mdnode(md_node, iter);
+			if (!st_info_md_node) {
+				return false;
+			}
+			if (const auto st_info_node_id = create_struct_type_info(*st_info_md_node, state);
+				st_info_node_id.id != invalid_node_id.id) {
+				node.struct_type_info = st_info_node_id;
+				return true;
+			}
+		} else if (type_str == "air.arg_type_size") {
+			if (const auto val = md_get_next_uint(md_node, iter); val) {
+				node.type_size = { *val };
+				return true;
+			}
+		} else if (type_str == "air.arg_type_align_size") {
+			if (const auto val = md_get_next_uint(md_node, iter); val) {
+				node.type_align = { *val };
+				return true;
+			}
+		} else if (type_str == "air.arg_type_name") {
+			if (const auto str = md_get_next_string(md_node, iter); str) {
+				node.type_name = str->str();
+				return true;
+			}
+		} else if (type_str == "air.arg_name") {
+			if (const auto str = md_get_next_string(md_node, iter); str) {
+				node.name = str->str();
+				return true;
+			}
+		}
+		return false;
+	})) {
+		return invalid_node_id;
+	}
+   return node_id;
 }
 
 static inline node_id_t create_point_coord(const llvm::MDNode& md_node, reflection_state_t& state) {
@@ -756,10 +923,24 @@ static inline node_id_t create_depth_ret(const llvm::MDNode& md_node, reflection
 	return node_id;
 }
 
-static inline node_id_t create_point_size_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
-	auto [node, node_id] = state.create_node<node_point_size_ret_t>();
+template <typename node_type>
+static bool handle_mesh_data_ret(node_type& node, const llvm::MDNode& md_node) {
 	if (!md_node_iterate(md_node, [&node, &md_node](llvm::StringRef type_str, llvm::MDNode::op_iterator& iter) {
-		if (type_str == "air.arg_type_name") {
+		if (type_str == "air.mesh_vertex_data" ||
+			type_str == "air.mesh_primitive_data") {
+			const auto location_index = md_get_next_uint(md_node, iter);
+			if (!location_index) {
+				return false;
+			}
+			node.id = location_index;
+			
+			const auto attribute_name = md_get_next_string(md_node, iter);
+			if (!attribute_name) {
+				return false;
+			}
+			node.attribute_name = attribute_name->str();
+			return true;
+		} else if (type_str == "air.arg_type_name") {
 			if (const auto str = md_get_next_string(md_node, iter); str) {
 				node.type_name = str->str();
 				return true;
@@ -771,31 +952,41 @@ static inline node_id_t create_point_size_ret(const llvm::MDNode& md_node, refle
 			}
 		}
 		return false;
-	}, 1u /* start at #1 for return type */)) {
+	}, 0u /* start at #0 for mesh data */)) {
+		return false;
+	}
+	return true;
+}
+
+static inline node_id_t create_mesh_primitive_data_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_mesh_primitive_data_ret_t>();
+	if (!handle_mesh_data_ret(node, md_node)) {
 		return invalid_node_id;
 	}
 	return node_id;
 }
 
-static inline node_id_t create_position_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
-	auto [node, node_id] = state.create_node<node_position_ret_t>();
-	if (!md_node_iterate(md_node, [&node, &md_node](llvm::StringRef type_str, llvm::MDNode::op_iterator& iter) {
-		if (type_str == "air.arg_type_name") {
-			if (const auto str = md_get_next_string(md_node, iter); str) {
-				node.type_name = str->str();
-				return true;
-			}
-		} else if (type_str == "air.arg_name") {
-			if (const auto str = md_get_next_string(md_node, iter); str) {
-				node.name = str->str();
-				return true;
-			}
-		}
-		return false;
-	}, 1u /* start at #1 for return type */)) {
+static inline node_id_t create_mesh_vertex_data_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_mesh_vertex_data_ret_t>();
+	if (!handle_mesh_data_ret(node, md_node)) {
 		return invalid_node_id;
 	}
 	return node_id;
+}
+
+static inline node_id_t create_point_size_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_point_size_ret_t>();
+	return generic_create_type_name_and_name(node, md_node, state, 1u /* start at #1 for return type */) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_position_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_position_ret_t>();
+	return generic_create_type_name_and_name(node, md_node, state, 1u /* start at #1 for return type */) ? node_id : invalid_node_id;
+}
+
+static inline node_id_t create_primitive_culled_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_primitive_culled_ret_t>();
+	return generic_create_type_name_and_name(node, md_node, state, 1u /* start at #1 for return type */) ? node_id : invalid_node_id;
 }
 
 static inline node_id_t create_vertex_output_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
@@ -873,6 +1064,22 @@ static inline node_id_t create_workgroup_max_size_fn_attr(const llvm::MDNode& md
 	return node_id;
 }
 
+static inline node_id_t create_max_mesh_work_groups_fn_attr(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_max_mesh_workgroups_fn_attr_t>();
+	if (!md_node_iterate(md_node, [&node, &md_node](llvm::StringRef type_str, llvm::MDNode::op_iterator& iter) {
+		if (type_str == "air.max_mesh_work_groups") {
+			if (const auto val = md_get_next_uint(md_node, iter); val) {
+				node.workgroups = { *val };
+				return true;
+			}
+		}
+		return false;
+	}, 0u /* start at #0 for function attribute */)) {
+		return invalid_node_id;
+	}
+	return node_id;
+}
+
 static inline node_id_t create_patch_fn_attr(const llvm::MDNode& md_node, reflection_state_t& state) {
 	auto [node, node_id] = state.create_node<node_patch_fn_attr_t>();
 	if (!md_node_iterate(md_node, [&node, &md_node](llvm::StringRef type_str, llvm::MDNode::op_iterator& iter) {
@@ -916,7 +1123,10 @@ static inline node_id_t create_node(const llvm::MDNode& md_node, const std::stri
 		{ "air.indirect_buffer", &create_indirect_buffer },
 		{ "air.indirect_constant", &create_indirect_constant },
 		{ "air.instance_id", &create_instance_id },
+		{ "air.mesh", &create_mesh },
+		{ "air.mesh_grid_properties", &create_mesh_grid_properties },
 		{ "air.patch_id", &create_patch_id },
+		{ "air.payload", &create_payload },
 		{ "air.point_coord", &create_point_coord },
 		{ "air.position", &create_position },
 		{ "air.position_in_patch", &create_position_in_patch },
@@ -936,13 +1146,17 @@ static inline node_id_t create_node(const llvm::MDNode& md_node, const std::stri
 		
 		// attribute nodes
 		{ "air.max_work_group_size", &create_workgroup_max_size_fn_attr },
+		{ "air.max_mesh_work_groups", &create_max_mesh_work_groups_fn_attr },
 		{ "air.patch", &create_patch_fn_attr },
 	};
 	static const std::unordered_map<std::string, create_func_t> ret_handlers {
 		// return nodes
 		{ "air.depth", &create_depth_ret },
+		{ "air.mesh_primitive_data", &create_mesh_primitive_data_ret },
+		{ "air.mesh_vertex_data", &create_mesh_vertex_data_ret },
 		{ "air.point_size", &create_point_size_ret },
 		{ "air.position", &create_position_ret },
+		{ "air.primitive_culled", &create_primitive_culled_ret },
 		{ "air.render_target", &create_render_target_ret },
 		{ "air.vertex_output", &create_vertex_output_ret },
 	};
@@ -1022,7 +1236,9 @@ static inline bool handle_func_attribute(const llvm::MDNode& md_node, reflection
 	
 	const auto attr_type_str = attr_type_md_str->str();
 	if (attr_type_str == "air.max_work_group_size") {
-		if constexpr (func_type == FUNCTION_TYPE::KERNEL) {
+		if constexpr (func_type == FUNCTION_TYPE::KERNEL ||
+					  func_type == FUNCTION_TYPE::OBJECT ||
+					  func_type == FUNCTION_TYPE::MESH) {
 			const auto node_id = create_node(md_node, attr_type_str, state);
 			if (node_id.id == invalid_node_id.id) {
 				return false;
@@ -1048,6 +1264,17 @@ static inline bool handle_func_attribute(const llvm::MDNode& md_node, reflection
 			func_node.early_fragment_tests = true;
 		} else {
 			llvm::errs() << "reflection: invalid function type for early_fragment_tests\n";
+			return false;
+		}
+	} else if (attr_type_str == "air.max_mesh_work_groups") {
+		if constexpr (func_type == FUNCTION_TYPE::OBJECT) {
+			const auto node_id = create_node(md_node, attr_type_str, state);
+			if (node_id.id == invalid_node_id.id) {
+				return false;
+			}
+			func_node.max_mesh_workgroups = node_id;
+		} else {
+			llvm::errs() << "reflection: invalid function type for air.max_mesh_work_groups\n";
 			return false;
 		}
 	} else {
@@ -1133,10 +1360,12 @@ std::vector<uint8_t> create_reflection(llvm::Module& M) {
 	reflection_state_t state { .refl = refl };
 	
 	// handle functions
-	const std::array<std::tuple<const char*, std::optional<std::vector<node_id_t>>&, FUNCTION_TYPE>, 3> function_types {{
+	const std::array<std::tuple<const char*, std::optional<std::vector<node_id_t>>&, FUNCTION_TYPE>, 5> function_types {{
 		{ "air.fragment", refl.fragment_functions, FUNCTION_TYPE::FRAGMENT },
 		{ "air.kernel", refl.kernel_functions, FUNCTION_TYPE::KERNEL },
 		{ "air.vertex", refl.vertex_functions, FUNCTION_TYPE::VERTEX },
+		{ "air.object", refl.object_functions, FUNCTION_TYPE::OBJECT },
+		{ "air.mesh", refl.mesh_functions, FUNCTION_TYPE::MESH },
 	}};
 	bool has_any_function = false;
 	for (const auto& func_type : function_types) {
@@ -1170,12 +1399,20 @@ std::vector<uint8_t> create_reflection(llvm::Module& M) {
 																				std::make_unique<node_kernel_function_t>());
 					break;
 				}
+				case FUNCTION_TYPE::OBJECT: {
+					success = handle_function_reflection<FUNCTION_TYPE::OBJECT>(*func, state, *get<1>(func_type),
+																				std::make_unique<node_object_function_t>());
+					break;
+				}
+				case FUNCTION_TYPE::MESH: {
+					success = handle_function_reflection<FUNCTION_TYPE::MESH>(*func, state, *get<1>(func_type),
+																			  std::make_unique<node_mesh_function_t>());
+					break;
+				}
 				case FUNCTION_TYPE::UNQUALIFIED:
 				case FUNCTION_TYPE::VISIBLE:
 				case FUNCTION_TYPE::EXTERN:
 				case FUNCTION_TYPE::INTERSECTION:
-				case FUNCTION_TYPE::MESH:
-				case FUNCTION_TYPE::OBJECT:
 				case FUNCTION_TYPE::NONE:
 					llvm_unreachable("unhandled function type");
 			}

@@ -65,6 +65,12 @@ llvm::Type *CGOpenCLRuntime::convertOpenCLSpecificType(const Type *T) {
     case BuiltinType::OCLPatchControlPoint:
       return llvm::PointerType::get(
           llvm::StructType::create(Ctx, "struct._patch_control_point_t"), AddrSpc);
+    case BuiltinType::OCLMesh:
+      return llvm::PointerType::get(
+          llvm::StructType::create(Ctx, "struct._mesh_t"), AddrSpc);
+    case BuiltinType::OCLMeshGridProperties:
+      return llvm::PointerType::get(
+          llvm::StructType::create(Ctx, "struct._mesh_grid_properties_t"), AddrSpc);
 #define EXT_OPAQUE_TYPE(ExtType, Id, Ext) \
     case BuiltinType::Id: \
       return llvm::PointerType::get( \
@@ -122,6 +128,10 @@ llvm::Type *CGOpenCLRuntime::convertOpenCLSpecificType(const Type *T) {
         return get_or_create_opaque_ptr_type("struct._event_t", 0);
       case BuiltinType::OCLPatchControlPoint:
         return get_or_create_opaque_ptr_type("struct._patch_control_point_t", AddrSpc);
+      case BuiltinType::OCLMesh:
+        return get_or_create_opaque_ptr_type("struct._mesh_t", AddrSpc);
+      case BuiltinType::OCLMeshGridProperties:
+        return get_or_create_opaque_ptr_type("struct._mesh_grid_properties_t", AddrSpc);
     }
   }
   llvm_unreachable("Unexpected builtin type!");

@@ -40,6 +40,9 @@ static const unsigned TCEOpenCLAddrSpaceMap[] = {
     // FIXME: generic has to be added to the target
     0, // opencl_generic
     0, // vulkan_input
+    0, // vulkan_output
+    0, // metal_mesh
+    0, // task_payload
     0, // cuda_device
     0, // cuda_constant
     0, // cuda_shared

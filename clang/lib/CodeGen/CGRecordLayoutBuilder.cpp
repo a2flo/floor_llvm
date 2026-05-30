@@ -93,7 +93,7 @@ struct CGRecordLowering {
     bool operator <(const MemberInfo& a) const { return Offset < a.Offset; }
   };
   // The constructor.
-  CGRecordLowering(CodeGenTypes &Types, const RecordDecl *D, bool Packed);
+  CGRecordLowering(CodeGenTypes &Types, const RecordDecl *D, bool Packed, bool is_graphics_io);
   // Short helper routines.
   /// Constructs a MemberInfo instance from an offset and llvm::Type *.
   MemberInfo StorageInfo(CharUnits Offset, llvm::Type *Data) {
@@ -146,7 +146,7 @@ struct CGRecordLowering {
   /// Gets the storage type for a field decl and handles storage
   /// for itanium bitfields that are smaller than their declared type.
   llvm::Type *getStorageType(const FieldDecl *FD) {
-    llvm::Type *Type = Types.ConvertTypeForMem(FD->getType(), false, true);
+    llvm::Type *Type = Types.ConvertTypeForMem(FD->getType(), false, true, get_conv_opts());
     if (!FD->isBitField()) return Type;
     if (isDiscreteBitFieldABI()) return Type;
     return getIntNType(std::min(FD->getBitWidthValue(Context),
@@ -222,19 +222,29 @@ struct CGRecordLowering {
   bool IsZeroInitializable : 1;
   bool IsZeroInitializableAsBase : 1;
   bool Packed : 1;
+  bool graphics_io : 1;
 private:
   CGRecordLowering(const CGRecordLowering &) = delete;
   void operator =(const CGRecordLowering &) = delete;
+
+  static constexpr const type_conversion_opts_t non_io_conv_opts {};
+  static constexpr const type_conversion_opts_t io_conv_opts {
+    .io_type_conversion = true,
+    .vector_compat_conversion = true,
+  };
+  type_conversion_opts_t get_conv_opts() const {
+    return (graphics_io ? io_conv_opts : non_io_conv_opts);
+  }
 };
 } // namespace {
 
 CGRecordLowering::CGRecordLowering(CodeGenTypes &Types, const RecordDecl *D,
-                                   bool Packed)
+                                   bool Packed, bool is_graphics_io)
     : Types(Types), Context(Types.getContext()), D(D),
       RD(dyn_cast<CXXRecordDecl>(D)),
       Layout(Types.getContext().getASTRecordLayout(D)),
       DataLayout(Types.getDataLayout()), IsZeroInitializable(true),
-      IsZeroInitializableAsBase(true), Packed(Packed) {}
+      IsZeroInitializableAsBase(true), Packed(Packed), graphics_io(is_graphics_io) {}
 
 void CGRecordLowering::setBitFieldInfo(
     const FieldDecl *FD, CharUnits StartOffset, llvm::Type *StorageType) {
@@ -786,12 +796,23 @@ void CGRecordLowering::determinePacked(bool NVBaseType) {
   // non-virtual sub-object and an unpacked complete object or vise versa.
   if (NVSize % NVAlignment)
     Packed = true;
+
+  if (graphics_io) {
+    // never pad graphics I/O types
+    Packed = false;
+  }
+
   // Update the alignment of the sentinel.
   if (!Packed)
     Members.back().Data = getIntNType(Context.toBits(Alignment));
 }
 
 void CGRecordLowering::insertPadding() {
+  if (graphics_io) {
+    // never pad graphics I/O types
+    return;
+  }
+
   std::vector<std::pair<CharUnits, CharUnits> > Padding;
   CharUnits Size = CharUnits::Zero();
   for (std::vector<MemberInfo>::const_iterator Member = Members.begin(),
@@ -876,8 +897,9 @@ CGBitFieldInfo CGBitFieldInfo::MakeInfo(CodeGenTypes &Types,
 }
 
 std::unique_ptr<CGRecordLayout>
-CodeGenTypes::ComputeRecordLayout(const RecordDecl *D, llvm::StructType *Ty) {
-  CGRecordLowering Builder(*this, D, /*Packed=*/false);
+CodeGenTypes::ComputeRecordLayout(const RecordDecl *D, llvm::StructType *Ty,
+                                  type_conversion_opts_t opts) {
+  CGRecordLowering Builder(*this, D, /*Packed=*/false, opts.io_type_conversion);
 
   Builder.lower(/*NonVirtualBaseType=*/false);
 
@@ -886,11 +908,11 @@ CodeGenTypes::ComputeRecordLayout(const RecordDecl *D, llvm::StructType *Ty) {
   if (isa<CXXRecordDecl>(D) && !D->isUnion() && !D->hasAttr<FinalAttr>()) {
     BaseTy = Ty;
     if (Builder.Layout.getNonVirtualSize() != Builder.Layout.getSize()) {
-      CGRecordLowering BaseBuilder(*this, D, /*Packed=*/Builder.Packed);
+      CGRecordLowering BaseBuilder(*this, D, /*Packed=*/Builder.Packed, opts.io_type_conversion);
       BaseBuilder.lower(/*NonVirtualBaseType=*/true);
       BaseTy = llvm::StructType::create(
           getLLVMContext(), BaseBuilder.FieldTypes, "", BaseBuilder.Packed);
-      addRecordTypeName(D, BaseTy, ".base");
+      addRecordTypeName(D, BaseTy, ".base", opts.io_type_conversion);
       // BaseTy and Ty must agree on their packedness for getLLVMFieldNo to work
       // on both of them with the same index.
       assert(Builder.Packed == BaseBuilder.Packed &&
@@ -1128,6 +1150,14 @@ void CGRecordLayout::print(raw_ostream &OS) const {
   }
 
   OS << "]>\n";
+
+#if 0
+  for (auto& field_info : FieldInfo) {
+    OS << "  field #" << field_info.second << ": " << *field_info.first << "\n";
+    field_info.first->dump(OS);
+    field_info.first->getType().dump(OS, field_info.first->getASTContext()); OS << "\n";
+  }
+#endif
 }
 
 LLVM_DUMP_METHOD void CGRecordLayout::dump() const {

@@ -10448,6 +10448,10 @@ public:
   void AddComputeKernelSIMDWidthAttr(SourceRange AttrRange, Decl *D, Expr *E,
                                      const AttributeCommonInfo &CI);
 
+  /// Adds a mesh_max_work_groups(count) attribute to a particular declaration.
+  void AddMeshMaxWorkGroupsAttr(SourceRange AttrRange, Decl *D,
+                                Expr *count_expr, const AttributeCommonInfo &CI);
+
   /// The declarator \p D defines a function in the scope \p S which is nested
   /// in an `omp begin/end declare variant` scope. In this method we create a
   /// declaration for \p D and rename \p D according to the OpenMP context

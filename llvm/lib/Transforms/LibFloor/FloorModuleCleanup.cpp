@@ -49,6 +49,7 @@ struct FloorModuleCleanup : public ModulePass, InstVisitor<FloorModuleCleanup> {
 	
 	Module* M { nullptr };
 	LLVMContext* ctx { nullptr };
+	std::string func_name;
 	bool was_modified { false };
 	
 	FloorModuleCleanup() : ModulePass(ID) {
@@ -56,6 +57,7 @@ struct FloorModuleCleanup : public ModulePass, InstVisitor<FloorModuleCleanup> {
 	}
 	
 	void runOnFunction(Function& F) {
+		func_name = F.getName().str();
 		visit(F);
 		
 		for (auto& BB : F) {
@@ -100,13 +102,40 @@ struct FloorModuleCleanup : public ModulePass, InstVisitor<FloorModuleCleanup> {
 	
 	void visitAlloca(AllocaInst& alloca) {
 		if (ctx->get_libfloor_options().error_on_alloca) {
-			ctx->emitError(&alloca, "leftover alloca after optimization");
+			ctx->emitError(&alloca, "leftover alloca after optimization (in " + func_name + ")");
 		}
 		if (ctx->get_libfloor_options().error_on_ptr_type_alloca &&
 			alloca.getAllocatedType()->isPointerTy()) {
-			ctx->emitError(&alloca, "leftover alloca with a pointer type after optimization");
+			ctx->emitError(&alloca, "leftover alloca with a pointer type after optimization (in " + func_name + ")");
 		}
 	}
+	
+	void visitIntToPtr(IntToPtrInst& I) {
+		if (ctx->get_libfloor_options().error_on_ptr_int_casts) {
+			ctx->emitError(&I, "int-to-ptr cast (in " + func_name + ")");
+		}
+	}
+	void visitPtrToInt(PtrToIntInst& I) {
+		if (ctx->get_libfloor_options().error_on_ptr_int_casts) {
+			ctx->emitError(&I, "ptr-to-int cast (in " + func_name + ")");
+		}
+	}
+	
+#if 0 // alignment adjustments for testing purposes
+	void visitLoadInst(LoadInst& LD) {
+		if (!LD.getType()->isSized()) {
+			return;
+		}
+		LD.setAlignment(M->getDataLayout().getABITypeAlign(LD.getType()));
+	}
+	
+	void visitStoreInst(StoreInst& ST) {
+		if (!ST.getType()->isSized()) {
+			return;
+		}
+		ST.setAlignment(M->getDataLayout().getABITypeAlign(ST.getType()));
+	}
+#endif
 	
 	bool runOnModule(Module& Mod) override {
 		M = &Mod;

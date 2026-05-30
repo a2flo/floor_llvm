@@ -329,6 +329,9 @@ namespace clang {
       if (CodeGenOpts.LibFloorErrorOnPtrTypeAlloca) {
         Ctx.get_libfloor_options().error_on_ptr_type_alloca = 1;
       }
+      if (CodeGenOpts.LibFloorErrorOnPtrIntCasts) {
+        Ctx.get_libfloor_options().error_on_ptr_int_casts = 1;
+      }
 
       Expected<std::unique_ptr<llvm::ToolOutputFile>> OptRecordFileOrErr =
           setupLLVMOptimizationRemarks(

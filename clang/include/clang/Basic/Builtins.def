@@ -1675,8 +1675,11 @@ LANGBUILTIN(__builtin_load_half, "dhC*", "nc", ALL_OCL_LANGUAGES)
 LANGBUILTIN(__builtin_load_halff, "fhC*", "nc", ALL_OCL_LANGUAGES)
 
 // libfloor builtins
-// Metal/Vulkan control point access with variable return type
+// Metal control point access with variable return type
 LANGBUILTIN(__libfloor_access_patch_control_point, "v.", "nt", ALL_OCL_LANGUAGES)
+// Metal/Vulkan mesh shading functions
+LANGBUILTIN(__libfloor_mesh_set_vertex, "v.", "nt", ALL_OCL_LANGUAGES)
+LANGBUILTIN(__libfloor_mesh_set_primitive, "v.", "nt", ALL_OCL_LANGUAGES)
 
 // Builtins for os_log/os_trace
 BUILTIN(__builtin_os_log_format_buffer_size, "zcC*.", "p:0:nut")

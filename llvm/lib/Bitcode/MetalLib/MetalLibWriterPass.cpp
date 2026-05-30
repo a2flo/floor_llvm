@@ -490,8 +490,14 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
   // gather entry point functions that we want to clone/emit
   unordered_map<string, FUNCTION_TYPE> function_set;
   // -> first pass to gather all entry points specified in metadata lists
-  for (uint32_t i = 0; i < 3; ++i) {
-    const auto func_type = (FUNCTION_TYPE)i;
+  static constexpr const std::array<FUNCTION_TYPE, 5> func_types{{
+      FUNCTION_TYPE::KERNEL,
+      FUNCTION_TYPE::VERTEX,
+      FUNCTION_TYPE::FRAGMENT,
+      FUNCTION_TYPE::OBJECT,
+      FUNCTION_TYPE::MESH,
+  }};
+  for (const auto func_type : func_types) {
     const NamedMDNode *func_list = nullptr;
     switch (func_type) {
     case FUNCTION_TYPE::KERNEL:
@@ -503,12 +509,16 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     case FUNCTION_TYPE::FRAGMENT:
       func_list = M.getNamedMetadata("air.fragment");
       break;
+    case FUNCTION_TYPE::OBJECT:
+      func_list = M.getNamedMetadata("air.object");
+      break;
+    case FUNCTION_TYPE::MESH:
+      func_list = M.getNamedMetadata("air.mesh");
+      break;
     case FUNCTION_TYPE::UNQUALIFIED:
     case FUNCTION_TYPE::VISIBLE:
     case FUNCTION_TYPE::EXTERN:
     case FUNCTION_TYPE::INTERSECTION:
-    case FUNCTION_TYPE::MESH:
-    case FUNCTION_TYPE::OBJECT:
     case FUNCTION_TYPE::NONE:
       llvm_unreachable("invalid type");
     }
@@ -540,6 +550,11 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     }
     functions.emplace_back(&func, func_iter->second);
   }
+  // sort by function type
+  std::stable_sort(functions.begin(), functions.end(),
+                   [](const auto &lhs, const auto &rhs) {
+                     return uint8_t(lhs.second) < uint8_t(rhs.second);
+                   });
   const uint32_t function_count = uint32_t(functions.size());
 
   // program info
@@ -795,10 +810,12 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
 
     // clean up metadata
     // * metadata of all entry points that no longer exist
-    static constexpr const std::array<const char *, 3> entry_point_md_names{{
+    static constexpr const std::array<const char *, 5> entry_point_md_names{{
         "air.kernel",
         "air.vertex",
         "air.fragment",
+        "air.object",
+        "air.mesh",
     }};
     for (const auto &entry_point_md_name : entry_point_md_names) {
       if (auto func_entries =
@@ -862,7 +879,7 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       if (MDNode *ident_op = llvm_ident->getOperand(0)) {
         static const std::unordered_map<uint32_t, const char *> ident_versions{
             {270, "Apple metal version 32023.620 (metalfe-32023.620)"},
-            {280, "Apple metal version 32023.850 (metalfe-32023.850.10)"},
+            {280, "Apple metal version 32023.883 (metalfe-32023.883)"},
         };
         ident_op->replaceOperandWith(
             0, llvm::MDString::get(cloned_mod->getContext(),

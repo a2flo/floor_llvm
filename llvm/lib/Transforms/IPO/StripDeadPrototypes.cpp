@@ -42,7 +42,7 @@ static bool stripDeadPrototypes(Module &M) {
   // Erase dead global var prototypes.
   for (GlobalVariable &GV : llvm::make_early_inc_range(M.globals())) {
     // Global must be a prototype and unused.
-    if (GV.isDeclaration() && GV.use_empty())
+    if (GV.isDeclaration() && GV.use_empty() && !GV.isRequired())
       GV.eraseFromParent();
   }
 

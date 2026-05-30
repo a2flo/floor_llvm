@@ -7041,6 +7041,12 @@ QualType ASTReader::GetType(TypeID ID) {
     case PREDEF_TYPE_PATCH_CONTROL_POINT_ID:
       T = Context.OCLPatchControlPointTy;
       break;
+    case PREDEF_TYPE_MESH_ID:
+      T = Context.OCLMeshTy;
+      break;
+    case PREDEF_TYPE_MESH_GRID_PROPERTIES_ID:
+      T = Context.OCLMeshGridPropertiesTy;
+      break;
     case PREDEF_TYPE_AUTO_DEDUCT:
       T = Context.getAutoDeductType();
       break;

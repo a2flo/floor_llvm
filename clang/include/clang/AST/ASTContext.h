@@ -1134,6 +1134,7 @@ public:
   CanQualType SingletonId;
 #include "clang/Basic/OpenCLImageTypes.def"
   CanQualType OCLSamplerTy, OCLEventTy, OCLClkEventTy, OCLPatchControlPointTy;
+  CanQualType OCLMeshTy, OCLMeshGridPropertiesTy;
   CanQualType OCLQueueTy, OCLReserveIDTy;
   CanQualType IncompleteMatrixIdxTy;
   CanQualType OMPArraySectionTy, OMPArrayShapingTy, OMPIteratorTy;

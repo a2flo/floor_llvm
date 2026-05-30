@@ -53,6 +53,7 @@
 #include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/ScopedPrinter.h"
 #include "llvm/Support/X86TargetParser.h"
+#include "llvm/Transforms/LibFloor.h"
 #include <sstream>
 
 using namespace clang;
@@ -2246,6 +2247,126 @@ static unsigned mutateLongDoubleBuiltin(unsigned BuiltinID) {
   default:
     return BuiltinID;
   }
+}
+
+static inline RValue emit_mesh_builtin(unsigned BuiltinID, const CallExpr *E,
+									   CodeGenFunction& CGF, CodeGenModule& CGM, CodeGenTypes& CGT,
+									   ASTContext& ast_ctx, LLVMContext& llvm_ctx, CGBuilderTy& Builder) {
+	const auto is_vertex = (BuiltinID == Builtin::BI__libfloor_mesh_set_vertex);
+	const auto is_primitive = !is_vertex;
+	const char* func_name_prefix = (is_vertex ? "floor.mesh_set_vertex." : "floor.mesh_set_primitive.");
+	const auto obj_type = E->getArg(2)->getType();
+	// must always be a C++ struct/class right now (only supporting our vector compat classes or user structs)
+	const auto obj_cxx_rdecl = obj_type->getAsCXXRecordDecl();
+	if (!obj_cxx_rdecl) {
+		CGM.Error(E->getBeginLoc(), "invalid mesh object type");
+		return RValue::getIgnored();
+	}
+	
+	// we want the object type to be a graphics I/O type for easier handling later on
+	auto io_obj_type = CGT.GraphicsExpandIOType(obj_type, true, false, true);
+	if (!io_obj_type) {
+		return RValue::getIgnored();
+	}
+	assert(io_obj_type->isVectorTy() || (io_obj_type->isStructTy() && cast<llvm::StructType>(io_obj_type)->isGraphicsIOType()));
+	
+	// handle per-field attributes
+	const auto fields = CGT.get_aggregate_scalar_fields(obj_cxx_rdecl, obj_cxx_rdecl, false, false, false,
+														false, false, true);
+	if (const auto io_obj_st_type = cast<llvm::StructType>(io_obj_type); io_obj_st_type) {
+		if (io_obj_st_type->getStructNumElements() != fields.size()) {
+			CGM.Error(E->getBeginLoc(), "mesh: mismatch between generated graphics I/O type and aggregate field count");
+			return RValue::getIgnored();
+		}
+	} else {
+		if (fields.size() == 1) {
+			CGM.Error(E->getBeginLoc(), "mesh: mismatch between generated graphics I/O type and aggregate field count");
+			return RValue::getIgnored();
+		}
+	}
+	SmallVector<uint32_t, 8> attr_arr;
+	for (const auto& field : fields) {
+		uint32_t attr_value = 0u;
+		if (is_vertex) {
+			if (field.hasAttr<GraphicsVertexPositionAttr>()) {
+				const auto vec_type = dyn_cast_or_null<clang::VectorType>(field.type.getTypePtr());
+				if (!vec_type || !vec_type->getElementType()->isFloatingType() || vec_type->getNumElements() != 4) {
+					CGM.Error(E->getBeginLoc(), "mesh: invalid position type - must be float4");
+					return RValue::getIgnored();
+				}
+				attr_value = uint32_t(MESH_ATTRIBUTE::POSITION);
+			} else if (field.hasAttr<GraphicsPointSizeAttr>()) {
+				if (!field.type->isFloatingType()) {
+					CGM.Error(E->getBeginLoc(), "mesh: invalid point-size type - must be float");
+					return RValue::getIgnored();
+				}
+				attr_value = uint32_t(MESH_ATTRIBUTE::POINT_SIZE);
+			}
+		} else if (is_primitive) {
+			if (field.hasAttr<GraphicsPrimitiveCulledAttr>()) {
+				attr_value = uint32_t(MESH_ATTRIBUTE::CULLED);
+				if (!field.type->isBooleanType()) {
+					CGM.Error(E->getBeginLoc(), "mesh: invalid culled type - must be bool");
+					return RValue::getIgnored();
+				}
+			}
+		}
+		attr_arr.emplace_back(attr_value);
+	}
+	assert(!attr_arr.empty());
+	const auto attrs = llvm::ConstantDataArray::get(llvm_ctx, attr_arr);
+	
+	// NOTE: we don't really care about the suffix here, we just need something that is unique for each used type
+	std::string gen_type_name = "";
+	llvm::raw_string_ostream gen_type_name_stream(gen_type_name);
+	CGM.getCXXABI().getMangleContext().mangleMetalGeneric("", obj_type, nullptr, gen_type_name_stream);
+	auto func_name = func_name_prefix + gen_type_name_stream.str();
+	
+	// function signatures:
+	// set_vertex(<mesh>, <position-idx>, <vertex-object>, <attributes-array>)
+	// set_primitive(<mesh>, <position-idx>, <primitive-object>, <attributes-array>)
+	llvm::Function* func = nullptr;
+	if (auto func_value = CGM.GetGlobalValue(func_name); func_value) {
+		func = dyn_cast_or_null<llvm::Function>(func_value);
+		assert(func);
+		assert(llvm::PointerType::get(io_obj_type, 0) == func->getFunctionType()->getParamType(2));
+	} else {
+		// doesn't exist yet -> create it
+		auto mesh_type = CGT.ConvertType(ast_ctx.OCLMeshTy);
+		if (!mesh_type) {
+			CGM.Error(E->getBeginLoc(), "mesh type doesn't exist yet");
+			return RValue::getIgnored();
+		}
+		
+		auto func_type = llvm::FunctionType::get(Builder.getVoidTy(), {
+			mesh_type, Builder.getInt32Ty(), llvm::PointerType::get(io_obj_type, 0), attrs->getType()
+		}, false);
+		auto cp_func_callee = CGM.CreateRuntimeFunction(func_type, func_name, {}, false, true);
+		func = dyn_cast_or_null<llvm::Function>(cp_func_callee.getCallee());
+		func->setDoesNotThrow();
+	}
+	
+	LValue obj_lval = CGF.EmitLValue(E->getArg(2));
+	llvm::Value* obj_val = obj_lval.getPointer(CGF);
+	if (const auto io_obj_st_type = dyn_cast_or_null<llvm::StructType>(io_obj_type); io_obj_st_type) {
+		// create a temporary and memcpy each struct field individually (we can't memcpy the whole thing, since sizes/offsets/alignments might differ)
+		auto tmp = CGF.CreateTempAlloca(io_obj_st_type, CharUnits::One(), "mesh_obj_tmp");
+		for (uint32_t st_idx = 0, st_count = io_obj_st_type->getNumElements(); st_idx < st_count; ++st_idx) {
+			auto ex_value_gep = Builder.CreateStructGEP(obj_lval.getAddress(CGF), st_idx);
+			auto field_gep = Builder.CreateStructGEP(tmp, st_idx);
+			auto ex_value_bc = Builder.CreateBitCast(ex_value_gep, llvm::PointerType::get(io_obj_st_type->getStructElementType(st_idx), 0));
+			auto ex_value = Builder.CreateLoad(ex_value_bc);
+			Builder.CreateStore(ex_value, Address(field_gep));
+		}
+		obj_val = tmp.getPointer();
+	}
+	// else: use as-is
+	
+	llvm::FunctionCallee func_callee { func->getFunctionType(), func };
+	CGF.EmitNounwindRuntimeCall(func_callee, {
+		CGF.EmitScalarExpr(E->getArg(0)), CGF.EmitScalarExpr(E->getArg(1)), obj_val, attrs
+	});
+	return RValue::getIgnored();
 }
 
 RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
@@ -5210,6 +5331,9 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
       return RValue::get(Builder.CreateStore(call, ret_val));
     }
   }
+  case Builtin::BI__libfloor_mesh_set_vertex:
+  case Builtin::BI__libfloor_mesh_set_primitive:
+    return emit_mesh_builtin(BuiltinID, E, *this, CGM, getTypes(), getContext(), getLLVMContext(), Builder);
   case Builtin::BIprintf:
     if (getTarget().getTriple().isNVPTX() ||
         getTarget().getTriple().isAMDGCN()) {

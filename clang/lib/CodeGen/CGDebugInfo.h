@@ -79,6 +79,8 @@ class CGDebugInfo {
   llvm::DIType *OCLNDRangeDITy = nullptr;
   llvm::DIType *OCLReserveIDDITy = nullptr;
   llvm::DIType *OCLPatchControlPointTyDITy = nullptr;
+  llvm::DIType *OCLMeshTyDITy = nullptr;
+  llvm::DIType *OCLMeshGridPropertiesTyDITy = nullptr;
 #define EXT_OPAQUE_TYPE(ExtType, Id, Ext) \
   llvm::DIType *Id##Ty = nullptr;
 #include "clang/Basic/OpenCLExtensionTypes.def"

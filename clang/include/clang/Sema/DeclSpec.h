@@ -304,6 +304,8 @@ public:
   static const TST TST_clk_event_t = clang::TST_clk_event_t;
   static const TST TST_reserve_id_t = clang::TST_reserve_id_t;
   static const TST TST_patch_control_point_t = clang::TST_patch_control_point_t;
+  static const TST TST_mesh_t = clang::TST_mesh_t;
+  static const TST TST_mesh_grid_properties_t = clang::TST_mesh_grid_properties_t;
   static const TST TST_error = clang::TST_error;
 
   // type-qualifiers

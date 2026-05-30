@@ -1260,6 +1260,10 @@ static bool TryToShrinkGlobalToBoolean(GlobalVariable *GV, Constant *OtherVal) {
 
 static bool deleteIfDead(
     GlobalValue &GV, SmallPtrSetImpl<const Comdat *> &NotDiscardableComdats) {
+  if (GV.isRequired()) {
+    return false;
+  }
+
   GV.removeDeadConstantUsers();
 
   if (!GV.isDiscardableIfUnused() && !GV.isDeclaration())

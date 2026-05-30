@@ -2322,6 +2322,38 @@ Sema::CheckBuiltinFunctionCall(FunctionDecl *FDecl, unsigned BuiltinID,
     TheCall->setType(TheCall->getArg(2)->getType());
     break;
 
+  case Builtin::BI__libfloor_mesh_set_vertex:
+  case Builtin::BI__libfloor_mesh_set_primitive:
+    if (checkArgCount(*this, TheCall, 3))
+      return ExprError();
+
+    if (!TheCall->getArg(0)->getType()->isMeshT()) {
+      auto err_diagID = Diags.getCustomDiagID(DiagnosticsEngine::Fatal, "first argument must be a mesh type");
+      Diag(TheCall->getArg(0)->getBeginLoc(), err_diagID);
+      return ExprError();
+    }
+    if (!TheCall->getArg(1)->getType()->isIntegerType()) {
+      auto err_diagID = Diags.getCustomDiagID(DiagnosticsEngine::Fatal, "second argument must be an integer type");
+      Diag(TheCall->getArg(1)->getBeginLoc(), err_diagID);
+      return ExprError();
+    }
+    if (BuiltinID == Builtin::BI__libfloor_mesh_set_vertex) {
+      if (!TheCall->getArg(2)->getType()->IsValidMeshVertexType()) {
+        auto err_diagID = Diags.getCustomDiagID(DiagnosticsEngine::Fatal, "third argument must be a valid vertex type");
+        Diag(TheCall->getArg(2)->getBeginLoc(), err_diagID);
+        return ExprError();
+      }
+    } else if (BuiltinID == Builtin::BI__libfloor_mesh_set_primitive) {
+      if (!TheCall->getArg(2)->getType()->IsValidMeshPrimitiveType()) {
+        auto err_diagID = Diags.getCustomDiagID(DiagnosticsEngine::Fatal, "third argument must be a valid primitive type");
+        Diag(TheCall->getArg(2)->getBeginLoc(), err_diagID);
+        return ExprError();
+      }
+    }
+
+    TheCall->setType(Context.VoidTy);
+    break;
+
   case Builtin::BI__builtin_get_device_side_mangled_name: {
     auto Check = [](CallExpr *TheCall) {
       if (TheCall->getNumArgs() != 1)

@@ -575,7 +575,7 @@ void CGDebugInfo::CreateCompileUnit() {
         Producer = "Apple metal version 32023.620 (metalfe-32023.620)";
         break;
       case 400:
-        Producer = "Apple metal version 32023.850 (metalfe-32023.850.10)";
+        Producer = "Apple metal version 32023.883 (metalfe-32023.883)";
         break;
     }
   }
@@ -728,6 +728,10 @@ llvm::DIType *CGDebugInfo::CreateType(const BuiltinType *BT) {
     return getOrCreateStructPtrType("opencl_reserve_id_t", OCLReserveIDDITy);
   case BuiltinType::OCLPatchControlPoint:
     return getOrCreateStructPtrType("__patch_control_point_t", OCLPatchControlPointTyDITy);
+  case BuiltinType::OCLMesh:
+    return getOrCreateStructPtrType("__mesh_t", OCLMeshTyDITy);
+  case BuiltinType::OCLMeshGridProperties:
+    return getOrCreateStructPtrType("__mesh_grid_properties_t", OCLMeshGridPropertiesTyDITy);
 #define EXT_OPAQUE_TYPE(ExtType, Id, Ext) \
   case BuiltinType::Id: \
     return getOrCreateStructPtrType("opencl_" #ExtType, Id##Ty);
@@ -1419,6 +1423,8 @@ static unsigned getDwarfCC(CallingConv CC) {
   case CC_FloorFragment:
   case CC_FloorTessControl:
   case CC_FloorTessEval:
+  case CC_FloorTask:
+  case CC_FloorMesh:
     return llvm::dwarf::DW_CC_LLVM_OpenCLKernel;
   case CC_Swift:
     return llvm::dwarf::DW_CC_LLVM_Swift;

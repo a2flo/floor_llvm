@@ -41,6 +41,13 @@ enum class LangAS : unsigned {
 
   // Vulkan specific address spaces.
   vulkan_input,
+  vulkan_output,
+
+  // Metal specific address spaces.
+  metal_mesh,
+
+  // graphics (Metal/Vulkan) specific address spaces.
+  task_payload, // aka object
 
   // CUDA specific address spaces.
   cuda_device,

@@ -382,6 +382,8 @@ bool Declarator::isDeclarationOfFunction() const {
     case TST_clk_event_t:
     case TST_reserve_id_t:
     case TST_patch_control_point_t:
+    case TST_mesh_t:
+    case TST_mesh_grid_properties_t:
       return false;
 
     case TST_decltype_auto:
@@ -596,6 +598,8 @@ const char *DeclSpec::getSpecifierName(DeclSpec::TST T,
   case DeclSpec::TST_clk_event_t: return "clk_event_t";
   case DeclSpec::TST_reserve_id_t: return "reserve_id_t";
   case DeclSpec::TST_patch_control_point_t: return "__patch_control_point_t";
+  case DeclSpec::TST_mesh_t: return "__mesh_t";
+  case DeclSpec::TST_mesh_grid_properties_t: return "__mesh_grid_properties_t";
   case DeclSpec::TST_error:       return "(error)";
   }
   llvm_unreachable("Unknown typespec!");

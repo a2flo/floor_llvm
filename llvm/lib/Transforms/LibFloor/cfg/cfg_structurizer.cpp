@@ -210,6 +210,10 @@ void CFGStructurizer::log_cfg(const char *tag) const {
     case Terminator::Type::Exit:
       LOGI("  Exit\n");
       break;
+
+    case Terminator::Type::MeshEmitTasks:
+      LOGI("  MeshEmitTasks\n");
+      break;
     }
 
     switch (node->merge) {

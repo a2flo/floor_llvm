@@ -357,6 +357,31 @@ bool Type::isFlattenedFloorArgBufferType() const {
   return getStructName().startswith("struct.floor.flat.arg_buffer.");
 }
 
+bool Type::isMeshType() const {
+  if (!isStructTy()) {
+    return false;
+  }
+  return getStructName().startswith("struct._mesh_t");
+}
+
+bool Type::isMeshGridPropertiesType() const {
+  if (!isStructTy()) {
+    return false;
+  }
+  return getStructName().startswith("struct._mesh_grid_properties_t");
+}
+
+bool Type::containsGraphicsIOType() const {
+	if (isStructTy()) {
+		return getStructName().startswith("struct.floor.io.");
+	} else if (isPointerTy()) {
+		return getPointerElementType()->containsGraphicsIOType();
+	} else if (isArrayTy()) {
+		return getArrayElementType()->containsGraphicsIOType();
+	}
+	return false;
+}
+
 //===----------------------------------------------------------------------===//
 //                       IntegerType Implementation
 //===----------------------------------------------------------------------===//
@@ -657,6 +682,9 @@ bool StructType::isLayoutIdentical(StructType *Other) const {
   if (this == Other) return true;
 
   if (isPacked() != Other->isPacked())
+    return false;
+
+  if (isGraphicsIOType() != Other->isGraphicsIOType())
     return false;
 
   return elements() == Other->elements();

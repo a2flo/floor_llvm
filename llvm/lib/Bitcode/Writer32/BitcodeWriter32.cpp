@@ -422,6 +422,7 @@ static void WriteTypeTable(const ValueEnumerator32 &VE, BitstreamWriter &Stream)
 
 static unsigned getEncodedLinkage(const GlobalValue &GV) {
   switch (GV.getLinkage()) {
+  case GlobalValue::ExternallyRequiredLinkage:
   case GlobalValue::ExternalLinkage:                 return 0;
   case GlobalValue::WeakAnyLinkage:                  return 1;
   case GlobalValue::AppendingLinkage:                return 2;

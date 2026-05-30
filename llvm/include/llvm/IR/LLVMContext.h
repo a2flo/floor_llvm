@@ -317,7 +317,9 @@ public:
     uint32_t error_on_alloca : 1;
     //! emit an error when there still is an alloca with a pointer type at the end of all optimizations
     uint32_t error_on_ptr_type_alloca : 1;
-    uint32_t unused : 30;
+    //! emit an error when there is any inttoptr or ptrtoint instruction
+    uint32_t error_on_ptr_int_casts : 1;
+    uint32_t unused : 29;
   };
   const libfloor_options_t& get_libfloor_options() const;
   libfloor_options_t& get_libfloor_options();

@@ -33,6 +33,9 @@ static const unsigned X86AddrSpaceMap[] = {
     0,   // opencl_global_device
     0,   // opencl_global_host
     0,   // vulkan_input
+    0,   // vulkan_output
+    0,   // metal_mesh
+    0,   // task_payload
     0,   // cuda_device
     0,   // cuda_constant
     0,   // cuda_shared

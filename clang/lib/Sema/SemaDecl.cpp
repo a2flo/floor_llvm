@@ -8877,7 +8877,8 @@ static bool isOpenCLSizeDependentType(ASTContext &C, QualType Ty) {
   return false;
 }
 
-static OpenCLParamType getOpenCLKernelParameterType(Sema &S, QualType PT, const bool is_metal) {
+static OpenCLParamType getOpenCLKernelParameterType(Sema &S, QualType PT, const bool is_metal,
+                                                    const bool is_fragment_shader) {
   if (PT->isDependentType())
     return InvalidKernelParam;
 
@@ -8893,7 +8894,7 @@ static OpenCLParamType getOpenCLKernelParameterType(Sema &S, QualType PT, const 
     if (PointeeType->isPointerType()) {
       // This is a pointer to pointer parameter.
       // Recursively check inner type.
-      OpenCLParamType ParamKind = getOpenCLKernelParameterType(S, PointeeType, is_metal);
+      OpenCLParamType ParamKind = getOpenCLKernelParameterType(S, PointeeType, is_metal, is_fragment_shader);
       if (ParamKind == InvalidAddrSpacePtrKernelParam ||
           ParamKind == InvalidKernelParam)
         return ParamKind;
@@ -8926,7 +8927,9 @@ static OpenCLParamType getOpenCLKernelParameterType(Sema &S, QualType PT, const 
   if (PT->isImageType())
     return PtrKernelParam;
 
-  if (PT->isBooleanType() || PT->isEventT() || PT->isReserveIDT())
+  if (PT->isEventT() || PT->isReserveIDT())
+    return InvalidKernelParam;
+  if (PT->isBooleanType() && !is_fragment_shader)
     return InvalidKernelParam;
 
   // OpenCL extension spec v1.2 s9.5:
@@ -8942,7 +8945,7 @@ static OpenCLParamType getOpenCLKernelParameterType(Sema &S, QualType PT, const 
     // Call ourself to check an underlying type of an array. Since the
     // getPointeeOrArrayElementType returns an innermost type which is not an
     // array, this recursive call only happens once.
-    return getOpenCLKernelParameterType(S, QualType(UnderlyingTy, 0), is_metal);
+    return getOpenCLKernelParameterType(S, QualType(UnderlyingTy, 0), is_metal, is_fragment_shader);
   }
 
   // C++ for OpenCL v1.0 s2.4:
@@ -8973,7 +8976,8 @@ static void checkIsValidOpenCLKernelParameter(
   ParmVarDecl *Param,
   llvm::SmallPtrSetImpl<const Type *> &ValidTypes,
   const bool is_metal,
-  const bool is_vulkan_with_arg_buffer) {
+  const bool is_vulkan_with_arg_buffer,
+  const bool is_fragment_shader) {
   QualType PT = Param->getType();
 
   // Cache the valid types we encounter to avoid rechecking structs that are
@@ -8981,7 +8985,7 @@ static void checkIsValidOpenCLKernelParameter(
   if (ValidTypes.count(PT.getTypePtr()))
     return;
 
-  switch (getOpenCLKernelParameterType(S, PT, is_metal)) {
+  switch (getOpenCLKernelParameterType(S, PT, is_metal, is_fragment_shader)) {
   case PtrPtrKernelParam:
     // OpenCL v3.0 s6.11.a:
     // A kernel function argument cannot be declared as a pointer to a pointer
@@ -9104,7 +9108,7 @@ static void checkIsValidOpenCLKernelParameter(
       if (ValidTypes.count(QT.getTypePtr()))
         continue;
 
-      OpenCLParamType ParamType = getOpenCLKernelParameterType(S, QT, is_metal);
+      OpenCLParamType ParamType = getOpenCLKernelParameterType(S, QT, is_metal, is_fragment_shader);
       if (ParamType == ValidKernelParam)
         continue;
 
@@ -10140,7 +10144,9 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
 
 
   if (getLangOpts().OpenCL && (NewFD->hasAttr<ComputeKernelAttr>() ||
-                               NewFD->hasAttr<GraphicsTessellationControlShaderAttr>())) {
+                               NewFD->hasAttr<GraphicsTessellationControlShaderAttr>() ||
+                               NewFD->hasAttr<GraphicsTaskShaderAttr>() ||
+                               NewFD->hasAttr<GraphicsMeshShaderAttr>())) {
     // OpenCL v1.2, s6.9 -- Kernels can only have return type void.
     if (!NewFD->getReturnType()->isVoidType()) {
       SourceRange RTRange = NewFD->getReturnTypeSourceRange();
@@ -10155,15 +10161,18 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
       NewFD->hasAttr<GraphicsVertexShaderAttr>() ||
       NewFD->hasAttr<GraphicsFragmentShaderAttr>() ||
       NewFD->hasAttr<GraphicsTessellationControlShaderAttr>() ||
-      NewFD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
+      NewFD->hasAttr<GraphicsTessellationEvaluationShaderAttr>() ||
+      NewFD->hasAttr<GraphicsTaskShaderAttr>() ||
+      NewFD->hasAttr<GraphicsMeshShaderAttr>()) {
     // static is invalid for kernel/shader functions.
     if (SC == SC_Static) {
       Diag(D.getIdentifierLoc(), diag::err_static_kernel);
       D.setInvalidType();
     }
 
-    // if this is a kernel, it must have a kernel dim attribute
-    if ((NewFD->hasAttr<ComputeKernelAttr>() || NewFD->hasAttr<GraphicsTessellationControlShaderAttr>()) &&
+    // if this is a kernel-like function, it must have a kernel dim attribute
+    if ((NewFD->hasAttr<ComputeKernelAttr>() || NewFD->hasAttr<GraphicsTessellationControlShaderAttr>() ||
+         NewFD->hasAttr<GraphicsTaskShaderAttr>()|| NewFD->hasAttr<GraphicsMeshShaderAttr>()) &&
         !NewFD->hasAttr<ComputeKernelDimAttr>()) {
         unsigned diagID = Diags.getCustomDiagID(DiagnosticsEngine::Error, "%0");
         Diags.Report(D.getIdentifierLoc(), diagID) << "kernel function must have kernel dim attribute!";
@@ -10175,7 +10184,7 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
       llvm::SmallPtrSet<const Type *, 16> ValidTypes;
       for (auto Param : NewFD->parameters())
         checkIsValidOpenCLKernelParameter(*this, D, Param, ValidTypes, getLangOpts().Metal,
-                                          getLangOpts().Vulkan);
+                                          getLangOpts().Vulkan, NewFD->hasAttr<GraphicsFragmentShaderAttr>());
     }
 
     // arg_buffer<> must only be used directly
@@ -14420,7 +14429,9 @@ ShouldWarnAboutMissingPrototype(const FunctionDecl *FD,
       FD->hasAttr<GraphicsVertexShaderAttr>() ||
       FD->hasAttr<GraphicsFragmentShaderAttr>() ||
       FD->hasAttr<GraphicsTessellationControlShaderAttr>() ||
-      FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>())
+      FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>() ||
+      FD->hasAttr<GraphicsTaskShaderAttr>() ||
+      FD->hasAttr<GraphicsMeshShaderAttr>())
     return false;
 
   // Don't warn on explicitly deleted functions.
@@ -14680,7 +14691,9 @@ Decl *Sema::ActOnStartOfFunctionDef(Scope *FnBodyScope, Decl *D,
      FD->hasAttr<GraphicsVertexShaderAttr>() ||
      FD->hasAttr<GraphicsFragmentShaderAttr>() ||
      FD->hasAttr<GraphicsTessellationControlShaderAttr>() ||
-     FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
+     FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>() ||
+     FD->hasAttr<GraphicsTaskShaderAttr>() ||
+     FD->hasAttr<GraphicsMeshShaderAttr>()) {
     for (const auto& Param : FD->parameters()) {
       const auto param_type = Param->getType();
       const CXXRecordDecl* cxx_rdecl = nullptr;
@@ -17878,6 +17891,27 @@ static void ComputeSpecialMemberFunctionsEligiblity(Sema &S,
                      Sema::CXXMoveAssignment);
 }
 
+static inline void propagate_per_primitive_attr(RecordDecl& RD, GraphicsPerPrimitiveAttr& per_prim_attr,
+												ASTContext& Context) {
+	for (auto field : RD.fields()) {
+		if (!field->hasAttr<GraphicsPerPrimitiveAttr>()) {
+			auto field_per_prim_attr = per_prim_attr.clone(Context);
+			field_per_prim_attr->setInherited(true);
+			field->addAttr(field_per_prim_attr);
+		}
+		
+		// recurse
+		if (auto field_rec_type = field->getType()->getAs<RecordType>(); field_rec_type) {
+			if (auto field_rec_decl = field_rec_type->getDecl(); field_rec_decl) {
+				// ignore vector compat structs, these are handled as-is / on a higher level
+				if (!field_rec_decl->hasAttr<VectorCompatAttr>()) {
+					propagate_per_primitive_attr(*field_rec_decl, per_prim_attr, Context);
+				}
+			}
+		}
+	}
+}
+
 void Sema::ActOnFields(Scope *S, SourceLocation RecLoc, Decl *EnclosingDecl,
                        ArrayRef<Decl *> Fields, SourceLocation LBrac,
                        SourceLocation RBrac,
@@ -18130,6 +18164,17 @@ void Sema::ActOnFields(Scope *S, SourceLocation RecLoc, Decl *EnclosingDecl,
     // Keep track of the number of named members.
     if (FD->getIdentifier())
       ++NumNamedMembers;
+
+    // recursively propagate per-primitive attribute to all contained fields of this field
+    if (auto per_prim_attr = FD->getAttr<GraphicsPerPrimitiveAttr>(); per_prim_attr) {
+      // NOTE: used directly (FS) and as a template parameter (MS) -> ignore the template type param here,
+      //       and only handle this when its an actual record, MS handling is in CGM
+      if (auto field_rec_type = FD->getType()->getAs<RecordType>(); field_rec_type) {
+        if (auto field_rec_decl = field_rec_type->getDecl(); field_rec_decl) {
+          propagate_per_primitive_attr(*field_rec_decl, *per_prim_attr, Context);
+        }
+      }
+    }
   }
 
   // Okay, we successfully defined 'Record'.

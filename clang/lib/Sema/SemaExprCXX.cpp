@@ -4744,6 +4744,8 @@ static bool CheckUnaryTypeTraitTypeCompleteness(Sema &S, TypeTrait UTT,
   //   If T is a class type, T shall be a complete type.
   case UTT_IsFinal:
   case UTT_IsSealed:
+  case UTT_LibFloorIsValidMeshVertex:
+  case UTT_LibFloorIsValidMeshPrimitive:
     if (ArgTy->getAsCXXRecordDecl())
       return !S.RequireCompleteType(
           Loc, ArgTy, diag::err_incomplete_type_used_in_type_trait_expr);
@@ -5221,6 +5223,10 @@ static bool EvaluateUnaryTypeTrait(Sema &Self, TypeTrait UTT,
     return !T->isIncompleteType();
   case UTT_HasUniqueObjectRepresentations:
     return C.hasUniqueObjectRepresentations(T);
+  case UTT_LibFloorIsValidMeshVertex:
+    return T->IsValidMeshVertexType();
+  case UTT_LibFloorIsValidMeshPrimitive:
+    return T->IsValidMeshPrimitiveType();
   }
 }
 
