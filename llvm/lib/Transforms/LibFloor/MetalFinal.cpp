@@ -338,6 +338,17 @@ namespace {
 		}
 		
 		enum METAL_KERNEL_ARG_REV_IDX : int32_t {
+			METAL_GLOBAL_ID = -10,
+			METAL_GLOBAL_SIZE = -9,
+			METAL_LOCAL_ID = -8,
+			METAL_LOCAL_SIZE = -7,
+			METAL_GROUP_ID = -6,
+			METAL_GROUP_SIZE = -5,
+			METAL_SUB_GROUP_ID = -4,
+			METAL_SUB_GROUP_LOCAL_ID = -3,
+			METAL_SUB_GROUP_SIZE = -2,
+			METAL_NUM_SUB_GROUPS = -1,
+			
 			METAL_KERNEL_ARG_COUNT = 10,
 		};
 		
@@ -378,6 +389,16 @@ namespace {
 			builder = std::make_shared<llvm::IRBuilder<>>(*ctx);
 			state = {};
 			metal_version = metal::get_metal_version(*M);
+			uint32_t implicit_arg_count = 0u; // not including soft-printf
+			
+			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
+			is_vertex_func = F.getCallingConv() == CallingConv::FLOOR_VERTEX;
+			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
+			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
+			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
+			is_task_func = F.getCallingConv() == CallingConv::FLOOR_TASK;
+			is_mesh_func = F.getCallingConv() == CallingConv::FLOOR_MESH;
+			assert(is_kernel_func || is_vertex_func || is_fragment_func || is_tess_control_func || is_tess_eval_func || is_task_func || is_mesh_func);
 			
 			for(auto& instr : F.getEntryBlock().getInstList()) {
 				if(!isa<AllocaInst>(instr)) {
@@ -405,10 +426,6 @@ namespace {
 			}
 			
 			// get args if this is a kernel function
-			is_kernel_func = F.getCallingConv() == CallingConv::FLOOR_KERNEL;
-			is_tess_control_func = F.getCallingConv() == CallingConv::FLOOR_TESS_CONTROL;
-			is_task_func = F.getCallingConv() == CallingConv::FLOOR_TASK;
-			is_mesh_func = F.getCallingConv() == CallingConv::FLOOR_MESH;
 			if (is_kernel_func || is_tess_control_func || is_task_func || is_mesh_func) {
 				auto kernel_dim_node = F.getMetadata("kernel_dim");
 				assert(kernel_dim_node);
@@ -451,12 +468,14 @@ namespace {
 					if (has_soft_printf) {
 						state.soft_printf = get_arg_by_idx(rev_idx--);
 					}
+					
+					implicit_arg_count = METAL_KERNEL_ARG_COUNT;
 				} else {
 					errs() << "invalid ";
 					if (is_kernel_func) {
 						errs() << "kernel";
 					} else if (is_tess_eval_func) {
-						errs() << "tessellation-control";
+						errs() << "tessellation-eval";
 					} else if (is_task_func) {
 						errs() << "task";
 					} else if (is_mesh_func) {
@@ -467,10 +486,8 @@ namespace {
 			}
 			
 			// get args if this is a vertex function
-			is_vertex_func = F.getCallingConv() == CallingConv::FLOOR_VERTEX;
 			if(is_vertex_func) {
 				if (F.arg_size() >= METAL_VERTEX_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
-					// TODO: this should be optional / only happen on request
 					state.vertex_id = get_arg_by_idx(METAL_VERTEX_ID);
 					state.base_vertex_id = get_arg_by_idx(METAL_BASE_VERTEX_ID);
 					state.instance_id = get_arg_by_idx(METAL_VS_INSTANCE_ID);
@@ -478,16 +495,16 @@ namespace {
 					if (has_soft_printf) {
 						state.soft_printf = get_arg_by_idx(-(METAL_VERTEX_ARG_COUNT + 1));
 					}
+					
+					implicit_arg_count = METAL_VERTEX_ARG_COUNT;
 				} else {
 					errs() << "invalid vertex function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
 				}
 			}
 			
 			// get args if this is a tessellation evaluation function
-			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
 			if(is_tess_eval_func) {
 				if (F.arg_size() >= METAL_TESS_EVAL_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
-					// TODO: this should be optional / only happen on request
 					state.patch_id = get_arg_by_idx(METAL_PATCH_ID);
 					state.instance_id = get_arg_by_idx(METAL_TES_INSTANCE_ID);
 					state.base_instance_id = get_arg_by_idx(METAL_TES_BASE_INSTANCE_ID);
@@ -495,15 +512,17 @@ namespace {
 					if (has_soft_printf) {
 						state.soft_printf = get_arg_by_idx(-(METAL_TESS_EVAL_ARG_COUNT + 1));
 					}
+					
+					implicit_arg_count = METAL_TESS_EVAL_ARG_COUNT;
 				} else {
 					errs() << "invalid tessellation-evaluation function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
 				}
 			}
 			
 			// get args if this is a fragment function
-			is_fragment_func = F.getCallingConv() == CallingConv::FLOOR_FRAGMENT;
 			if(is_fragment_func) {
-				const uint32_t opt_arg_count = (has_soft_printf ? 1u : 0u) + (has_primitive_id ? 1u : 0u) + (has_barycentric_coord ? 1u : 0u);
+				const uint32_t opt_builtin_arg_count = (has_primitive_id ? 1u : 0u) + (has_barycentric_coord ? 1u : 0u);
+				const uint32_t opt_arg_count = (has_soft_printf ? 1u : 0u) + opt_builtin_arg_count;
 				if (F.arg_size() >= METAL_FRAGMENT_ARG_COUNT + opt_arg_count) {
 					state.point_coord = get_arg_by_idx(METAL_POINT_COORD);
 					
@@ -518,14 +537,15 @@ namespace {
 					if (has_soft_printf) {
 						state.soft_printf = get_arg_by_idx(-(METAL_FRAGMENT_ARG_COUNT + opt_arg_counter++));
 					}
+					
+					implicit_arg_count = METAL_FRAGMENT_ARG_COUNT + opt_builtin_arg_count;
 				} else {
 					errs() << "invalid fragment function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
 				}
 			}
 			
 			// update function signature / param list
-			if (is_kernel_func || is_vertex_func || is_fragment_func || is_tess_control_func || is_tess_eval_func ||
-				is_task_func || is_mesh_func) {
+			{
 				std::vector<Type*> param_types;
 				for (auto& arg : F.args()) {
 					// replace noalias LLVM attribute with "air-buffer-no-alias" string attribute
@@ -568,8 +588,161 @@ namespace {
 			DBG(errs() << "in func: "; errs().write_escaped(F.getName()) << '\n';)
 			visit(F);
 			
+			// strip unused implicit function arguments + update metadata
+			strip_implicit_args(F, implicit_arg_count);
+			
 			// always modified
-			return was_modified || is_kernel_func || is_vertex_func || is_fragment_func || is_tess_control_func || is_tess_eval_func;
+			(void)was_modified;
+			return true;
+		}
+		
+		void strip_implicit_args(Function& F, const uint32_t implicit_arg_count) {
+			assert(implicit_arg_count > 0u);
+			assert(F.arg_size() >= implicit_arg_count);
+			
+			std::vector<Type*> arg_types;
+			std::vector<Argument*> args;
+			const auto old_attrs = F.getAttributes();
+			std::vector<AttributeSet> old_args_attrs;
+			const uint32_t first_implicit_arg_idx = F.arg_size() - implicit_arg_count;
+			std::vector<bool> implicit_arg_usage;
+			uint32_t arg_idx = 0u;
+			bool needs_update = false;
+			for (auto arg_iter = F.arg_begin(); arg_iter != F.arg_end(); ++arg_iter, ++arg_idx) {
+				if (arg_idx >= first_implicit_arg_idx) {
+					const auto is_unused = (arg_iter->uses().empty() && arg_iter->users().empty());
+					//llvm::dbgs() << arg_iter->getName() << ": " << (is_unused ? "unused" : "used") << "\n";
+					if (is_unused) {
+						needs_update = true;
+						implicit_arg_usage.emplace_back(false);
+						continue;
+					} else {
+						implicit_arg_usage.emplace_back(true);
+					}
+				}
+				arg_types.push_back(arg_iter->getType());
+				args.push_back(&*arg_iter);
+				old_args_attrs.push_back(old_attrs.getParamAttrs(arg_idx));
+			}
+			
+			if (!needs_update) {
+				return;
+			}
+			
+			auto new_func_type = FunctionType::get(F.getReturnType(), arg_types, false);
+			F.mutateType(PointerType::get(new_func_type, 0));
+			F.mutateFunctionType(new_func_type);
+			
+			// changing function arguments is a bit more complicated
+			const auto arg_count = uint32_t(args.size());
+			std::vector<AttributeSet> arg_attrs(arg_count);
+			if (arg_count > 0) {
+				auto new_args = std::allocator<Argument>().allocate(arg_count);
+				auto new_args_ptr = new_args;
+				auto old_args_ptr = args.data();
+				for (uint32_t arg_idx = 0u; arg_idx < arg_count; ++arg_idx, ++old_args_ptr, ++new_args_ptr) {
+					new (new_args_ptr) Argument(arg_types[arg_idx], "", &F, arg_idx);
+					(*old_args_ptr)->replaceAllUsesWith(new_args_ptr);
+					new_args_ptr->takeName(*old_args_ptr);
+					arg_attrs[arg_idx] = old_args_attrs[arg_idx];
+				}
+				F.replace_arguments(new_args, arg_count);
+			} else {
+				F.clear_arguments();
+			}
+			
+			// replace/update attributes
+			auto new_attrs = AttributeList::get(*ctx, old_attrs.getFnAttrs(), old_attrs.getRetAttrs(), arg_attrs);
+			F.setAttributes(new_attrs);
+			
+			// update AIR metadata
+			StringRef func_type_md_name;
+			if (is_kernel_func) {
+				func_type_md_name = "air.kernel";
+			} else if (is_vertex_func || is_tess_eval_func) {
+				func_type_md_name = "air.vertex";
+			} else if (is_fragment_func) {
+				func_type_md_name = "air.fragment";
+			} else if (is_task_func) {
+				func_type_md_name = "air.object";
+			} else if (is_mesh_func) {
+				func_type_md_name = "air.mesh";
+			} else {
+				assert(false);
+			}
+			auto func_md = M->getNamedMetadata(func_type_md_name);
+			assert(func_md);
+			bool did_update_md = false;
+			for (const auto& func_op : func_md->operands()) {
+				assert(func_op->getNumOperands() > 0);
+				
+				const auto func_op_const = dyn_cast_or_null<llvm::ConstantAsMetadata>(func_op->getOperand(0));
+				if (!func_op_const) {
+					llvm::errs() << "invalid function metadata\n";
+					assert(false);
+					return;
+				}
+				const auto func = dyn_cast_or_null<llvm::Function>(func_op_const->getValue());
+				if (!func) {
+					llvm::errs() << "invalid function metadata\n";
+					assert(false);
+					return;
+				}
+				if (func != &F) {
+					continue;
+				}
+				
+				assert(func_op->getNumOperands() >= 3);
+				auto args_md = dyn_cast_or_null<llvm::MDNode>(func_op->getOperand(2));
+				if (!args_md) {
+					llvm::errs() << "invalid function arguments metadata\n";
+					assert(false);
+					return;
+				}
+				
+				// implicit args are always at the end
+				const auto first_implicit_arg_md_idx = args_md->getNumOperands() - implicit_arg_count;
+				SmallVector<llvm::Metadata*, 8> new_md_args;
+				auto args_md_iter = args_md->op_begin();
+				uint32_t implicit_arg_remap_idx = 0u;
+				for (uint32_t arg_md_idx = 0u; arg_md_idx < args_md->getNumOperands(); ++arg_md_idx, ++args_md_iter) {
+					if (arg_md_idx < first_implicit_arg_md_idx) {
+						new_md_args.emplace_back(*args_md_iter);
+						continue;
+					}
+					
+					const auto arg_md_node = dyn_cast_or_null<llvm::MDNode>(*args_md_iter);
+					const auto implicit_arg_idx = arg_md_idx - first_implicit_arg_md_idx;
+					const bool is_used = implicit_arg_usage[implicit_arg_idx];
+					
+					if (arg_md_idx == first_implicit_arg_md_idx) {
+						// retrieve the argument index -> this will be the base index
+						const auto arg_idx_cnst = dyn_cast_or_null<llvm::ConstantAsMetadata>(arg_md_node->getOperand(0));
+						const auto arg_idx_cnst_int = llvm::dyn_cast_or_null<llvm::ConstantInt>(arg_idx_cnst->getValue());
+						implicit_arg_remap_idx = arg_idx_cnst_int->getZExtValue();
+					}
+					
+					if (is_used) {
+						SmallVector<llvm::Metadata*, 8> implicit_arg_fields;
+						implicit_arg_fields.push_back(llvm::ConstantAsMetadata::get(builder->getInt32(implicit_arg_remap_idx++)));
+						for (uint32_t copy_idx = 1u, idx_count = arg_md_node->getNumOperands(); copy_idx < idx_count; ++copy_idx) {
+							implicit_arg_fields.push_back(arg_md_node->getOperand(copy_idx));
+						}
+						new_md_args.emplace_back(llvm::MDNode::get(*ctx, implicit_arg_fields));
+					}
+				}
+				
+				auto new_args_md = llvm::MDNode::get(*ctx, new_md_args);
+				func_op->replaceOperandWith(2, new_args_md);
+				
+				did_update_md = true;
+				break;
+			}
+			if (!did_update_md) {
+				llvm::errs() << "failed to update function metadata\n";
+				assert(false);
+				return;
+			}
 		}
 		
 		// InstVisitor overrides...

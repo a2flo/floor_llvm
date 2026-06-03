@@ -502,6 +502,31 @@ void Function::stealArgumentListFrom(Function &Src) {
   Src.setValueSubclassData(Src.getSubclassDataFromValue() | (1 << 0));
 }
 
+void Function::replace_arguments(Argument* new_args, const uint32_t arg_count) {
+	assert(new_args);
+	assert(!hasLazyArguments());
+	assert(llvm::all_of(makeArgArray(Arguments, NumArgs),
+						[](const Argument &A) { return A.use_empty(); }) &&
+		   "Expected arguments to be unused in declaration");
+	
+	clearArguments();
+	Arguments = new_args;
+	NumArgs = arg_count;
+	for (Argument &A : makeArgArray(Arguments, NumArgs)) {
+		A.setParent(this);
+	}
+}
+
+void Function::clear_arguments() {
+	if (!hasLazyArguments()) {
+		clearArguments();
+		setValueSubclassData(getSubclassDataFromValue() | (1 << 0));
+		NumArgs = 0;
+	} else {
+		assert(NumArgs == 0);
+	}
+}
+
 // dropAllReferences() - This function causes all the subinstructions to "let
 // go" of all references that they are maintaining.  This allows one to
 // 'delete' a whole class at a time, even though there may be circular

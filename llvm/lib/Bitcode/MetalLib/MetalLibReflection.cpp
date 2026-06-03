@@ -1259,13 +1259,6 @@ static inline bool handle_func_attribute(const llvm::MDNode& md_node, reflection
 			llvm::errs() << "reflection: invalid function type for air.patch\n";
 			return false;
 		}
-	} else if (attr_type_str == "early_fragment_tests") {
-		if constexpr (func_type == FUNCTION_TYPE::FRAGMENT) {
-			func_node.early_fragment_tests = true;
-		} else {
-			llvm::errs() << "reflection: invalid function type for early_fragment_tests\n";
-			return false;
-		}
 	} else if (attr_type_str == "air.max_mesh_work_groups") {
 		if constexpr (func_type == FUNCTION_TYPE::OBJECT) {
 			const auto node_id = create_node(md_node, attr_type_str, state);
@@ -1279,6 +1272,23 @@ static inline bool handle_func_attribute(const llvm::MDNode& md_node, reflection
 		}
 	} else {
 		llvm::errs() << "reflection: unhandled function attribute: " << attr_type_str << "\n";
+		return false;
+	}
+	
+	return true;
+}
+
+template <FUNCTION_TYPE func_type, typename func_node_type>
+static inline bool handle_func_str_attribute(const llvm::StringRef& attr_str, reflection_state_t& state, func_node_type& func_node) {
+	if (attr_str == "early_fragment_tests") {
+		if constexpr (func_type == FUNCTION_TYPE::FRAGMENT) {
+			func_node.early_fragment_tests = true;
+		} else {
+			llvm::errs() << "reflection: invalid function type for early_fragment_tests\n";
+			return false;
+		}
+	} else {
+		llvm::errs() << "reflection: unhandled function attribute string: " << attr_str << "\n";
 		return false;
 	}
 	
@@ -1343,7 +1353,17 @@ static inline bool handle_function_reflection(const llvm::MDNode& func_md, refle
 	if (func_md.getNumOperands() > 3) {
 		for (auto op = func_md.op_begin() + 3; op != func_md.op_end(); ++op) {
 			const auto attr_md_node = dyn_cast_or_null<const llvm::MDNode>(*op);
-			if (!attr_md_node || !handle_func_attribute<func_type>(*attr_md_node, state, func_node)) {
+			if (attr_md_node) {
+				if (!handle_func_attribute<func_type>(*attr_md_node, state, func_node)) {
+					llvm::errs() << "reflection: failed to handle function attribute metadata\n";
+					return false;
+				}
+			} else if (const auto attr_string = md_get_string(func_md, op); attr_string) {
+				if (!handle_func_str_attribute<func_type>(*attr_string, state, func_node)) {
+					llvm::errs() << "reflection: failed to handle function attribute string metadata\n";
+					return false;
+				}
+			} else {
 				llvm::errs() << "reflection: invalid function attribute metadata\n";
 				return false;
 			}

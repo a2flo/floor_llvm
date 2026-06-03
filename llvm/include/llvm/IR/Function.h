@@ -701,6 +701,13 @@ public:
   /// Requires that this has no function body.
   void stealArgumentListFrom(Function &Src);
 
+  /// Replaces arguments of this function with "new_args" (taking ownership of new_args)
+  /// NOTE: this requires that the function body uses of the arguments have already been updated/replaced
+  void replace_arguments(Argument* new_args, const uint32_t arg_count);
+
+  /// Removes all arguments.
+  void clear_arguments();
+
   /// Get the underlying elements of the Function... the basic block list is
   /// empty for external functions.
   ///
