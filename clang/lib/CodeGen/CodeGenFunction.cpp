@@ -633,7 +633,10 @@ void CodeGenFunction::EmitOpenCLKernelMetadata(const FunctionDecl *FD,
 		  const auto full_version = CGM.getLangOpts().MetalVersion;
 		  assert(full_version >= 320);
 		  metal_language_version = {{ full_version / 100u, (full_version % 100u) / 10u, full_version % 10u }};
-		  if (full_version >= 400) {
+		  if (full_version >= 410) {
+			  // Metal 4.1 uses an "air.version" of 2.9.0
+			  metal_version = {{ 2u, 9u, 0u }};
+		  } else if (full_version >= 400) {
 			  // Metal 4.0 uses an "air.version" of 2.8.0
 			  metal_version = {{ 2u, 8u, 0u }};
 		  } else if (full_version >= 320) {

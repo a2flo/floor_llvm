@@ -3267,6 +3267,7 @@ void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
   // as Metal is largely compiled as OpenCL, also enable + init opencl
   if (LangStd == LangStandard::lang_metal32 ||
       LangStd == LangStandard::lang_metal40 ||
+      LangStd == LangStandard::lang_metal41 ||
       IK.getLanguage() == Language::Metal) {
     Opts.Metal = 1;
     Opts.OpenCL = 1;
@@ -3276,6 +3277,8 @@ void CompilerInvocation::setLangDefaults(LangOptions &Opts, InputKind IK,
       Opts.MetalVersion = 320;
     else if (LangStd == LangStandard::lang_metal40)
       Opts.MetalVersion = 400;
+    else if (LangStd == LangStandard::lang_metal41)
+      Opts.MetalVersion = 410;
   }
 
   // as Vulkan is largely compiled as OpenCL, also enable + init opencl

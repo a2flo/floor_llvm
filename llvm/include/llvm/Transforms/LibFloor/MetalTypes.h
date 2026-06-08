@@ -103,6 +103,7 @@ enum class ADDRESS_SPACE : uint8_t {
 	RAY = 5u,
 	TASK = 6u,
 	MESH = 7u,
+	GENERIC = 8u,
 	INTERSECTION_RESULT = 9u,
 };
 

@@ -376,6 +376,8 @@ static const unordered_map<uint32_t,
         {270, {{{2, 7, 0}}, {{3, 2, 0}}}},
         // Metal 4.0 uses AIR 2.8
         {280, {{{2, 8, 0}}, {{4, 0, 0}}}},
+        // Metal 4.1 uses AIR 2.9
+        {290, {{{2, 9, 0}}, {{4, 1, 0}}}},
     };
 
 static std::string make_abs_file_name(const std::string &file_name_in) {
@@ -465,6 +467,8 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     auto ios_version = TT.getiOSVersion();
     if (ios_version.getMajor() == 18) {
       target_air_version = 270;
+    } else if (ios_version.getMajor() >= 27) {
+      target_air_version = 290;
     } else if (ios_version.getMajor() >= 26) {
       target_air_version = 280;
     }
@@ -472,6 +476,8 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     auto xros_version = TT.getXROSVersion();
     if (xros_version.getMajor() == 2) {
       target_air_version = 270;
+    } else if (xros_version.getMajor() >= 27) {
+      target_air_version = 290;
     } else if (xros_version.getMajor() >= 26) {
       target_air_version = 280;
     }
@@ -481,6 +487,8 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     auto osx_major = osx_version.getMajor();
     if (osx_major == 15) {
       target_air_version = 270;
+    } else if (osx_major >= 27) {
+      target_air_version = 290;
     } else if (osx_major == 16 || osx_major >= 26) {
       target_air_version = 280;
     }
@@ -880,6 +888,7 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
         static const std::unordered_map<uint32_t, const char *> ident_versions{
             {270, "Apple metal version 32023.620 (metalfe-32023.620)"},
             {280, "Apple metal version 32023.883 (metalfe-32023.883)"},
+            {290, "Apple metal version 32023.917 (metalfe-32023.917)"},
         };
         ident_op->replaceOperandWith(
             0, llvm::MDString::get(cloned_mod->getContext(),

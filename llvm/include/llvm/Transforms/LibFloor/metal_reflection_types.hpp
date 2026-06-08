@@ -890,7 +890,7 @@ enum class ADDRESS_SPACE : uint8_t {
 	RAY_DATA = 5u, //!< RayData
 	OBJECT_DATA = 6u, //!< ObjectData
 	MESH_DATA = 7u, //!< MeshData
-
+	GENERIC = 8u, //!< Generic
 	INTERSECTION_RESULT = 9u, //!< IntersectionResult
 
 	INVALID = 255u, //!< Invalid
@@ -916,6 +916,8 @@ static inline const char* address_space_to_string(const ADDRESS_SPACE value) {
 			return "object-data";
 		case ADDRESS_SPACE::MESH_DATA:
 			return "mesh-data";
+		case ADDRESS_SPACE::GENERIC:
+			return "generic";
 		case ADDRESS_SPACE::INTERSECTION_RESULT:
 			return "intersection-result";
 		case ADDRESS_SPACE::INVALID:

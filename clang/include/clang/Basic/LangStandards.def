@@ -220,6 +220,9 @@ LANGSTANDARD(metal32, "metal3.2", Metal, "Metal 3.2",
 LANGSTANDARD(metal40, "metal4.0", Metal, "Metal 4.0",
              LineComment | CPlusPlus | CPlusPlus11 | CPlusPlus14 | CPlusPlus17 |
              CPlusPlus20 | CPlusPlus2b | Digraphs | HexFloat | GNUMode | OpenCL)
+LANGSTANDARD(metal41, "metal4.1", Metal, "Metal 4.1",
+             LineComment | CPlusPlus | CPlusPlus11 | CPlusPlus14 | CPlusPlus17 |
+             CPlusPlus20 | CPlusPlus2b | Digraphs | HexFloat | GNUMode | OpenCL)
 
 // Vulkan
 LANGSTANDARD(vulkan13, "vulkan1.3", Vulkan, "Vulkan C++ 1.3",
