@@ -14693,7 +14693,8 @@ Decl *Sema::ActOnStartOfFunctionDef(Scope *FnBodyScope, Decl *D,
      FD->hasAttr<GraphicsTessellationControlShaderAttr>() ||
      FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>() ||
      FD->hasAttr<GraphicsTaskShaderAttr>() ||
-     FD->hasAttr<GraphicsMeshShaderAttr>()) {
+     FD->hasAttr<GraphicsMeshShaderAttr>() ||
+     FD->hasAttr<FloorIOFunctionAttr>()) {
     for (const auto& Param : FD->parameters()) {
       const auto param_type = Param->getType();
       const CXXRecordDecl* cxx_rdecl = nullptr;

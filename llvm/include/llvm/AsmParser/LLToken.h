@@ -157,6 +157,7 @@ enum Kind {
   kw_floor_task,
   kw_floor_mesh,
   kw_floor_func,
+  kw_floor_io_func,
   kw_x86_64_sysvcc,
   kw_win64cc,
   kw_webkit_jscc,

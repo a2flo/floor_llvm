@@ -18,6 +18,7 @@
 #include "clang/CodeGen/CGFunctionInfo.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/IR/Module.h"
+#include <unordered_set>
 
 namespace llvm {
 class FunctionType;
@@ -87,19 +88,35 @@ class CodeGenTypes {
   llvm::DenseMap<const Type*, std::unique_ptr<CGRecordLayout>> CGRecordLayouts;
 
   /// This maps special RecordDecls to flattened LLVM struct types with the corresponding record layout info.
-  /// "FlattenedCGRecordLayouts" is for all direct mappings, while "FlattenedCGRecordLayoutBaseAliases" is for
-  /// any potential base decl/class aliases to derived RecordDecl flattened LLVM types
-  /// NOTE: since we also use this for unnamed struct types, this requires the original RecordDecl
-  llvm::DenseMap<const RecordDecl*, std::pair<const llvm::Type*, CGRecordLayout *>> FlattenedCGRecordLayouts;
-  llvm::DenseMap<const RecordDecl*, llvm::DenseMap<const llvm::Type*, CGRecordLayout *>> FlattenedCGRecordLayoutBaseAliases;
+  struct flattened_entry_t {
+    llvm::Type* type { nullptr };
+    CGRecordLayout* record_layout { nullptr };
+  };
+  struct flattened_record_t {
+    //! for named struct mappings
+    flattened_entry_t named {};
+    //! for unnamed struct mappings
+    flattened_entry_t unnamed {};
+    //! Vulkan-only: for argument buffer structs
+    flattened_entry_t arg_buffer {};
+
+    //! indirectly allowed alias mappings
+    std::unordered_set<const RecordDecl*> aliases;
+    //! all children of this record -> if the direct lookup fails, will check children
+    std::unordered_set<const RecordDecl*> children;
+  };
+  std::unordered_map<const RecordDecl*, flattened_record_t> flattened_records;
+
+  const CodeGenTypes::flattened_entry_t* find_flattened_entry(const RecordDecl* decl,
+                                                              const llvm::Type* type,
+                                                              const bool is_arg_buffer) const;
+
 #ifndef NDEBUG
   /// for debugging purposes: keep track which LLVM types *should* have a flattened layout
+  /// NOTE: this is only viable for named struct types
   llvm::DenseSet<const llvm::Type*> should_have_flattened_layout;
+  llvm::DenseSet<const llvm::Type*> should_have_flattened_layout_arg_buf;
 #endif
-
-  /// This maps CXX record decls to their special flattend llvm struct types
-  llvm::DenseMap<const CXXRecordDecl*, llvm::Type*> FlattenedRecords;
-  llvm::DenseMap<const CXXRecordDecl*, llvm::Type*> FlattenedFloorArgBufferRecords;
 
   /// Contains the LLVM IR type for any converted RecordDecl.
   llvm::DenseMap<const Type*, llvm::StructType *> RecordDeclTypes;
@@ -190,12 +207,14 @@ public:
   /// and/or incomplete argument types, this will return the opaque type.
   llvm::Type *GetFunctionTypeForVTable(GlobalDecl GD);
 
-  const CGRecordLayout &getCGRecordLayout(const RecordDecl*, llvm::Type* struct_type = nullptr);
+  const CGRecordLayout &getCGRecordLayout(const RecordDecl*,
+                                          llvm::Type* struct_type = nullptr,
+                                          const bool is_arg_buffer = false);
 
   /// Returns the flattend LLVM type of the specified CXX record decl,
   /// or nullptr if no flattened type exists.
   llvm::Type *getAnyFlattenedType(const CXXRecordDecl* D, const bool prefer_arg_buffer_type = false) const;
-  llvm::Type *getFlattenedRecordType(const CXXRecordDecl* D) const;
+  llvm::Type *getFlattenedRecordType(const CXXRecordDecl* D, const bool is_unnamed) const;
   llvm::Type *getFlattenedFloorArgBufferType(const CXXRecordDecl* D) const;
 
   /// UpdateCompletedType - When we find the full definition for a TagDecl,
@@ -355,28 +374,7 @@ public:
   uint32_t getMetalVulkanImplicitArgCount(const FunctionDecl* FD) const;
 
   // returns true if the specified LLVM type is a flattened type
-  bool is_flattened_struct_type(const RecordDecl* decl, const llvm::Type* Ty) const {
-	  const auto iter = FlattenedCGRecordLayouts.find(decl);
-	  if (iter != FlattenedCGRecordLayouts.end() && iter->second.first == Ty) {
-		  return true;
-	  }
-	  const auto aliases_iter = FlattenedCGRecordLayoutBaseAliases.find(decl);
-	  if (aliases_iter == FlattenedCGRecordLayoutBaseAliases.end()) {
-#ifndef NDEBUG
-		  assert(should_have_flattened_layout.count(Ty) == 0);
-#endif
-		  return false;
-	  }
-#ifndef NDEBUG
-	  if (aliases_iter->second.count(Ty) > 0) {
-		  return true;
-	  }
-	  assert(should_have_flattened_layout.count(Ty) == 0);
-	  return false;
-#else
-	  return (aliases_iter->second.count(Ty) > 0);
-#endif
-  }
+  bool is_flattened_struct_type(const RecordDecl* decl, const llvm::Type* Ty, const bool is_arg_buffer) const;
 
   /// Creates and returns a graphics backend (Metal/Vulkan) compatible I/O struct type from the specified clang "type".
   /// If "create_unnamed" is true, this will create an unname struct type.

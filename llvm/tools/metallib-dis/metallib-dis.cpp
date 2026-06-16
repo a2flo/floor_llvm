@@ -68,6 +68,9 @@ static cl::opt<bool>
 DontPrint("disable-output", cl::desc("disable standard output (still prints errors)"), cl::init(false), cl::Hidden);
 
 static cl::opt<bool>
+ImmediatePrint("immediate-output", cl::desc("immediately write to standard output (incompatible with disable-output)"), cl::init(false), cl::Hidden);
+
+static cl::opt<bool>
 DisableReflection("disable-reflection", cl::desc("disable reflection parsing and printing"), cl::init(false));
 
 static cl::opt<bool>
@@ -547,6 +550,7 @@ static Expected<bool> parse_metallib(const std::span<const char> data_span, char
 		hex_dump(os, extended_md_ptr, header.header_control.extended_md_length, "extended metadata");
 		hex_dump(os, debug_ptr, header.header_control.debug_length, "debug metadata");
 	}
+	os.flush();
 	
 	for(uint32_t i = 0; i < program_count; ++i) {
 		auto& entry = info.entries[i];
@@ -1196,12 +1200,15 @@ static Expected<bool> parse_metallib(const std::span<const char> data_span, char
 			});
 			return make_error<StringError>("failed to parse bitcode module", inconvertibleErrorCode());
 		}
+		
+		os.flush();
 	}
 	
 	return true;
 }
 
-static Expected<bool> disassembleInputFile(char** argv, std::unique_ptr<ToolOutputFile>& Out, const bool dont_print) {
+static Expected<bool> disassembleInputFile(char** argv, std::unique_ptr<ToolOutputFile>& Out, const bool dont_print,
+										   const bool immediate_print) {
 	ErrorOr<std::unique_ptr<MemoryBuffer>> input_data = MemoryBuffer::getFileOrSTDIN(InputFilename);
 	if (!input_data) {
 		return errorCodeToError(input_data.getError());
@@ -1211,7 +1218,7 @@ static Expected<bool> disassembleInputFile(char** argv, std::unique_ptr<ToolOutp
 	
 	std::string output;
 	raw_string_ostream str_os(output);
-	auto& os = str_os;
+	auto& os = (!immediate_print ? (raw_ostream&)str_os : (raw_ostream&)Out->os());
 	
 	Expected<bool> ret { make_error<StringError>("", inconvertibleErrorCode()) };
 	if (!FuzzySearch) {
@@ -1239,7 +1246,7 @@ static Expected<bool> disassembleInputFile(char** argv, std::unique_ptr<ToolOutp
 		ret = found_any;
 	}
 	
-	if (!dont_print) {
+	if (!dont_print && !immediate_print) {
 		Out->os() << output;
 	}
 	
@@ -1258,6 +1265,11 @@ int main(int argc, char **argv) {
       std::make_unique<MetalLibDisDiagnosticHandler>(argv[0]));
 
   cl::ParseCommandLineOptions(argc, argv, ".metallib -> .txt disassembler\n");
+
+  if (ImmediatePrint && DontPrint) {
+    errs() << "incompatible options: can't use both immediate-output and disable-output\n";
+    return -1;
+  }
 
   // Just use stdout.  We won't actually print anything on it.
   if (DontPrint)
@@ -1280,7 +1292,7 @@ int main(int argc, char **argv) {
     return -1;
   }
 
-  Expected<bool> SuccessOrErr = disassembleInputFile(argv, Out, DontPrint);
+  Expected<bool> SuccessOrErr = disassembleInputFile(argv, Out, DontPrint, ImmediatePrint);
   if (!SuccessOrErr) {
     handleAllErrors(SuccessOrErr.takeError(), [&](ErrorInfoBase &EIB) {
       errs() << argv[0] << ": ";

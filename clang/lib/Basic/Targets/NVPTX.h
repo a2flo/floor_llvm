@@ -172,6 +172,7 @@ public:
 
   CallingConvCheckResult checkCallingConvention(CallingConv CC) const override {
     if (CC == CC_FloorFunction ||
+        CC == CC_FloorIOFunction ||
         CC == CC_FloorVertex ||
         CC == CC_FloorFragment ||
         CC == CC_FloorTask ||

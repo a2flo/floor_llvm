@@ -38,7 +38,6 @@ void llvm::initializeLibFloor(PassRegistry &Registry) {
   initializeEverythingInlinerPass(Registry);
   initializeCUDAImagePass(Registry);
   initializeCUDAFinalPass(Registry);
-  initializeMetalFirstPass(Registry);
   initializeMetalFinalPass(Registry);
   initializeMetalFinalModuleCleanupPass(Registry);
   initializeMetalMemopLoweringPass(Registry);
@@ -72,10 +71,6 @@ void LLVMAddCUDAImagePass(LLVMPassManagerRef PM) {
 
 void LLVMAddCUDAFinalPass(LLVMPassManagerRef PM) {
   unwrap(PM)->add(createCUDAFinalPass());
-}
-
-void LLVMAddMetalFirstPass(LLVMPassManagerRef PM) {
-  unwrap(PM)->add(createMetalFirstPass());
 }
 
 void LLVMAddMetalFinalPass(LLVMPassManagerRef PM) {

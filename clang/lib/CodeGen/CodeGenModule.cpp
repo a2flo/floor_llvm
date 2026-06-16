@@ -3581,15 +3581,17 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		std::function<SmallVector<llvm::Metadata*, 16>(const clang::QualType&, const NamedDecl&, const bool, const bool, uint32_t&, uint32_t&, const uint32_t)> add_buffer_arg;
 		
 		// handle "air.struct_type_info" metadata
-		const std::function<SmallVector<llvm::Metadata*, 16>(const CXXRecordDecl&, const Decl&, const bool, const bool, uint32_t&, uint32_t&)> add_struct_type_info =
+		const std::function<SmallVector<llvm::Metadata*, 16>(const CXXRecordDecl&, const Decl&, const bool, const bool, const bool, uint32_t&, uint32_t&, uint32_t*)> add_struct_type_info =
 		[this, &add_struct_type_info, &add_buffer_arg, &add_indirect_constant, &Builder,
 		 &add_image_arg](const CXXRecordDecl& struct_rdecl,
 						 const Decl& parent_decl,
 						 const bool is_indirect, // specifies if we're within an indirect buffer
 						 const bool indirect_buffer,
+						 const bool align_vectors, // align vectors to their type size
 						 uint32_t& arg_idx_child,
 						 // NOTE: buffer and texture location indices use the same space
-						 uint32_t& buffer_or_tex_idx_child) -> SmallVector<llvm::Metadata*, 16> {
+						 uint32_t& buffer_or_tex_idx_child,
+						 uint32_t* total_size) -> SmallVector<llvm::Metadata*, 16> {
 			const auto fields = get_aggregate_fields(&struct_rdecl, Types, getDataLayout());
 			SmallVector<llvm::Metadata*, 16> struct_info;
 			uint32_t offset = 0;
@@ -3603,6 +3605,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 					llvm_field_type = getTypes().ConvertTypeForMem(field_type);
 				}
 				auto field_pointee_type = field_type->getPointeeType();
+				const auto field_cxx_rdecl = field_type->getAsCXXRecordDecl();
 				
 				bool is_inline_struct = false;
 				const auto buffer_idx_offset = buffer_or_tex_idx_child;
@@ -3620,7 +3623,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 						struct_info.push_back(llvm::MDString::get(VMContext, "air.struct_type_info"));
 						// #-1: metadata of struct type
 						uint32_t struct_arg_idx_child = 0, struct_buf_idx_child = 0;
-						auto struct_type_info = add_struct_type_info(*inline_struct_rdecl, struct_rdecl, is_indirect, indirect_buffer, struct_arg_idx_child, struct_buf_idx_child);
+						auto struct_type_info = add_struct_type_info(*inline_struct_rdecl, struct_rdecl, is_indirect, indirect_buffer, align_vectors, struct_arg_idx_child, struct_buf_idx_child, nullptr);
 						assert(!struct_type_info.empty());
 						struct_info.push_back(llvm::MDNode::get(VMContext, struct_type_info));
 						
@@ -3631,11 +3634,16 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 					}
 				}
 				
+				const auto size = (uint32_t)getDataLayout().getTypeStoreSize(llvm_field_type);
+				if (align_vectors && (llvm_field_type->isVectorTy() || (field_cxx_rdecl && field_cxx_rdecl->hasAttr<VectorCompatAttr>())) && (offset % size) != 0u) {
+					assert(size > 0);
+					offset += size - (offset % size);
+				}
+				
 				// #0: offset
 				struct_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(offset)));
-				// #1: sizeof
-				const auto size = (uint32_t)getDataLayout().getTypeStoreSize(llvm_field_type);
 				offset += size * uint32_t(std::max(array_size, 1u));
+				// #1: sizeof
 				struct_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(size)));
 				// #2: array size (0 signals "no array")
 				struct_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(array_size)));
@@ -3719,6 +3727,9 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 					}
 				}
 			}
+			if (total_size) {
+				*total_size = offset;
+			}
 			return struct_info;
 		};
 		
@@ -3774,8 +3785,8 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			// #8/#9: struct info
 			if (const auto pointee_rdecl = clang_pointee_type->getAsCXXRecordDecl()) {
 				uint32_t arg_idx_child = 0, buffer_or_tex_idx_child = 0; // for indirect/arg buffers
-				auto struct_type_info = add_struct_type_info(*pointee_rdecl, decl, is_indirect, indirect_buffer,
-															 arg_idx_child, buffer_or_tex_idx_child);
+				auto struct_type_info = add_struct_type_info(*pointee_rdecl, decl, is_indirect, indirect_buffer, false,
+															 arg_idx_child, buffer_or_tex_idx_child, nullptr);
 				if (!struct_type_info.empty()) {
 					arg_info.push_back(llvm::MDString::get(VMContext, "air.struct_type_info"));
 					arg_info.push_back(llvm::MDNode::get(VMContext, struct_type_info));
@@ -3818,10 +3829,11 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.payload"));
 			
 			// struct info
+			uint32_t struct_size = 0u;
 			if (const auto pointee_rdecl = clang_pointee_type->getAsCXXRecordDecl()) {
 				uint32_t arg_idx_child = 0, buffer_or_tex_idx_child = 0;
-				auto struct_type_info = add_struct_type_info(*pointee_rdecl, decl, false, false,
-															 arg_idx_child, buffer_or_tex_idx_child);
+				auto struct_type_info = add_struct_type_info(*pointee_rdecl, decl, false, false, true,
+															 arg_idx_child, buffer_or_tex_idx_child, &struct_size);
 				assert(buffer_or_tex_idx_child == 0); // should not have been used here
 				if (!struct_type_info.empty()) {
 					arg_info.push_back(llvm::MDString::get(VMContext, "air.struct_type_info"));
@@ -3831,7 +3843,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			
 			// type size
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_size"));
-			auto payload_size = getDataLayout().getTypeStoreSize(llvm_pointee_type).getFixedValue();
+			auto payload_size = (struct_size != 0 ? struct_size : getDataLayout().getTypeStoreSize(llvm_pointee_type).getFixedValue());
 			payload_size = ((payload_size + metal_task_payload_alignment - 1u) /
 							metal_task_payload_alignment) * metal_task_payload_alignment;
 			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(payload_size)));

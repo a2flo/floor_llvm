@@ -1237,6 +1237,12 @@ def GraphicsMeshShader : DeclOrTypeAttr {
   let SimpleHandler = 1;
 }
 
+def FloorIOFunction : DeclOrTypeAttr {
+  let Spellings = [GNU<"floor_io_function">, CXX11<"","floor_io_function", 200809>];
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+
 // compute kernel dimensionality (1, 2 or 3)
 def ComputeKernelDim : DeclOrTypeAttr {
   let Spellings = [GNU<"kernel_dim">, CXX11<"","kernel_dim", 200809>];

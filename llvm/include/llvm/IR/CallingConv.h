@@ -155,6 +155,8 @@ namespace CallingConv {
     /// NOTE: for Metal this is entirely virtual and will be stripped in the end
     /// NOTE: used to be SPIR_FUNC, must be 75 for binary compat
     FLOOR_FUNC = 75,
+    /// AIR/Metal and SPIR-V/Vulkan graphics I/O function calling convention
+    FLOOR_IO_FUNC = 204,
     /// OpenCL/SPIR/SPIR-V, AIR/Metal, CUDA and SPIR-V/Vulkan compute kernel function calling convention
     /// NOTE: for Metal this is entirely virtual and will be stripped in the end
     /// NOTE: used to be SPIR_KERNEL, must be 76 for binary compat
@@ -277,6 +279,14 @@ namespace CallingConv {
       return true;
     }
     return false;
+  }
+  //! returns true if the specified "CC" calling convention is a floor graphics I/O CC
+  static inline bool isFloorIO(CallingConv::ID CC) {
+    return (CC == CallingConv::FLOOR_IO_FUNC);
+  }
+  //! returns true if the specified "CC" calling convention is a device entry point or floor graphics I/O CC
+  static inline bool isFloorEntryPointOrIO(CallingConv::ID CC) {
+    return isFloorEntryPoint(CC) || isFloorIO(CC);
   }
 
 } // end namespace CallingConv

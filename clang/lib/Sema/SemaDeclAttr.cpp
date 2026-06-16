@@ -5682,6 +5682,7 @@ bool Sema::CheckCallingConvAttr(const ParsedAttr &Attrs, CallingConv &CC,
   case ParsedAttr::AT_GraphicsTaskShader: CC = CC_FloorTask; break;
   case ParsedAttr::AT_GraphicsMeshShader: CC = CC_FloorMesh; break;
   case ParsedAttr::AT_ComputeKernel: CC = CC_FloorKernel; break;
+  case ParsedAttr::AT_FloorIOFunction: CC = CC_FloorIOFunction; break;
   default: llvm_unreachable("unexpected attribute kind");
   }
 
@@ -9019,6 +9020,9 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
     break;
   case ParsedAttr::AT_GraphicsTessellationPatch:
     handleGraphicsTessellationPatchAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_FloorIOFunction:
+    handleSimpleAttribute<FloorIOFunctionAttr>(S, D, AL);
     break;
   case ParsedAttr::AT_RetRange:
     handleRangeAttr(S, D, AL);

@@ -976,6 +976,9 @@ void TypePrinter::printFunctionAfter(const FunctionType::ExtInfo &Info,
     case CC_FloorFunction:
       OS << "floor_function";
       break;
+    case CC_FloorIOFunction:
+      OS << " __attribute__((floor_io_function))";
+      break;
     case CC_FloorKernel:
       OS << "floor_kernel";
       break;
@@ -1756,6 +1759,7 @@ void TypePrinter::printAttributedAfter(const AttributedType *T,
   case attr::MSABI: OS << "ms_abi"; break;
   case attr::SysVABI: OS << "sysv_abi"; break;
   case attr::RegCall: OS << "regcall"; break;
+  case attr::FloorIOFunction: OS << "floor_io_function"; break;
   case attr::ComputeKernel: OS << "floor_kernel"; break;
   case attr::GraphicsFragmentShader: OS << "floor_fragment"; break;
   case attr::GraphicsVertexShader: OS << "floor_vertex"; break;

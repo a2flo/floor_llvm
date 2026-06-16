@@ -3207,6 +3207,7 @@ StringRef FunctionType::getNameForCallConv(CallingConv CC) {
   case CC_AArch64VectorCall: return "aarch64_vector_pcs";
   case CC_IntelOclBicc: return "intel_ocl_bicc";
   case CC_FloorFunction: return "floor_function";
+  case CC_FloorIOFunction: return "floor_io_function";
   case CC_FloorKernel: return "floor_kernel";
   case CC_FloorVertex: return "floor_vertex";
   case CC_FloorFragment: return "floor_fragment";
@@ -3659,6 +3660,7 @@ bool AttributedType::isCallingConv() const {
   case attr::GraphicsTaskShader:
   case attr::GraphicsMeshShader:
   case attr::ComputeKernel:
+  case attr::FloorIOFunction:
     return true;
   }
   llvm_unreachable("invalid attr kind");

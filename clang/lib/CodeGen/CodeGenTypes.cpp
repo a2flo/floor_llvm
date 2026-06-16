@@ -1216,33 +1216,69 @@ llvm::Type *CodeGenTypes::ConvertArrayType(const Type* Ty) {
   return ::ConvertArrayType<false>(Ty, *this, Context);
 }
 
+const CodeGenTypes::flattened_entry_t* CodeGenTypes::find_flattened_entry(const RecordDecl* decl,
+																		  const llvm::Type* type,
+																		  const bool is_arg_buffer) const {
+	if (!type) {
+		return nullptr;
+	}
+	
+	const auto is_unnamed = (!isa<llvm::StructType>(type) ? false : !cast<llvm::StructType>(type)->hasName());
+	
+	const auto flat_rec_iter = flattened_records.find(decl);
+	if (flat_rec_iter == flattened_records.end()) {
+		return nullptr;
+	}
+	const auto& flat_rec = flat_rec_iter->second;
+	
+	// check direct match
+	if (is_arg_buffer) {
+		// can never be unnamed
+		if (!is_unnamed && flat_rec.arg_buffer.type == type) {
+			return &flat_rec.arg_buffer;
+		}
+	} else if (is_unnamed && flat_rec.unnamed.type == type) {
+		return &flat_rec.unnamed;
+	} else if (!is_unnamed && flat_rec.named.type == type) {
+		return &flat_rec.named;
+	}
+	
+	// check aliases
+	for (const auto& alias_decl : flat_rec.aliases) {
+		if (auto entry = find_flattened_entry(alias_decl, type, is_arg_buffer); entry) {
+			return entry;
+		}
+	}
+	
+	// check children (recursively)
+	for (const auto& child_decl : flat_rec.children) {
+		if (auto child_entry = find_flattened_entry(child_decl, type, is_arg_buffer); child_entry) {
+			return child_entry;
+		}
+	}
+	
+	return nullptr;
+}
 
 /// getCGRecordLayout - Return record layout info for the given record decl.
 const CGRecordLayout &
-CodeGenTypes::getCGRecordLayout(const RecordDecl *RD, llvm::Type* struct_type) {
-  // check if there is a flattened layout for this llvm struct type,
+CodeGenTypes::getCGRecordLayout(const RecordDecl *RD, llvm::Type* struct_type, const bool is_arg_buffer) {
+  // check if there is a flattened layout for this llvm (struct) type,
   // return it if so, otherwise continue as usual
-  if (struct_type != nullptr) {
-    // -> find direct match first
-    const auto flat_iter = FlattenedCGRecordLayouts.find(RD);
-    if (flat_iter != FlattenedCGRecordLayouts.end() &&
-        flat_iter->second.first == struct_type &&
-        flat_iter->second.second) {
-      return *flat_iter->second.second;
-    }
-
-    // -> try to find an allowed alias (when RD is a base)
-    const auto alias_decl_iter = FlattenedCGRecordLayoutBaseAliases.find(RD);
-    if (alias_decl_iter != FlattenedCGRecordLayoutBaseAliases.end()) {
-      const auto alias_iter = alias_decl_iter->second.find(struct_type);
-      if (alias_iter != alias_decl_iter->second.end() &&
-          alias_iter->second) {
-        return *alias_iter->second;
-      }
+  if (struct_type) {
+    if (const auto flat_entry = find_flattened_entry(RD, struct_type, is_arg_buffer); flat_entry) {
+      assert(flat_entry->record_layout);
+      return *flat_entry->record_layout;
     }
 
 #ifndef NDEBUG
-    assert(should_have_flattened_layout.count(struct_type) == 0);
+    if (auto st_type = dyn_cast_or_null<llvm::StructType>(struct_type); st_type && st_type->hasName()) {
+      if (is_arg_buffer) {
+        assert(should_have_flattened_layout_arg_buf.count(st_type) == 0);
+      } else {
+        assert(should_have_flattened_layout.count(st_type) == 0);
+      }
+    }
 #endif
   }
 
@@ -1262,31 +1298,56 @@ CodeGenTypes::getCGRecordLayout(const RecordDecl *RD, llvm::Type* struct_type) {
   return *I->second;
 }
 
-llvm::Type* CodeGenTypes::getAnyFlattenedType(const CXXRecordDecl* D, const bool prefer_arg_buffer_type) const {
-  if (!prefer_arg_buffer_type) {
-    if (auto RT = getFlattenedRecordType(D); RT) {
-      return RT;
-    } else if (auto ABT = getFlattenedFloorArgBufferType(D); ABT) {
-      return ABT;
-    }
-  } else {
-    if (auto ABT = getFlattenedFloorArgBufferType(D); ABT) {
-      return ABT;
-    } else if (auto RT = getFlattenedRecordType(D); RT) {
-      return RT;
-    }
-  }
-  return nullptr;
+bool CodeGenTypes::is_flattened_struct_type(const RecordDecl* decl, const llvm::Type* Ty, const bool is_arg_buffer) const {
+	const auto entry = find_flattened_entry(decl, Ty, is_arg_buffer);
+#ifndef NDEBUG
+	if (!entry) {
+		if (auto st_type = dyn_cast_or_null<llvm::StructType>(Ty); st_type && st_type->hasName()) {
+			if (is_arg_buffer) {
+				assert(should_have_flattened_layout_arg_buf.count(st_type) == 0);
+			} else {
+				assert(should_have_flattened_layout.count(st_type) == 0);
+			}
+		}
+	}
+#endif
+	return (entry != nullptr);
 }
 
-llvm::Type* CodeGenTypes::getFlattenedRecordType(const CXXRecordDecl* D) const {
-  const auto iter = FlattenedRecords.find_as(D);
-  return (iter != FlattenedRecords.end() ? iter->second : nullptr);
+llvm::Type* CodeGenTypes::getAnyFlattenedType(const CXXRecordDecl* D, const bool prefer_arg_buffer_type) const {
+	const auto flat_rec_iter = flattened_records.find(D);
+	if (flat_rec_iter == flattened_records.end()) {
+		return nullptr;
+	}
+	const auto& flat_rec = flat_rec_iter->second;
+	
+	if (prefer_arg_buffer_type) {
+		if (flat_rec.arg_buffer.type) {
+			return flat_rec.arg_buffer.type;
+		}
+		return flat_rec.named.type;
+	} else {
+		if (flat_rec.named.type) {
+			return flat_rec.named.type;
+		}
+		return flat_rec.arg_buffer.type;
+	}
+}
+
+llvm::Type* CodeGenTypes::getFlattenedRecordType(const CXXRecordDecl* D, const bool is_unnamed) const {
+	const auto flat_rec_iter = flattened_records.find(D);
+	if (flat_rec_iter == flattened_records.end()) {
+		return nullptr;
+	}
+	return (is_unnamed ? flat_rec_iter->second.unnamed.type : flat_rec_iter->second.named.type);
 }
 
 llvm::Type* CodeGenTypes::getFlattenedFloorArgBufferType(const CXXRecordDecl* D) const {
-  const auto iter = FlattenedFloorArgBufferRecords.find_as(D);
-  return (iter != FlattenedFloorArgBufferRecords.end() ? iter->second : nullptr);
+	const auto flat_rec_iter = flattened_records.find(D);
+	if (flat_rec_iter == flattened_records.end()) {
+		return nullptr;
+	}
+	return flat_rec_iter->second.arg_buffer.type;
 }
 
 bool CodeGenTypes::isPointerZeroInitializable(QualType T) {

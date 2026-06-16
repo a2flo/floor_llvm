@@ -5341,6 +5341,7 @@ CCAssignFn *AArch64TargetLowering::CCAssignFnForCall(CallingConv::ID CC,
   case CallingConv::SwiftTail:
   case CallingConv::Tail:
   case CallingConv::FLOOR_FUNC:
+  case CallingConv::FLOOR_IO_FUNC:
   case CallingConv::FLOOR_KERNEL:
   case CallingConv::FLOOR_VERTEX:
   case CallingConv::FLOOR_FRAGMENT:

@@ -1837,7 +1837,6 @@ bool CompilerInvocation::ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args,
   Opts.EmitOpenCLArgMetadata = (Args.hasArg(OPT_cl_kernel_arg_info) ||
                                 Args.hasArg(OPT_emit_spirv) ||
                                 Args.hasArg(OPT_emit_spirv_container));
-  Opts.MetalIntelWorkarounds = Args.hasArg(OPT_metal_intel_workarounds);
   Opts.MetalSoftPrintf = Args.hasArg(OPT_metal_soft_printf);
   Opts.MetalRestrictedVectorization = Args.hasArg(OPT_metal_restrictive_vectorization);
   Opts.SPIRIntelWorkarounds = Args.hasArg(OPT_cl_spir_intel_workarounds);

@@ -1420,6 +1420,7 @@ static unsigned getDwarfCC(CallingConv CC) {
   case CC_IntelOclBicc:
     return llvm::dwarf::DW_CC_LLVM_IntelOclBicc;
   case CC_FloorFunction:
+  case CC_FloorIOFunction:
     return llvm::dwarf::DW_CC_LLVM_SpirFunction;
   case CC_FloorKernel:
   case CC_FloorVertex:

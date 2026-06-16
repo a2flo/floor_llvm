@@ -282,6 +282,7 @@ namespace clang {
     CC_AAPCS_VFP,   // __attribute__((pcs("aapcs-vfp")))
     CC_IntelOclBicc, // __attribute__((intel_ocl_bicc))
     CC_FloorFunction, // default for OpenCL/SPIR, Metal/AIR, CUDA and Vulkan/SPIR-V functions (non entry points)
+    CC_FloorIOFunction, // __attribute__((floor_io_function)), used for Metal/Vulkan floor graphics I/O functions
     CC_FloorKernel,   // inferred for OpenCL/SPIR, Metal/AIR, CUDA and Vulkan/SPIR-V kernels
     CC_FloorVertex,   // inferred for Metal/AIR and Vulkan/SPIR-V vertex shaders
     CC_FloorFragment, // inferred for Metal/AIR and Vulkan/SPIR-V fragment shaders
@@ -309,6 +310,14 @@ namespace clang {
     }
     return false;
   }
+  //! returns true if the specified "CC" calling convention is a floor graphics I/O CC
+  static inline bool isFloorIO(CallingConv CC) {
+    return (CC == CC_FloorIOFunction);
+  }
+  //! returns true if the specified "CC" calling convention is a device entry point or floor graphics I/O CC
+  static inline bool isFloorEntryPointOrIO(CallingConv CC) {
+    return isFloorEntryPoint(CC) || isFloorIO(CC);
+  }
 
   /// Checks whether the given calling convention supports variadic
   /// calls. Unprototyped calls also use the variadic call rules.
@@ -321,6 +330,7 @@ namespace clang {
     case CC_X86Pascal:
     case CC_X86VectorCall:
     case CC_FloorFunction:
+    case CC_FloorIOFunction:
     case CC_FloorKernel:
     case CC_FloorVertex:
     case CC_FloorFragment:

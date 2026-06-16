@@ -474,7 +474,6 @@ void initializeAddressSpaceFixPass(PassRegistry&);
 void initializeEverythingInlinerPass(PassRegistry&);
 void initializeCUDAImagePass(PassRegistry&);
 void initializeCUDAFinalPass(PassRegistry&);
-void initializeMetalFirstPass(PassRegistry&);
 void initializeMetalFinalPass(PassRegistry&);
 void initializeMetalFinalModuleCleanupPass(PassRegistry&);
 void initializeMetalMemopLoweringPass(PassRegistry&);

@@ -227,7 +227,6 @@ PassManagerBuilder::PassManagerBuilder() {
     EnableAddressSpaceFix = false;
     EnableCUDAPasses = false;
     EnableMetalPasses = false;
-    EnableMetalIntelWorkarounds = false;
     EnableSPIRPasses = false;
     EnableSPIRIntelWorkarounds = false;
     EnableVerifySPIR = false;
@@ -729,13 +728,6 @@ void PassManagerBuilder::populateModulePassManager(
     //MPM.add(createBarrierNoopPass());
   }
 
-  // run "first" passes that should run before all else
-  // if(EnableCUDAPasses) --none
-  if(EnableMetalPasses) {
-    MPM.add(createMetalFirstPass(EnableMetalIntelWorkarounds));
-  }
-  // if(EnableSPIRPasses) --none
-
   // run this before any other major optimizations (it will be helpful to them)
   MPM.add(createPropagateRangeInfoPass());
 
@@ -1171,7 +1163,7 @@ void PassManagerBuilder::populateModulePassManager(
     // remaining final passes
     MPM.add(createPointerBCFixupPass());
     MPM.add(createFMACombinerPass());
-    MPM.add(createMetalFinalPass(EnableMetalIntelWorkarounds));
+    MPM.add(createMetalFinalPass());
     MPM.add(createPropagateCoherencyPass());
     MPM.add(createMetalFinalModuleCleanupPass());
   }

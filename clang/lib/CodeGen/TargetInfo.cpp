@@ -10566,11 +10566,11 @@ ABIArgInfo AIRABIInfo::classifyArgumentType(QualType Ty, unsigned int CC) const 
     return getNaturalAlignIndirect(Ty);
 
   // all shader inputs must either be scalar or vector types, or arrays thereof
-  // -> expand all aggregates
+  // -> expand all aggregates (entry points) or pass directly with later coercion (I/O)
   if (CodeGenFunction::hasAggregateEvaluationKind(Ty) &&
       Ty->isStructureOrClassType() &&
-	  llvm::CallingConv::isFloorEntryPoint(CC)) {
-    return ABIArgInfo::getExpand();
+      llvm::CallingConv::isFloorEntryPointOrIO(CC)) {
+    return (llvm::CallingConv::isFloorEntryPoint(CC) ? ABIArgInfo::getExpand() : ABIArgInfo::getDirect());
   }
 
   if (isAggregateTypeForABI(Ty)) {
@@ -10660,7 +10660,7 @@ ABIArgInfo VulkanABIInfo::classifyArgumentType(QualType Ty, unsigned int CC,
     if (llvm::CallingConv::isFloorEntryPoint(CC)) {
       // for entry points: use expand with argument buffer specific handling
       return ABIArgInfo::getExpandFloorArgBuffer();
-    } else if (CC == llvm::CallingConv::FLOOR_FUNC &&
+    } else if ((CC == llvm::CallingConv::FLOOR_FUNC || llvm::CallingConv::isFloorIO(CC)) &&
                (Ty->isPointerType() || Ty->isReferenceType())) {
       // for functions: use direct with argument buffer specific handling
       return ABIArgInfo::getDirectFloorArgBuffer();
@@ -10672,11 +10672,11 @@ ABIArgInfo VulkanABIInfo::classifyArgumentType(QualType Ty, unsigned int CC,
     return getNaturalAlignIndirect(Ty);
 
   // all shader inputs must either be scalar or vector types, or arrays thereof
-  // -> expand all aggregates
+  // -> expand all aggregates (entry points) or pass directly with later coercion (I/O)
   if (CodeGenFunction::hasAggregateEvaluationKind(Ty) &&
       Ty->isStructureOrClassType() &&
-      llvm::CallingConv::isFloorEntryPoint(CC)) {
-    return ABIArgInfo::getExpand();
+      llvm::CallingConv::isFloorEntryPointOrIO(CC)) {
+    return (llvm::CallingConv::isFloorEntryPoint(CC) ? ABIArgInfo::getExpand() : ABIArgInfo::getDirect());
   }
 
   if (isAggregateTypeForABI(Ty)) {

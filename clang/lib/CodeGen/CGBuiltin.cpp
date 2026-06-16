@@ -2264,7 +2264,8 @@ static inline RValue emit_mesh_builtin(unsigned BuiltinID, const CallExpr *E,
 	}
 	
 	// we want the object type to be a graphics I/O type for easier handling later on
-	auto io_obj_type = CGT.GraphicsExpandIOType(obj_type, true, false, true);
+	// NOTE: on the libfloor side, the vertex/primitive object is also passed in using a graphics I/O type, so this should match
+	auto io_obj_type = CGT.GraphicsExpandIOType(obj_type, false, false, true);
 	if (!io_obj_type) {
 		return RValue::getIgnored();
 	}

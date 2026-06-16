@@ -63,6 +63,7 @@ unsigned CodeGenTypes::ClangCallConvToLLVMCallConv(CallingConv CC) {
   case CC_X86VectorCall: return llvm::CallingConv::X86_VectorCall;
   case CC_AArch64VectorCall: return llvm::CallingConv::AArch64_VectorCall;
   case CC_FloorFunction: return llvm::CallingConv::FLOOR_FUNC;
+  case CC_FloorIOFunction: return llvm::CallingConv::FLOOR_IO_FUNC;
   case CC_FloorKernel: return llvm::CallingConv::FLOOR_KERNEL;
   case CC_FloorVertex: return llvm::CallingConv::FLOOR_VERTEX;
   case CC_FloorFragment: return llvm::CallingConv::FLOOR_FRAGMENT;
@@ -265,6 +266,9 @@ static CallingConv getCallingConventionForDecl(const ObjCMethodDecl *D,
 
   if (D->hasAttr<ComputeKernelAttr>())
     return CC_FloorKernel;
+
+  if (D->hasAttr<FloorIOFunctionAttr>())
+    return CC_FloorIOFunction;
 
   if (D->hasAttr<PreserveMostAttr>())
     return CC_PreserveMost;
@@ -1021,7 +1025,7 @@ llvm::Type* CodeGenTypes::GraphicsExpandIOType(const QualType& type,
 	// check if we already handled this
 	const auto is_vk_floor_arg_buffer = (is_floor_arg_buffer && getContext().getLangOpts().Vulkan);
 	const auto existing_flattened_type = (!is_vk_floor_arg_buffer ?
-										  getFlattenedRecordType(cxx_rdecl) :
+										  getFlattenedRecordType(cxx_rdecl, create_unnamed) :
 										  getFlattenedFloorArgBufferType(cxx_rdecl));
 	if (existing_flattened_type) {
 		return existing_flattened_type;
@@ -1086,6 +1090,7 @@ llvm::Type* CodeGenTypes::GraphicsExpandIOType(const QualType& type,
 		name += cxx_rdecl->getName().str();
 		ret = llvm::StructType::create(llvm_fields, name);
 	} else {
+		assert(!is_floor_arg_buffer);
 		ret = llvm::StructType::get(getLLVMContext(), llvm_fields);
 	}
 	ret->setGraphicsIOType();
@@ -1136,10 +1141,11 @@ CodeGenTypes::arrangeLLVMFunctionInfo(CanQualType resultType,
   }
 
   // special handling for graphics backends (Metal/Vulkan)
-  // -> if this is a shader or a kernel function and we have an I/O type that is a struct/aggregate,
+  // -> if this is a shader, kernel, or I/O function and we have an I/O type that is a struct/aggregate,
   //    fully expand/flatten all types within (i.e. structs and arrays to scalars, keep existing scalars)
   const auto is_graphics_abi = ((getContext().getLangOpts().Metal || getContext().getLangOpts().Vulkan) &&
                                 isFloorEntryPoint(info.getCC()));
+  const auto is_floor_io_abi = isFloorIO(info.getCC());
 
   // Loop over all of the computed argument and return value info.  If any of
   // them are direct or extend without a specified coerce type, specify the
@@ -1162,21 +1168,28 @@ CodeGenTypes::arrangeLLVMFunctionInfo(CanQualType resultType,
     const auto arg_ext_info = FI->getExtParameterInfo(arg_idx++);
     if (is_graphics_abi && arg_type->isStructureOrClassType() &&
         (arg_ext_info.isFloorStageInput() || I.info.isExpandFloorArgBuffer())) {
-        if (!GraphicsExpandIOType(arg_type, false, I.info.isExpandFloorArgBuffer(), false)) {
-          return *FI;
-        }
-      } else if (is_graphics_abi &&
-                 ((arg_type->isAnyPointerType() || arg_type->isReferenceType()) &&
-                  arg_type->getPointeeType().getAddressSpace() == LangAS::task_payload)) {
-        assert(I.info.canHaveCoerceToType());
-        auto llvm_io_type = GraphicsExpandIOType(arg_type->getPointeeType(), false, false, true);
-        if (!llvm_io_type) {
-          return *FI;
-        }
-        I.info.setCoerceToType(llvm::PointerType::get(llvm_io_type, Context.getTargetAddressSpace(LangAS::task_payload)));
-      } else if (I.info.canHaveCoerceToType() && I.info.getCoerceToType() == nullptr) {
-        I.info.setCoerceToType(ConvertType(I.type));
+      if (!GraphicsExpandIOType(arg_type, false, I.info.isExpandFloorArgBuffer(), false)) {
+        return *FI;
       }
+    } else if (is_floor_io_abi && arg_type->isStructureOrClassType()) {
+      assert(I.info.canHaveCoerceToType());
+      auto llvm_io_type = GraphicsExpandIOType(arg_type, false, false, true);
+      if (!llvm_io_type) {
+        return *FI;
+      }
+      I.info.setCoerceToType(llvm_io_type);
+    } else if (is_graphics_abi &&
+               ((arg_type->isAnyPointerType() || arg_type->isReferenceType()) &&
+                arg_type->getPointeeType().getAddressSpace() == LangAS::task_payload)) {
+      assert(I.info.canHaveCoerceToType());
+      auto llvm_io_type = GraphicsExpandIOType(arg_type->getPointeeType(), false, false, true);
+      if (!llvm_io_type) {
+        return *FI;
+      }
+      I.info.setCoerceToType(llvm::PointerType::get(llvm_io_type, Context.getTargetAddressSpace(LangAS::task_payload)));
+    } else if (I.info.canHaveCoerceToType() && I.info.getCoerceToType() == nullptr) {
+      I.info.setCoerceToType(ConvertType(I.type));
+    }
   }
 
   bool erased = FunctionsBeingProcessed.erase(FI); (void)erased;
@@ -1335,7 +1348,7 @@ getTypeExpansion(QualType Ty, const ASTContext &Context,
   const CXXRecordDecl* cxx_rdecl = (RT != nullptr ? RT->getAsCXXRecordDecl() : nullptr);
   if (cxx_rdecl) {
     // libfloor vector compat expansion (Metal/Vulkan)
-    if (cxx_rdecl->hasAttr<VectorCompatAttr>() && isFloorEntryPoint(CC) &&
+    if (cxx_rdecl->hasAttr<VectorCompatAttr>() && isFloorEntryPointOrIO(CC) &&
         (Context.getLangOpts().Metal || Context.getLangOpts().Vulkan)) {
       const auto vec_type = Context.get_compat_vector_type(cxx_rdecl);
       return std::make_unique<FloorVectorCompatExpansion>(Ty, vec_type);
@@ -1345,7 +1358,7 @@ getTypeExpansion(QualType Ty, const ASTContext &Context,
     // * any aggregate if calling a Metal/Vulkan shader function
     // similar to (non-union) record expansion below, but also stores some additional information
     if ((Ty->isAggregateImageType() ||
-         (isFloorEntryPoint(CC) &&
+         (isFloorEntryPointOrIO(CC) &&
           (Context.getLangOpts().Metal || Context.getLangOpts().Vulkan))) &&
         !cxx_rdecl->isUnion()) {
       SmallVector<const CXXBaseSpecifier *, 1> bases;

@@ -1031,6 +1031,8 @@ CodeGenTypes::ComputeRecordLayout(const RecordDecl *D, llvm::StructType *Ty,
 void CodeGenTypes::create_flattened_cg_layout(const CXXRecordDecl* D, llvm::StructType* Ty,
 											  const std::vector<ASTContext::aggregate_scalar_entry>& fields,
 											  const bool is_floor_arg_buffer) {
+	const auto is_unnamed = !Ty->hasName();
+	
 	bool zero_init = true;
 	for (const auto& field : fields) {
 		// vector types (or replaced vector types) are always zero initializable
@@ -1083,7 +1085,9 @@ void CodeGenTypes::create_flattened_cg_layout(const CXXRecordDecl* D, llvm::Stru
 			continue;
 		}
 		for (const auto& parent : field.parents) {
-			parent_decls.insert(parent);
+			if (parent != D) { // only add actual parents, not D itself
+				parent_decls.insert(parent);
+			}
 		}
 	}
 	
@@ -1094,32 +1098,59 @@ void CodeGenTypes::create_flattened_cg_layout(const CXXRecordDecl* D, llvm::Stru
 		RL->FieldInfo.insert({ field.field_decl, field_idx++ });
 	}
 	
-	// for all parents (including "D"), add a direct entry to the RL + LLVM type
-	for (const auto& parent_decl : parent_decls) {
-		FlattenedCGRecordLayouts.insert({ parent_decl, { Ty, RL } });
+	// retrieve or add an entry for this decl
+	auto flat_rec_iter = flattened_records.find(D);
+	if (flat_rec_iter == flattened_records.end()) {
+		bool did_insert = false;
+		std::tie(flat_rec_iter, did_insert) = flattened_records.insert({ D, flattened_record_t {} });
+		assert(flat_rec_iter != flattened_records.end() && did_insert);
 	}
-	// only add "D" to the direct flattended records
+	
+	// update entry, assert this is only done once
+	auto& flat_rec = flat_rec_iter->second;
 	if (is_floor_arg_buffer) {
-		FlattenedFloorArgBufferRecords.insert({ D, Ty });
+		assert(!flat_rec.arg_buffer.type);
+		flat_rec.arg_buffer = { Ty, RL };
+	} else if (!is_unnamed) {
+		assert(!flat_rec.named.type);
+		flat_rec.named = { Ty, RL };
 	} else {
-		FlattenedRecords.insert({ D, Ty });
+		assert(!flat_rec.unnamed.type);
+		flat_rec.unnamed = { Ty, RL };
+	}
+	
+	// for all parents, add a link to this decl + create initial entries where necessary
+	for (const auto& parent_decl : parent_decls) {
+		auto parent_rec_iter = flattened_records.find(parent_decl);
+		if (parent_rec_iter == flattened_records.end()) {
+			bool did_insert = false;
+			std::tie(parent_rec_iter, did_insert) = flattened_records.insert({ parent_decl, flattened_record_t {} });
+			assert(parent_rec_iter != flattened_records.end() && did_insert);
+		}
+		parent_rec_iter->second.children.insert(D);
+	}
+	
+	// for all bases, add an "allowed" alias for this decl
+	for (const auto& base_alias_decl : base_alias_decls) {
+		assert(flat_rec.aliases.count(base_alias_decl) == 0); // must never form a ring
+		auto base_rec_iter = flattened_records.find(base_alias_decl);
+		if (base_rec_iter == flattened_records.end()) {
+			bool did_insert = false;
+			std::tie(base_rec_iter, did_insert) = flattened_records.insert({ base_alias_decl, flattened_record_t {} });
+			assert(base_rec_iter != flattened_records.end() && did_insert);
+		}
+		base_rec_iter->second.aliases.insert(D);
 	}
 	
 #ifndef NDEBUG
-	should_have_flattened_layout.insert({ Ty });
-#endif
-	
-	// for all bases, add an "allowed" alias for this LLVM type + associate its RL
-	for (const auto& base_alias_decl : base_alias_decls) {
-		auto base_iter = FlattenedCGRecordLayoutBaseAliases.find(base_alias_decl);
-		if (base_iter == FlattenedCGRecordLayoutBaseAliases.end()) {
-			llvm::DenseMap<const llvm::Type*, CGRecordLayout *> new_alias_map;
-			new_alias_map.insert({ Ty, RL });
-			FlattenedCGRecordLayoutBaseAliases.insert({ base_alias_decl, new_alias_map });
-			continue;
+	if (!is_unnamed) {
+		if (is_floor_arg_buffer) {
+			should_have_flattened_layout_arg_buf.insert({ Ty });
+		} else {
+			should_have_flattened_layout.insert({ Ty });
 		}
-		base_iter->second.insert({ Ty, RL });
 	}
+#endif
 }
 
 void CGRecordLayout::print(raw_ostream &OS) const {

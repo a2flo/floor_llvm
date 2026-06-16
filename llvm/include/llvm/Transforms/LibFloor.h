@@ -75,15 +75,9 @@ FunctionPass *createCUDAFinalPass();
 
 //===----------------------------------------------------------------------===//
 //
-// MetalFirst - This pass fixes Metal/AIR issues.
-//
-FunctionPass *createMetalFirstPass(const bool enable_intel_workarounds = false);
-
-//===----------------------------------------------------------------------===//
-//
 // MetalFinal - This pass fixes Metal/AIR issues.
 //
-FunctionPass *createMetalFinalPass(const bool enable_intel_workarounds = false);
+FunctionPass *createMetalFinalPass();
 
 //===----------------------------------------------------------------------===//
 //

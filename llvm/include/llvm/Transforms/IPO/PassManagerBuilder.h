@@ -188,7 +188,6 @@ public:
   bool EnableAddressSpaceFix;
   bool EnableCUDAPasses;
   bool EnableMetalPasses;
-  bool EnableMetalIntelWorkarounds;
   bool EnableSPIRPasses;
   bool EnableSPIRIntelWorkarounds;
   bool EnableVerifySPIR;

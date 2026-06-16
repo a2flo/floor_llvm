@@ -3183,6 +3183,7 @@ StringRef CXXNameMangler::getCallingConvQualifierName(CallingConv CC) {
   case CC_AArch64VectorCall:
   case CC_IntelOclBicc:
   case CC_FloorFunction:
+  case CC_FloorIOFunction:
   case CC_FloorKernel:
   case CC_FloorVertex:
   case CC_FloorFragment:

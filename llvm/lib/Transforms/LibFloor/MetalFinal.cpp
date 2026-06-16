@@ -89,46 +89,6 @@ using namespace llvm;
 #endif
 
 namespace {
-	// MetalFirst
-	struct MetalFirst : public FunctionPass, InstVisitor<MetalFirst> {
-		friend class InstVisitor<MetalFirst>;
-		
-		static char ID; // Pass identification, replacement for typeid
-		const bool enable_intel_workarounds;
-		
-		Module* M { nullptr };
-		LLVMContext* ctx { nullptr };
-		
-		bool was_modified { false };
-		
-		MetalFirst(const bool enable_intel_workarounds_ = false) :
-		FunctionPass(ID),
-		enable_intel_workarounds(enable_intel_workarounds_) {
-			initializeMetalFirstPass(*PassRegistry::getPassRegistry());
-		}
-		
-		bool runOnFunction(Function &F) override {
-			// exit if empty function
-			if(F.empty()) return false;
-			
-			//
-			M = F.getParent();
-			ctx = &M->getContext();
-			
-			// NOTE: for now, this is no longer needed
-			was_modified = false;
-			//visit(F);
-			
-			return was_modified;
-		}
-		
-		// InstVisitor overrides...
-		using InstVisitor<MetalFirst>::visit;
-		void visit(Instruction& /* I */) {
-			//InstVisitor<MetalFirst>::visit(I);
-		}
-	};
-
 	// MetalMemopLowering
 	// NOTE: also see VulkanPreFinal, the main difference here is that Metal/AIR supports LLVM memops, so we can fall back to them if needed
 	struct MetalMemopLowering : public FunctionPass, InstVisitor<MetalMemopLowering> {
@@ -254,7 +214,6 @@ namespace {
 		friend class InstVisitor<MetalFinal>;
 		
 		static char ID; // Pass identification, replacement for typeid
-		const bool enable_intel_workarounds;
 		
 		std::shared_ptr<llvm::IRBuilder<>> builder;
 		
@@ -324,9 +283,7 @@ namespace {
 			Argument* soft_printf { nullptr };
 		} state;
 		
-		MetalFinal(const bool enable_intel_workarounds_ = false) :
-		FunctionPass(ID),
-		enable_intel_workarounds(enable_intel_workarounds_) {
+		MetalFinal() : FunctionPass(ID) {
 			initializeMetalFinalPass(*PassRegistry::getPassRegistry());
 		}
 		
@@ -1365,139 +1322,6 @@ namespace {
 			scalar_or_vector_conversion<Instruction::SIToFP>(I);
 		}
 		
-		void visitAllocaInst(AllocaInst &AI) {
-			if(!enable_intel_workarounds) return;
-			DBG(errs() << "alloca: " << AI << ", " << *AI.getType() << "\n";)
-			
-			BasicAAResult BAR(createLegacyPMBasicAAResult(*this, *func));
-			AAResults AA(createLegacyPMAAResults(*this, *func, BAR));
-			
-			// recursively find all users of this alloca + store all select and phi instructions that select/choose based on the alloca pointer
-			std::vector<Instruction*> users;
-			std::unordered_set<Instruction*> visited;
-			// -> collect users
-			std::function<void(Instruction&)> collect_users_cb = [&collect_users_cb, &AI, &AA, &visited, &users](Instruction& instr) {
-				const auto has_visited = visited.insert(&instr);
-				if (!has_visited.second) {
-					return;
-				}
-				
-				// TODO: ideally, we want to track all GEPs and bitcasts to/of the alloca and only add select/phi instructions that
-				//       either use these or directly use the alloca (and not all pointers) - for now, AA will do
-				if (SelectInst* SI = dyn_cast<SelectInst>(&instr)) {
-					DBG(errs() << ">> select: " << *SI << "\n";)
-					DBG(errs() << "cond: " << *SI->getCondition() << "\n";)
-					DBG(errs() << "ops: " << *SI->getTrueValue() << ", " << *SI->getFalseValue() << "\n";)
-					
-					// skip immediately if not a pointer type
-					if (SI->getTrueValue()->getType()->isPointerTy() /* false val has the same type */) {
-						// check if either true or false alias with our alloca
-						const auto aa_res_true = AA.alias(SI->getTrueValue(), &AI);
-						const auto aa_res_false = AA.alias(SI->getFalseValue(), &AI);
-						DBG(errs() << "aa: " << aa_res_true << ", " << aa_res_false << "\n";)
-						if (aa_res_true != AliasResult::NoAlias ||
-							aa_res_false != AliasResult::NoAlias) {
-							// if so, add this select
-							users.push_back(SI);
-						}
-					}
-				} else if (PHINode* PHI = dyn_cast<PHINode>(&instr)) {
-					DBG(errs() << ">> phi: " << *PHI << "\n";)
-					DBG(errs() << "type: " << *PHI->getType() << "\n";)
-					
-					// skip immediately if not a pointer type
-					if (PHI->getType()->isPointerTy()) {
-						// check if it aliases with our alloca
-						const auto aa_res = AA.alias(PHI, &AI);
-						DBG(errs() << "aa: " << aa_res << "\n";)
-						if (aa_res != AliasResult::NoAlias) {
-							// if so, add this phi node
-							users.push_back(PHI);
-						}
-					}
-				}
-				
-				libfloor_utils::for_all_instruction_users(instr, collect_users_cb);
-			};
-			libfloor_utils::for_all_instruction_users(AI, collect_users_cb);
-			
-			DBG({
-				errs() << "####### users ##\n";
-				for(const auto& user : users) {
-					errs() << "user: " << *user << "\n";
-				}
-				errs() << "\n";
-			})
-			
-			// select replacement strategy:
-			// * create a tmp alloca that will later hold the selected data
-			// * replace the select with two branches (true/false)
-			// * depending on the select condition, branch to either true/false branch
-			// * inside these branches, store the corresponding true/false value into our tmp alloca, then branch back to after the select
-			// * remove the select
-			const auto select_replace = [&](SelectInst* SI) {
-				builder->SetInsertPoint(alloca_insert);
-				auto tmp_alloca = builder->CreateAlloca(AI.getType()->getPointerElementType(), nullptr, "sel_tmp");
-				tmp_alloca->setAlignment(AI.getAlign());
-				
-				// create our branch condition and true/false blocks that will replace the select
-				auto bb_true = BasicBlock::Create(*ctx, "sel.true", func);
-				auto bb_false = BasicBlock::Create(*ctx, "sel.false", func);
-				builder->SetInsertPoint(SI);
-				builder->CreateCondBr(SI->getCondition(), bb_true, bb_false);
-				
-				// split block before the select instruction so that we can branch back to it later
-				auto bb_start = SI->getParent();
-				auto bb_end = SI->getParent()->splitBasicBlock(SI);
-				// remove automatically inserted branch instruction from parent, since we already have a branch instruction
-				bb_start->getTerminator()->eraseFromParent();
-				
-				// create true/false branches that will copy the true/false data to our tmp alloca accordingly
-				// -> true branch
-				builder->SetInsertPoint(bb_true);
-				builder->CreateStore(builder->CreateLoad(SI->getTrueValue()->getType()->getPointerElementType(), SI->getTrueValue()), tmp_alloca);
-				builder->CreateBr(bb_end);
-				
-				// -> false branch
-				builder->SetInsertPoint(bb_false);
-				builder->CreateStore(builder->CreateLoad(SI->getFalseValue()->getType()->getPointerElementType(), SI->getFalseValue()), tmp_alloca);
-				builder->CreateBr(bb_end);
-				
-				// cleanup, replace select instruction with our new alloca
-				SI->replaceAllUsesWith(tmp_alloca);
-				SI->eraseFromParent();
-			};
-			
-			// phi replacement strategy:
-			// * create a tmp alloca (pointer), this will be used to store all phi pointers
-			// * iterate over all incoming values/pointers, then create a store of their pointer to the tmp pointer in their originating block
-			// * create a load from the tmp alloca and replace all uses of the phi node with it
-			// NOTE: loads and stores are volatile, so that no optimization can do any re-phi-ification(tm) later on
-			const auto phi_replace = [&](PHINode* PHI) {
-				auto phi_tmp_alloca = new AllocaInst(PHI->getType(), 0, nullptr, PHI->getName() + ".tmp", alloca_insert);
-				
-				for(uint32_t i = 0; i < PHI->getNumIncomingValues(); ++i) {
-					auto origin = PHI->getIncomingBlock(i);
-					new StoreInst(PHI->getIncomingValue(i), phi_tmp_alloca, true, origin->getTerminator());
-				}
-				
-				auto load_repl = new LoadInst(PHI->getType(), phi_tmp_alloca, PHI->getName() + ".repl", true,
-											  PHI->getParent()->getFirstNonPHI());
-				PHI->replaceAllUsesWith(load_repl);
-				PHI->eraseFromParent();
-			};
-			
-			for(const auto& user : users) {
-				if(SelectInst* SI = dyn_cast<SelectInst>(user)) {
-					select_replace(SI);
-				}
-				else if(PHINode* PHI = dyn_cast<PHINode>(user)) {
-					phi_replace(PHI);
-				}
-			}
-			was_modified |= !users.empty();
-		}
-		
 	};
 	
 	// MetalFinalModuleCleanup:
@@ -1648,13 +1472,6 @@ namespace {
 	
 }
 
-char MetalFirst::ID = 0;
-FunctionPass *llvm::createMetalFirstPass(const bool enable_intel_workarounds) {
-	return new MetalFirst(enable_intel_workarounds);
-}
-INITIALIZE_PASS_BEGIN(MetalFirst, "MetalFirst", "MetalFirst Pass", false, false)
-INITIALIZE_PASS_END(MetalFirst, "MetalFirst", "MetalFirst Pass", false, false)
-
 char MetalMemopLowering::ID = 0;
 FunctionPass *llvm::createMetalMemopLoweringPass() {
 	return new MetalMemopLowering();
@@ -1669,8 +1486,8 @@ INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_END(MetalMemopLowering, "MetalMemopLowering", "MetalMemopLowering Pass", false, false)
 
 char MetalFinal::ID = 0;
-FunctionPass *llvm::createMetalFinalPass(const bool enable_intel_workarounds) {
-	return new MetalFinal(enable_intel_workarounds);
+FunctionPass *llvm::createMetalFinalPass() {
+	return new MetalFinal();
 }
 INITIALIZE_PASS_BEGIN(MetalFinal, "MetalFinal", "MetalFinal Pass", false, false)
 INITIALIZE_PASS_END(MetalFinal, "MetalFinal", "MetalFinal Pass", false, false)

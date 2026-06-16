@@ -1798,6 +1798,7 @@ void LLParser::parseOptionalDLLStorageClass(unsigned &Res) {
 ///   ::= 'ptx_kernel'
 ///   ::= 'ptx_device'
 ///   ::= 'floor_func'
+///   ::= 'floor_io_func'
 ///   ::= 'floor_kernel'
 ///   ::= 'floor_vertex'
 ///   ::= 'floor_fragment'
@@ -1861,6 +1862,7 @@ bool LLParser::parseOptionalCallingConv(unsigned &CC) {
   case lltok::kw_floor_task:     CC = CallingConv::FLOOR_TASK; break;
   case lltok::kw_floor_mesh:     CC = CallingConv::FLOOR_MESH; break;
   case lltok::kw_floor_func:     CC = CallingConv::FLOOR_FUNC; break;
+  case lltok::kw_floor_io_func:  CC = CallingConv::FLOOR_IO_FUNC; break;
   case lltok::kw_intel_ocl_bicc: CC = CallingConv::Intel_OCL_BI; break;
   case lltok::kw_x86_64_sysvcc:  CC = CallingConv::X86_64_SysV; break;
   case lltok::kw_win64cc:        CC = CallingConv::Win64; break;

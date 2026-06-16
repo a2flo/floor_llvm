@@ -134,7 +134,8 @@ static void diagnoseBadTypeAttribute(Sema &S, const ParsedAttr &attr,
   case ParsedAttr::AT_GraphicsTessellationControlShader:                       \
   case ParsedAttr::AT_GraphicsTessellationEvaluationShader:                    \
   case ParsedAttr::AT_GraphicsTaskShader:                                      \
-  case ParsedAttr::AT_GraphicsMeshShader
+  case ParsedAttr::AT_GraphicsMeshShader:                                      \
+  case ParsedAttr::AT_FloorIOFunction
 
 // Function type attributes.
 #define FUNCTION_TYPE_ATTRS_CASELIST                                           \
@@ -3995,6 +3996,9 @@ static CallingConv getCCForDeclaratorChunk(
       } else if (AL.getKind() == ParsedAttr::AT_GraphicsMeshShader) {
         CC = CC_FloorMesh;
         break;
+      } else if (AL.getKind() == ParsedAttr::AT_FloorIOFunction) {
+        CC = CC_FloorIOFunction;
+        break;
       }
     }
   } else if (S.getLangOpts().CUDA) {
@@ -7547,6 +7551,8 @@ static Attr *getCCTypeAttr(ASTContext &Ctx, ParsedAttr &Attr) {
     return createSimpleAttr<GraphicsMeshShaderAttr>(Ctx, Attr);
   case ParsedAttr::AT_ComputeKernel:
     return createSimpleAttr<ComputeKernelAttr>(Ctx, Attr);
+  case ParsedAttr::AT_FloorIOFunction:
+    return createSimpleAttr<FloorIOFunctionAttr>(Ctx, Attr);
   }
   llvm_unreachable("unexpected attribute kind!");
 }

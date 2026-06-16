@@ -4341,8 +4341,8 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
   Address Addr = base.getAddress(*this);
   llvm::Type* elem_type = Addr.getType()->getPointerElementType();
   const RecordDecl *rec = field->getParent();
-  const CGRecordLayout &RL = CGM.getTypes().getCGRecordLayout(rec, elem_type);
-  const auto is_flattened_struct = CGM.getTypes().is_flattened_struct_type(rec, elem_type);
+  const auto is_flattened_struct = CGM.getTypes().is_flattened_struct_type(rec, elem_type, is_floor_arg_buffer);
+  const CGRecordLayout &RL = CGM.getTypes().getCGRecordLayout(rec, elem_type, is_floor_arg_buffer);
 
   if (field->isBitField()) {
     const CGBitFieldInfo &Info = RL.getBitFieldInfo(field);
@@ -4491,10 +4491,10 @@ LValue CodeGenFunction::EmitLValueForField(LValue base,
   // type.
   // NOTE: for libfloor graphics types: we need to a) take care of special Vulkan argument buffer handling,
   //       and b) take *very* special care of graphics I/O type conversions -> we only want to enable this
-  //       when we know that the contained type is an I/O type (struct.floor.io.*),
+  //       when we know that the contained type is an I/O type (struct.floor.io.*) or we're in a flattened struct,
   //       otherwise normal conversion has to be used instead
   const auto is_vk_arg_buffer = (is_floor_arg_buffer && getLangOpts().Vulkan);
-  const auto contains_io_type = Addr.getType()->getPointerElementType()->containsGraphicsIOType();
+  const auto contains_io_type = Addr.getType()->getPointerElementType()->containsGraphicsIOType() || is_flattened_struct;
   const type_conversion_opts_t conv_opts {
     .io_type_conversion = contains_io_type,
     .convert_array_image_or_buffer_type = false,

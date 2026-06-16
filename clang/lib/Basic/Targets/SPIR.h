@@ -207,6 +207,7 @@ public:
   CallingConvCheckResult checkCallingConvention(CallingConv CC) const override {
     if (!is_pure_spir) return CCCR_OK;
     if (CC == CC_FloorFunction ||
+        CC == CC_FloorIOFunction ||
         CC == CC_FloorVertex ||
         CC == CC_FloorFragment ||
         CC == CC_FloorKernel ||
@@ -392,6 +393,7 @@ public:
 
   CallingConvCheckResult checkCallingConvention(CallingConv CC) const override {
     if (CC == CC_FloorFunction ||
+        CC == CC_FloorIOFunction ||
         CC == CC_FloorVertex ||
         CC == CC_FloorFragment ||
         CC == CC_FloorKernel ||
