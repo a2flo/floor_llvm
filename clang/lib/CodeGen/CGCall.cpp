@@ -483,7 +483,7 @@ uint32_t CodeGenTypes::getMetalVulkanImplicitArgCount(const FunctionDecl* FD) co
     } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
       return 4 + printf_arg;
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
-      return 1 + printf_arg + (CodeGenOpts.GraphicsPrimitiveID ? 1 : 0) + (CodeGenOpts.GraphicsBarycentricCoord ? 1 : 0);
+      return 2 + printf_arg + (CodeGenOpts.GraphicsPrimitiveID ? 1 : 0) + (CodeGenOpts.GraphicsBarycentricCoord ? 1 : 0);
     } else if (FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
       return 4 + printf_arg;
     } else if (FD->hasAttr<GraphicsTaskShaderAttr>() || FD->hasAttr<GraphicsMeshShaderAttr>()) {
@@ -496,7 +496,7 @@ uint32_t CodeGenTypes::getMetalVulkanImplicitArgCount(const FunctionDecl* FD) co
     } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
       return 5 + printf_arg;
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
-      return 3 + printf_arg + (CodeGenOpts.GraphicsPrimitiveID ? 1 : 0) + (CodeGenOpts.GraphicsBarycentricCoord ? 1 : 0);
+      return 4 + printf_arg + (CodeGenOpts.GraphicsPrimitiveID ? 1 : 0) + (CodeGenOpts.GraphicsBarycentricCoord ? 1 : 0);
     } else if (FD->hasAttr<GraphicsTessellationControlShaderAttr>()) {
       return 0 + printf_arg;
     } else if (FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
@@ -602,9 +602,9 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
         add_arg(float3_type, "__metal__barycentric_coord__");
       }
 
-      // fixed: only point coord for now:
       auto float2_type = Ctx.getExtVectorType(Ctx.FloatTy, 2);
       add_arg(float2_type, "__metal__point_coord__");
+      add_arg(Ctx.BoolTy, "__metal__front_facing__");
     } else if (FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
       // patch id, instance id and position-in-patch:
       add_arg(Ctx.IntTy, "__metal__patch_id__");
@@ -654,18 +654,13 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
         add_arg(float3_ptr_type, "vulkan.barycentric_coord");
       }
 
-      // fixed: only point + frag coord + view index for now:
       auto float2_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.getExtVectorType(Ctx.FloatTy, 2), LangAS::vulkan_input));
       add_arg(float2_ptr_type, "vulkan.point_coord");
       auto float4_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.getExtVectorType(Ctx.FloatTy, 4), LangAS::vulkan_input));
       add_arg(float4_ptr_type, "vulkan.frag_coord");
       add_arg(int_ptr_type, "vulkan.view_index");
-    } else if (FD->hasAttr<GraphicsTessellationControlShaderAttr>()) {
-      // TODO: !
-    } else if (FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
-      // TODO: !
-      //auto float3_type = Ctx.getExtVectorType(Ctx.FloatTy, 3);
-      //add_arg(float3_type, "vulkan.position_in_patch");
+      auto bool_ptr_type = Ctx.getPointerType(Context.getAddrSpaceQualType(Ctx.BoolTy, LangAS::vulkan_input));
+      add_arg(bool_ptr_type, "vulkan.front_facing");
     }
   }
 
@@ -1187,6 +1182,13 @@ CodeGenTypes::arrangeLLVMFunctionInfo(CanQualType resultType,
         return *FI;
       }
       I.info.setCoerceToType(llvm::PointerType::get(llvm_io_type, Context.getTargetAddressSpace(LangAS::task_payload)));
+    } else if (is_graphics_abi && arg_type->isAnyPointerType() &&
+               arg_type->getPointeeType().getAddressSpace() == LangAS::vulkan_input &&
+               arg_type->getPointeeType()->isBooleanType()) {
+      // NOTE: we generally don't allow bool*/i1* pointers, but for certain builtin inputs we need this
+      assert(I.info.canHaveCoerceToType());
+      I.info.setCoerceToType(llvm::PointerType::get(llvm::IntegerType::get(getLLVMContext(), 1),
+                                                    getContext().getTargetAddressSpace(LangAS::vulkan_input)));
     } else if (I.info.canHaveCoerceToType() && I.info.getCoerceToType() == nullptr) {
       I.info.setCoerceToType(ConvertType(I.type));
     }
@@ -5927,6 +5929,23 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
   if (llvm::Function *OrigFn = simplifyVariadicCallee(IRFuncTy, CalleePtr)) {
     CalleePtr = OrigFn;
     IRFuncTy = OrigFn->getFunctionType();
+  }
+
+  // in backends using graphics I/O types, we may need to bitcast arguments to their non-I/O variant
+  if (getContext().getLangOpts().Metal || getContext().getLangOpts().Vulkan) {
+    for (uint32_t arg_idx = 0, arg_count = IRCallArgs.size(); arg_idx < arg_count; ++arg_idx) {
+      const auto func_arg_type = IRFuncTy->getParamType(arg_idx);
+      auto arg_type = IRCallArgs[arg_idx]->getType();
+      if (arg_type != func_arg_type && arg_type->isPointerTy() &&
+          arg_type->getPointerElementType()->isStructTy() &&
+          cast<llvm::StructType>(arg_type->getPointerElementType())->isGraphicsIOType()) {
+        // NOTE: ideally, we would check if the struct type is compatible, but there is no trivial way of doing that,
+        //       and we can't store/associate an equivalent non-I/O struct type either for all I/O types,
+        //       because type translation may simply use a different struct type altogether
+        assert(func_arg_type->isPointerTy() && func_arg_type->getPointerElementType()->isStructTy());
+        IRCallArgs[arg_idx] = Builder.CreateBitCast(IRCallArgs[arg_idx], func_arg_type);
+      }
+    }
   }
 
   // 3. Perform the actual call.

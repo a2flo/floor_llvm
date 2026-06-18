@@ -741,6 +741,11 @@ static inline node_id_t create_point_coord(const llvm::MDNode& md_node, reflecti
 	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
 }
 
+static inline node_id_t create_front_facing(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_front_facing_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
 static inline node_id_t create_position(const llvm::MDNode& md_node, reflection_state_t& state) {
 	auto [node, node_id] = state.create_node<node_position_arg_t>();
 	if (!md_node_iterate(md_node, [&node, &md_node](llvm::StringRef type_str, llvm::MDNode::op_iterator& iter) {
@@ -1120,6 +1125,7 @@ static inline node_id_t create_node(const llvm::MDNode& md_node, const std::stri
 		{ "air.buffer", &create_buffer },
 		{ "air.patch_control_point_input", &create_control_point_input },
 		{ "air.fragment_input", &create_fragment_input },
+		{ "air.front_facing", &create_front_facing },
 		{ "air.indirect_buffer", &create_indirect_buffer },
 		{ "air.indirect_constant", &create_indirect_constant },
 		{ "air.instance_id", &create_instance_id },

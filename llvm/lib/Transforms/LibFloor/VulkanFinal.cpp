@@ -157,6 +157,7 @@ namespace {
 			
 			// added fragment function args
 			Argument* point_coord { nullptr };
+			Argument* front_facing { nullptr };
 			Argument* frag_coord { nullptr };
 			Argument* primitive_id { nullptr };
 			Argument* barycentric_coord { nullptr };
@@ -237,11 +238,12 @@ namespace {
 		};
 		
 		enum VULKAN_FRAGMENT_ARG_REV_IDX : int32_t {
-			VULKAN_POINT_COORD = -3,
-			VULKAN_FRAG_COORD = -2,
-			VULKAN_FRAGMENT_VIEW_INDEX = -1,
+			VULKAN_POINT_COORD = -4,
+			VULKAN_FRAG_COORD = -3,
+			VULKAN_FRAGMENT_VIEW_INDEX = -2,
+			VULKAN_FRONT_FACING = -1,
 			
-			VULKAN_FRAGMENT_ARG_COUNT = 3,
+			VULKAN_FRAGMENT_ARG_COUNT = 4,
 		};
 		
 		// TODO: tessellation arg enums/handling
@@ -379,6 +381,7 @@ namespace {
 					state.point_coord = get_arg_by_idx(VULKAN_POINT_COORD);
 					state.frag_coord = get_arg_by_idx(VULKAN_FRAG_COORD);
 					state.view_index = get_arg_by_idx(VULKAN_FRAGMENT_VIEW_INDEX);
+					state.front_facing = get_arg_by_idx(VULKAN_FRONT_FACING);
 					
 					// NOTE: reverse order!
 					uint32_t opt_arg_counter = 1;
@@ -794,6 +797,12 @@ namespace {
 					return;
 				}
 				I.replaceAllUsesWith(builder->CreateLoad(state.point_coord->getType()->getPointerElementType(), state.point_coord, "point_coord"));
+			} else if (func_name == "floor.builtin.front_facing.bool") {
+				if(state.front_facing == nullptr) {
+					DBG(printf("failed to get front_facing arg, probably not in a fragment function?\n"); fflush(stdout);)
+					return;
+				}
+				I.replaceAllUsesWith(builder->CreateLoad(state.front_facing->getType()->getPointerElementType(), state.front_facing, "front_facing"));
 			} else if (func_name == "floor.builtin.frag_coord.float4") {
 				llvm::errs() << "direct use of frag coord is not allowed: in function" << func->getName() << "\n";
 				return;

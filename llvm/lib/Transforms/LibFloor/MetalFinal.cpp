@@ -272,6 +272,7 @@ namespace {
 			
 			// added fragment function args
 			Argument* point_coord { nullptr };
+			Argument* front_facing { nullptr };
 			Argument* primitive_id { nullptr };
 			Argument* barycentric_coord { nullptr };
 			
@@ -319,9 +320,10 @@ namespace {
 		};
 		
 		enum METAL_FRAGMENT_ARG_REV_IDX : int32_t {
-			METAL_POINT_COORD = -1,
+			METAL_POINT_COORD = -2,
+			METAL_FRONT_FACING = -1,
 			
-			METAL_FRAGMENT_ARG_COUNT = 1,
+			METAL_FRAGMENT_ARG_COUNT = 2,
 		};
 		
 		enum METAL_TESS_EVAL_ARG_REV_IDX : int32_t {
@@ -482,6 +484,7 @@ namespace {
 				const uint32_t opt_arg_count = (has_soft_printf ? 1u : 0u) + opt_builtin_arg_count;
 				if (F.arg_size() >= METAL_FRAGMENT_ARG_COUNT + opt_arg_count) {
 					state.point_coord = get_arg_by_idx(METAL_POINT_COORD);
+					state.front_facing = get_arg_by_idx(METAL_FRONT_FACING);
 					
 					// NOTE: reverse order!
 					uint32_t opt_arg_counter = 1;
@@ -1091,6 +1094,16 @@ namespace {
 				}
 			
 				I.replaceAllUsesWith(state.point_coord);
+				I.eraseFromParent();
+				return;
+			}
+			else if(func_name == "floor.get_front_facing.bool") {
+				if(state.front_facing == nullptr) {
+					DBG(printf("failed to get front_facing arg, probably not in a fragment function?\n"); fflush(stdout);)
+					return;
+				}
+				
+				I.replaceAllUsesWith(state.front_facing);
 				I.eraseFromParent();
 				return;
 			}

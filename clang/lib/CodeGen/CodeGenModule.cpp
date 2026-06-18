@@ -2891,6 +2891,7 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "point_coord"));
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "frag_coord"));
 		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "view_index"));
+		stage_infos.push_back(llvm::MDString::get(VMContext, prefix_builtin + "front_facing"));
 	}
 	
 	// handle return value
@@ -4401,6 +4402,18 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			arg_info.push_back(llvm::MDString::get(VMContext, "float2"));
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
 			arg_info.push_back(llvm::MDString::get(VMContext, "__metal__point_coord__"));
+			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+			++arg_idx; // next llvm arg
+		}
+		
+		{
+			SmallVector<llvm::Metadata*, 6> arg_info;
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.front_facing"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "bool"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "__metal__front_facing__"));
 			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
 			++arg_idx; // next llvm arg
 		}
