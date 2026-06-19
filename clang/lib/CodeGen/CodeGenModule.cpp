@@ -3607,6 +3607,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				}
 				auto field_pointee_type = field_type->getPointeeType();
 				const auto field_cxx_rdecl = field_type->getAsCXXRecordDecl();
+				const auto is_vector_compat = (field_cxx_rdecl && field_cxx_rdecl->hasAttr<VectorCompatAttr>());
 				
 				bool is_inline_struct = false;
 				const auto buffer_idx_offset = buffer_or_tex_idx_child;
@@ -3617,14 +3618,13 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 					!field_type->isAggregateImageType() &&
 					!parent_decl.hasAttr<GraphicsStageInputAttr>() &&
 					field_type->isStructureOrClassType()) {
-					if (const auto inline_struct_rdecl = field_type->getAsCXXRecordDecl();
-						inline_struct_rdecl && !inline_struct_rdecl->hasAttr<VectorCompatAttr>()) {
+					if (field_cxx_rdecl && !is_vector_compat) {
 						is_inline_struct = true;
 						// #-2: inline struct type
 						struct_info.push_back(llvm::MDString::get(VMContext, "air.struct_type_info"));
 						// #-1: metadata of struct type
 						uint32_t struct_arg_idx_child = 0, struct_buf_idx_child = 0;
-						auto struct_type_info = add_struct_type_info(*inline_struct_rdecl, struct_rdecl, is_indirect, indirect_buffer, align_vectors, struct_arg_idx_child, struct_buf_idx_child, nullptr);
+						auto struct_type_info = add_struct_type_info(*field_cxx_rdecl, struct_rdecl, is_indirect, indirect_buffer, align_vectors, struct_arg_idx_child, struct_buf_idx_child, nullptr);
 						assert(!struct_type_info.empty());
 						struct_info.push_back(llvm::MDNode::get(VMContext, struct_type_info));
 						
@@ -3635,10 +3635,19 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 					}
 				}
 				
-				const auto size = (uint32_t)getDataLayout().getTypeStoreSize(llvm_field_type);
-				if (align_vectors && (llvm_field_type->isVectorTy() || (field_cxx_rdecl && field_cxx_rdecl->hasAttr<VectorCompatAttr>())) && (offset % size) != 0u) {
-					assert(size > 0);
-					offset += size - (offset % size);
+				auto size = (uint32_t)getDataLayout().getTypeStoreSize(llvm_field_type);
+				if (align_vectors && (llvm_field_type->isVectorTy() || is_vector_compat)) {
+					const auto vec_type = (is_vector_compat ? getTypes().ConvertTypeForMem(Context.get_compat_vector_type(field_cxx_rdecl)) : llvm_field_type);
+					assert(size > 0 && vec_type && vec_type->isVectorTy());
+					const auto fixed_vec_type = dyn_cast_or_null<llvm::FixedVectorType>(vec_type);
+					assert(fixed_vec_type && fixed_vec_type->getNumElements() >= 1 && fixed_vec_type->getNumElements() <= 4);
+					// vectors with 3 components are padded to 4 components
+					if (fixed_vec_type->getNumElements() == 3) {
+						size += size / 3u;
+					}
+					if ((offset % size) != 0u) {
+						offset += size - (offset % size);
+					}
 				}
 				
 				// #0: offset
@@ -5375,7 +5384,8 @@ void CodeGenFunction::EmitFloorKernelMetadata(const FunctionDecl *FD,
 				};
 				info << arg_info << ",";
 			}
-		} else if (parm->hasAttr<GraphicsStageInputAttr>()) { // stage input
+		} else if (parm->hasAttr<GraphicsStageInputAttr>() &&
+				   (getLangOpts().Metal || getLangOpts().Vulkan)) { // stage input
 			if (!is_vertex && !is_fragment && !is_tess_eval) {
 				// TODO: should check this in sema
 				// TODO: should also make sure that only 1 exists

@@ -4003,7 +4003,10 @@ void X86_64ABIInfo::computeInfo(CGFunctionInfo &FI) const {
   unsigned FreeSSERegs = IsRegCall ? 16 : 8;
   unsigned NeededInt, NeededSSE;
 
-  if (!::classifyReturnType(getCXXABI(), FI, *this)) {
+  if (llvm::CallingConv::isFloorEntryPoint(CallingConv)) {
+    FI.getReturnInfo() = (FI.getReturnType()->getTypePtr()->isVoidType() ?
+                          ABIArgInfo::getIgnore() : ABIArgInfo::getDirect());
+  } else if (!::classifyReturnType(getCXXABI(), FI, *this)) {
     if (IsRegCall && FI.getReturnType()->getTypePtr()->isRecordType() &&
         !FI.getReturnType()->getTypePtr()->isUnionType()) {
       FI.getReturnInfo() =
@@ -5561,9 +5564,12 @@ private:
   bool isIllegalVectorType(QualType Ty) const;
 
   void computeInfo(CGFunctionInfo &FI) const override {
-    if (!::classifyReturnType(getCXXABI(), FI, *this))
-      FI.getReturnInfo() =
-          classifyReturnType(FI.getReturnType(), FI.isVariadic());
+    if (llvm::CallingConv::isFloorEntryPoint(FI.getCallingConvention())) {
+      FI.getReturnInfo() = (FI.getReturnType()->getTypePtr()->isVoidType() ?
+                            ABIArgInfo::getIgnore() : ABIArgInfo::getDirect());
+    } else if (!::classifyReturnType(getCXXABI(), FI, *this)) {
+      FI.getReturnInfo() = classifyReturnType(FI.getReturnType(), FI.isVariadic());
+    }
 
     for (auto &it : FI.arguments())
       it.info = classifyArgumentType(it.type, FI.isVariadic(),

@@ -366,7 +366,15 @@ public:
     case CC_Swift:
     case CC_X86Pascal:
     case CC_IntelOclBicc:
+    case CC_FloorFunction:
+    case CC_FloorIOFunction:
     case CC_FloorKernel:
+    case CC_FloorVertex:
+    case CC_FloorFragment:
+    case CC_FloorTessControl:
+    case CC_FloorTessEval:
+    case CC_FloorTask:
+    case CC_FloorMesh:
       return CCCR_OK;
     case CC_SwiftAsync:
       return CCCR_Error;
@@ -737,7 +745,15 @@ public:
     case CC_PreserveMost:
     case CC_PreserveAll:
     case CC_X86RegCall:
+    case CC_FloorFunction:
+    case CC_FloorIOFunction:
     case CC_FloorKernel:
+    case CC_FloorVertex:
+    case CC_FloorFragment:
+    case CC_FloorTessControl:
+    case CC_FloorTessEval:
+    case CC_FloorTask:
+    case CC_FloorMesh:
       return CCCR_OK;
     default:
       return CCCR_Warning;
@@ -814,7 +830,15 @@ public:
     case CC_Swift:
     case CC_SwiftAsync:
     case CC_X86RegCall:
+    case CC_FloorFunction:
+    case CC_FloorIOFunction:
     case CC_FloorKernel:
+    case CC_FloorVertex:
+    case CC_FloorFragment:
+    case CC_FloorTessControl:
+    case CC_FloorTessEval:
+    case CC_FloorTask:
+    case CC_FloorMesh:
       return CCCR_OK;
     default:
       return CCCR_Warning;

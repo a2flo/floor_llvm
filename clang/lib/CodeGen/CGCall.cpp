@@ -1189,6 +1189,9 @@ CodeGenTypes::arrangeLLVMFunctionInfo(CanQualType resultType,
       assert(I.info.canHaveCoerceToType());
       I.info.setCoerceToType(llvm::PointerType::get(llvm::IntegerType::get(getLLVMContext(), 1),
                                                     getContext().getTargetAddressSpace(LangAS::vulkan_input)));
+    } else if (I.info.canHaveCoerceToType() && getContext().getLangOpts().FloorHostCompute &&
+               isFloorEntryPoint(info.getCC())) {
+      I.info.setCoerceToType(ConvertType(I.type));
     } else if (I.info.canHaveCoerceToType() && I.info.getCoerceToType() == nullptr) {
       I.info.setCoerceToType(ConvertType(I.type));
     }
@@ -5345,19 +5348,23 @@ public:
 
 } // namespace
 
-static llvm::Value* handle_call_arg_buffer_indirection(llvm::Value* V, llvm::Type* param_type, CGBuilderTy& Builder) {
-	auto base_alloca = dyn_cast_or_null<llvm::AllocaInst>(V);
-	if (!base_alloca) {
-		return nullptr;
-	}
-	
-	auto annotation_md = base_alloca->getMetadata(llvm::LLVMContext::MD_annotation);
-	if (!annotation_md || annotation_md->getNumOperands() == 0) {
-		return nullptr;
-	}
-	auto annotation_str = dyn_cast_or_null<llvm::MDString>(annotation_md->getOperand(0));
-	if (!annotation_str || !annotation_str->getString().equals("vulkan_arg_buffer")) {
-		return nullptr;
+static llvm::Value* handle_call_arg_buffer_indirection(CodeGenFunction& CGF, llvm::Value* V, llvm::Type* param_type, CGBuilderTy& Builder) {
+	// value must either be an alloca or a direct arg buffer argument
+	if (auto base_alloca = dyn_cast_or_null<llvm::AllocaInst>(V); base_alloca) {
+		auto annotation_md = base_alloca->getMetadata(llvm::LLVMContext::MD_annotation);
+		if (!annotation_md || annotation_md->getNumOperands() == 0) {
+			return nullptr;
+		}
+		auto annotation_str = dyn_cast_or_null<llvm::MDString>(annotation_md->getOperand(0));
+		if (!annotation_str || !annotation_str->getString().equals("vulkan_arg_buffer")) {
+			return nullptr;
+		}
+	} else {
+		if (!V->getType()->isPointerTy() ||
+			!V->getType()->getPointerElementType()->isFlattenedFloorArgBufferType() ||
+			!CGF.is_floor_indirect_arg_buffer_argument(V)) {
+			return nullptr;
+		}
 	}
 	
 	// annotate bitcast with "vulkan_arg_buffer" for later fix-up
@@ -5699,7 +5706,8 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
             // it's not ideal to emit an address space cast at all,
             // but we have no other option here if src AS is 0
             V = Builder.CreateAddrSpaceCast(V, param_type);
-          } else if (auto arg_buffer_indirection = handle_call_arg_buffer_indirection(V, param_type, Builder); arg_buffer_indirection) {
+          } else if (auto arg_buffer_indirection = handle_call_arg_buffer_indirection(*this, V, param_type, Builder);
+                     arg_buffer_indirection) {
             V = arg_buffer_indirection;
           } else {
             V = Builder.CreateBitCast(V, param_type);
