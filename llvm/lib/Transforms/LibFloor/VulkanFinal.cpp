@@ -1635,8 +1635,9 @@ namespace {
 			if(!is_vertex_func && !is_fragment_func) return;
 			
 			auto ret_val = RI.getReturnValue();
+			if (!ret_val) return;
 			const auto ret_type = ret_val->getType();
-			if(ret_val == nullptr) return;
+			if (!ret_type) return;
 			
 			DebugLoc DL;
 			if(auto ret_instr = dyn_cast<Instruction>(ret_val)) {
