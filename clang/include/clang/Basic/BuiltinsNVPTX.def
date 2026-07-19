@@ -101,7 +101,9 @@
 #pragma push_macro("PTX91")
 #pragma push_macro("PTX92")
 #pragma push_macro("PTX93")
-#define PTX93 "ptx93"
+#pragma push_macro("PTX94")
+#define PTX94 "ptx94"
+#define PTX93 "ptx93|" PTX94
 #define PTX92 "ptx92|" PTX93
 #define PTX91 "ptx91|" PTX92
 #define PTX90 "ptx90|" PTX91
@@ -961,3 +963,4 @@ TARGET_BUILTIN(__nvvm_cp_async_wait_all, "v", "", AND(SM_80,PTX70))
 #pragma pop_macro("PTX91")
 #pragma pop_macro("PTX92")
 #pragma pop_macro("PTX93")
+#pragma pop_macro("PTX94")

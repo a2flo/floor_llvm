@@ -109,7 +109,7 @@ def SM121 : SubtargetFeature<"sm_121", "FullSmVersion", "1210",
                              "Target SM 12.1">;
 def SM121a : SubtargetFeature<"sm_121a", "FullSmVersion", "1211",
                               "Target SM 12.1a">;
-// Rubin?
+// Rubin
 def SM107 : SubtargetFeature<"sm_107", "FullSmVersion", "1070",
                              "Target SM 10.7">;
 def SM107a : SubtargetFeature<"sm_107a", "FullSmVersion", "1071",
@@ -184,6 +184,8 @@ def PTX92 : SubtargetFeature<"ptx92", "PTXVersion", "92",
                              "Use PTX version 9.2">;
 def PTX93 : SubtargetFeature<"ptx93", "PTXVersion", "93",
                              "Use PTX version 9.3">;
+def PTX94 : SubtargetFeature<"ptx94", "PTXVersion", "94",
+                             "Use PTX version 9.4">;
 
 //===----------------------------------------------------------------------===//
 // NVPTX supported processors.
@@ -224,8 +226,8 @@ def : Proc<"sm_101", [SM101, PTX86]>;
 def : Proc<"sm_101a", [SM101a, PTX86]>;
 def : Proc<"sm_103", [SM103, PTX88]>;
 def : Proc<"sm_103a", [SM103a, PTX88]>;
-def : Proc<"sm_107", [SM107, PTX93]>;
-def : Proc<"sm_107a", [SM107a, PTX93]>;
+def : Proc<"sm_107", [SM107, PTX94]>;
+def : Proc<"sm_107a", [SM107a, PTX94]>;
 def : Proc<"sm_110", [SM110, PTX90]>;
 def : Proc<"sm_110a", [SM110a, PTX90]>;
 def : Proc<"sm_120", [SM120, PTX87]>;
