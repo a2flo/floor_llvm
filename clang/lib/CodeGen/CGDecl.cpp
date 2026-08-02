@@ -970,8 +970,14 @@ static void emitStoresForInitAfterBZero(CodeGenModule &CGM,
 /// Decide whether we should use bzero plus some stores to initialize a local
 /// variable instead of using a memcpy from a constant global.  It is beneficial
 /// to use bzero if the global is all zeros, or mostly zeros and large.
-static bool shouldUseBZeroPlusStoresToInitialize(llvm::Constant *Init,
+static bool shouldUseBZeroPlusStoresToInitialize(CodeGenModule &CGM,
+                                                 llvm::Constant *Init,
                                                  uint64_t GlobalSize) {
+  // we never want this for Metal/Vulkan
+  if (CGM.getLangOpts().Metal || CGM.getLangOpts().Vulkan) {
+    return false;
+  }
+
   // If a global is all zeros, always use a bzero.
   if (isa<llvm::ConstantAggregateZero>(Init)) return true;
 
@@ -991,9 +997,15 @@ static bool shouldUseBZeroPlusStoresToInitialize(llvm::Constant *Init,
 /// not user bzero.
 /// FIXME We could be more clever, as we are for bzero above, and generate
 ///       memset followed by stores. It's unclear that's worth the effort.
-static llvm::Value *shouldUseMemSetToInitialize(llvm::Constant *Init,
+static llvm::Value *shouldUseMemSetToInitialize(CodeGenModule &CGM,
+                                                llvm::Constant *Init,
                                                 uint64_t GlobalSize,
                                                 const llvm::DataLayout &DL) {
+  // we never want this for Metal/Vulkan
+  if (CGM.getLangOpts().Metal || CGM.getLangOpts().Vulkan) {
+    return nullptr;
+  }
+
   uint64_t SizeLimit = 32;
   if (GlobalSize <= SizeLimit)
     return nullptr;
@@ -1005,6 +1017,11 @@ static llvm::Value *shouldUseMemSetToInitialize(llvm::Constant *Init,
 /// speed, but plays better with store optimizations.
 static bool shouldSplitConstantStore(CodeGenModule &CGM,
                                      uint64_t GlobalByteSize) {
+  // we always want this for Metal/Vulkan
+  if (CGM.getLangOpts().Metal || CGM.getLangOpts().Vulkan) {
+    return true;
+  }
+
   // Don't break things that occupy more than one cacheline.
   uint64_t ByteSizeLimit = 64;
   if (CGM.getCodeGenOpts().OptimizationLevel == 0)
@@ -1190,7 +1207,7 @@ static void emitStoresForConstant(CodeGenModule &CGM, const VarDecl &D,
 
   // If the initializer is all or mostly the same, codegen with bzero / memset
   // then do a few stores afterward.
-  if (shouldUseBZeroPlusStoresToInitialize(constant, ConstantSize)) {
+  if (shouldUseBZeroPlusStoresToInitialize(CGM, constant, ConstantSize)) {
     auto *I = Builder.CreateMemSet(Loc, llvm::ConstantInt::get(CGM.Int8Ty, 0),
                                    SizeVal, isVolatile);
     if (IsAutoInit)
@@ -1208,7 +1225,7 @@ static void emitStoresForConstant(CodeGenModule &CGM, const VarDecl &D,
 
   // If the initializer is a repeated byte pattern, use memset.
   llvm::Value *Pattern =
-      shouldUseMemSetToInitialize(constant, ConstantSize, CGM.getDataLayout());
+      shouldUseMemSetToInitialize(CGM, constant, ConstantSize, CGM.getDataLayout());
   if (Pattern) {
     uint64_t Value = 0x00;
     if (!isa<llvm::UndefValue>(Pattern)) {

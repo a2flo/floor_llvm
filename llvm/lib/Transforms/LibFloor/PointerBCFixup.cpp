@@ -428,6 +428,11 @@ namespace {
 					}
 				}
 				
+				// neither type must be a struct type, or if either is a struct type, the other must not be integer
+				assert((!src_type->isStructTy() && !dst_type->isStructTy()) ||
+					   ((src_type->isStructTy() && !dst_type->isIntegerTy()) ||
+						(!src_type->isIntegerTy() && dst_type->isStructTy())));
+				
 				// fix up by emitting a load of the original (src) pointer, then bitcast to the dst type
 				// NOTE: I would expect there to only be one load, but handle all just in case
 				for (auto& ld : loads) {

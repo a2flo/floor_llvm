@@ -16,6 +16,7 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/CXXInheritance.h"
+#include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/RecordLayout.h"
@@ -122,7 +123,7 @@ struct CGRecordLowering {
   /// other bases, which complicates layout in specific ways.
   ///
   /// Note specifically that the ms_struct attribute doesn't change this.
-  bool isOverlappingVBaseABI() {
+  bool isOverlappingVBaseABI() const {
     return !Context.getTargetInfo().getCXXABI().isMicrosoft();
   }
 
@@ -184,8 +185,9 @@ struct CGRecordLowering {
   /// Lowers an ASTRecordLayout to a llvm type.
   void lower(bool NonVirtualBaseType);
   void lowerUnion();
-  void accumulateFields();
-  void accumulateBitFields(RecordDecl::field_iterator Field,
+  void accumulateFields(bool NonVirtualBaseType);
+  void accumulateBitFields(bool NonVirtualBaseType,
+                           RecordDecl::field_iterator Field,
                            RecordDecl::field_iterator FieldEnd);
   void computeVolatileBitfields();
   void accumulateBases();
@@ -193,8 +195,9 @@ struct CGRecordLowering {
   void accumulateVBases();
   /// Recursively searches all of the bases to find out if a vbase is
   /// not the primary vbase of some base class.
-  bool hasOwnStorage(const CXXRecordDecl *Decl, const CXXRecordDecl *Query);
+  bool hasOwnStorage(const CXXRecordDecl *Decl, const CXXRecordDecl *Query) const;
   void calculateZeroInit();
+  CharUnits calculateTailClippingOffset(bool isNonVirtualBaseType) const;
   /// Lowers bitfield storage types to I8 arrays for bitfields with tail
   /// padding that is or can potentially be used.
   void clipTailPadding();
@@ -295,7 +298,7 @@ void CGRecordLowering::lower(bool NVBaseType) {
     computeVolatileBitfields();
     return;
   }
-  accumulateFields();
+  accumulateFields(NVBaseType);
   // RD implies C++.
   if (RD) {
     accumulateVPtrs();
@@ -380,7 +383,7 @@ void CGRecordLowering::lowerUnion() {
     Packed = true;
 }
 
-void CGRecordLowering::accumulateFields() {
+void CGRecordLowering::accumulateFields(bool isNonVirtualBaseType) {
   for (RecordDecl::field_iterator Field = D->field_begin(),
                                   FieldEnd = D->field_end();
     Field != FieldEnd;) {
@@ -388,7 +391,7 @@ void CGRecordLowering::accumulateFields() {
       RecordDecl::field_iterator Start = Field;
       // Iterate to gather the list of bitfields.
       for (++Field; Field != FieldEnd && Field->isBitField(); ++Field);
-      accumulateBitFields(Start, Field);
+      accumulateBitFields(isNonVirtualBaseType, Start, Field);
     } else if (!Field->isZeroSize(Context)) {
       Members.push_back(MemberInfo(
           bitsToCharUnits(getFieldBitOffset(*Field)), MemberInfo::Field,
@@ -400,8 +403,78 @@ void CGRecordLowering::accumulateFields() {
   }
 }
 
+static bool isEmptyRecordForLayout(const ASTContext &Context, QualType T);
+static bool isEmptyFieldForLayout(const ASTContext &Context, const FieldDecl *FD);
+
+bool isEmptyFieldForLayout(const ASTContext &Context, const FieldDecl *FD) {
+	if (FD->isZeroLengthBitField(Context)) {
+		return true;
+	}
+	
+	if (FD->isUnnamedBitfield()) {
+		return false;
+	}
+	
+	return isEmptyRecordForLayout(Context, FD->getType());
+}
+
+bool isEmptyRecordForLayout(const ASTContext &Context, QualType T) {
+	const auto *RD = T->getAsRecordDecl();
+	if (!RD) {
+		return false;
+	}
+	
+	// If this is a C++ record, check the bases first.
+	if (const CXXRecordDecl *CXXRD = dyn_cast<CXXRecordDecl>(RD)) {
+		if (CXXRD->isDynamicClass()) {
+			return false;
+		}
+		
+		for (const auto &I : CXXRD->bases()) {
+			if (!isEmptyRecordForLayout(Context, I.getType())) {
+				return false;
+			}
+		}
+	}
+	
+	for (const auto *I : RD->fields()) {
+		if (!isEmptyFieldForLayout(Context, I)) {
+			return false;
+		}
+	}
+	
+	return true;
+}
+
+CharUnits
+CGRecordLowering::calculateTailClippingOffset(bool isNonVirtualBaseType) const {
+  if (!RD)
+    return Layout.getDataSize();
+
+  CharUnits ScissorOffset = Layout.getNonVirtualSize();
+  // In the itanium ABI, it's possible to place a vbase at a dsize that is
+  // smaller than the nvsize.  Here we check to see if such a base is placed
+  // before the nvsize and set the scissor offset to that, instead of the
+  // nvsize.
+  if (!isNonVirtualBaseType && isOverlappingVBaseABI())
+    for (const auto &Base : RD->vbases()) {
+      const CXXRecordDecl *BaseDecl = Base.getType()->getAsCXXRecordDecl();
+      if (isEmptyRecordForLayout(Context, Base.getType()))
+        continue;
+      // If the vbase is a primary virtual base of some base, then it doesn't
+      // get its own storage location but instead lives inside of that base.
+      if (Context.isNearlyEmpty(BaseDecl) && !hasOwnStorage(RD, BaseDecl))
+        continue;
+      ScissorOffset = std::min(ScissorOffset,
+                               Layout.getVBaseClassOffset(BaseDecl));
+    }
+
+  return ScissorOffset;
+}
+
 void
-CGRecordLowering::accumulateBitFields(RecordDecl::field_iterator Field,
+CGRecordLowering::accumulateBitFields(bool isNonVirtualBaseType,
+                                      RecordDecl::field_iterator Field,
                                       RecordDecl::field_iterator FieldEnd) {
   // Run stores the first element of the current run of bitfields.  FieldEnd is
   // used as a special value to note that we don't have a current run.  A
@@ -442,78 +515,274 @@ CGRecordLowering::accumulateBitFields(RecordDecl::field_iterator Field,
     return;
   }
 
-  // Check if OffsetInRecord (the size in bits of the current run) is better
-  // as a single field run. When OffsetInRecord has legal integer width, and
-  // its bitfield offset is naturally aligned, it is better to make the
-  // bitfield a separate storage component so as it can be accessed directly
-  // with lower cost.
-  auto IsBetterAsSingleFieldRun = [&](uint64_t OffsetInRecord,
-                                      uint64_t StartBitOffset) {
-    if (!Types.getCodeGenOpts().FineGrainedBitfieldAccesses)
-      return false;
-    if (OffsetInRecord < 8 || !llvm::isPowerOf2_64(OffsetInRecord) ||
-        !DataLayout.fitsInLegalInteger(OffsetInRecord))
-      return false;
-    // Make sure StartBitOffset is naturally aligned if it is treated as an
-    // IType integer.
-    if (StartBitOffset %
-            Context.toBits(getAlignment(getIntNType(OffsetInRecord))) !=
-        0)
-      return false;
-    return true;
-  };
+  // The SysV ABI can overlap bitfield storage units with both other bitfield
+  // storage units /and/ other non-bitfield data members. Accessing a sequence
+  // of bitfields mustn't interfere with adjacent non-bitfields -- they're
+  // permitted to be accessed in separate threads for instance.
 
-  // The start field is better as a single field run.
-  bool StartFieldAsSingleRun = false;
+  // We split runs of bit-fields into a sequence of "access units". When we emit
+  // a load or store of a bit-field, we'll load/store the entire containing
+  // access unit. As mentioned, the standard requires that these loads and
+  // stores must not interfere with accesses to other memory locations, and it
+  // defines the bit-field's memory location as the current run of
+  // non-zero-width bit-fields. So an access unit must never overlap with
+  // non-bit-field storage or cross a zero-width bit-field. Otherwise, we're
+  // free to draw the lines as we see fit.
+
+  // Drawing these lines well can be complicated. LLVM generally can't modify a
+  // program to access memory that it didn't before, so using very narrow access
+  // units can prevent the compiler from using optimal access patterns. For
+  // example, suppose a run of bit-fields occupies four bytes in a struct. If we
+  // split that into four 1-byte access units, then a sequence of assignments
+  // that doesn't touch all four bytes may have to be emitted with multiple
+  // 8-bit stores instead of a single 32-bit store. On the other hand, if we use
+  // very wide access units, we may find ourselves emitting accesses to
+  // bit-fields we didn't really need to touch, just because LLVM was unable to
+  // clean up after us.
+
+  // It is desirable to have access units be aligned powers of 2 no larger than
+  // a register. (On non-strict alignment ISAs, the alignment requirement can be
+  // dropped.) A three byte access unit will be accessed using 2-byte and 1-byte
+  // accesses and bit manipulation. If no bitfield straddles across the two
+  // separate accesses, it is better to have separate 2-byte and 1-byte access
+  // units, as then LLVM will not generate unnecessary memory accesses, or bit
+  // manipulation. Similarly, on a strict-alignment architecture, it is better
+  // to keep access-units naturally aligned, to avoid similar bit
+  // manipulation synthesizing larger unaligned accesses.
+
+  // Bitfields that share parts of a single byte are, of necessity, placed in
+  // the same access unit. That unit will encompass a consecutive run where
+  // adjacent bitfields share parts of a byte. (The first bitfield of such an
+  // access unit will start at the beginning of a byte.)
+
+  // We then try and accumulate adjacent access units when the combined unit is
+  // naturally sized, no larger than a register, and (on a strict alignment
+  // ISA), naturally aligned. Note that this requires lookahead to one or more
+  // subsequent access units. For instance, consider a 2-byte access-unit
+  // followed by 2 1-byte units. We can merge that into a 4-byte access-unit,
+  // but we would not want to merge a 2-byte followed by a single 1-byte (and no
+  // available tail padding). We keep track of the best access unit seen so far,
+  // and use that when we determine we cannot accumulate any more. Then we start
+  // again at the bitfield following that best one.
+
+  // The accumulation is also prevented when:
+  // *) it would cross a character-aigned zero-width bitfield, or
+  // *) fine-grained bitfield access option is in effect.
+
+  // TargetInfo in clang/LLVM 14 doesn't provide this, so do it manually
+  const bool hasUnalignedAccess = (!(Context.getLangOpts().Metal || Context.getLangOpts().Vulkan || Context.getLangOpts().OpenCL) &&
+                                   (Context.getTargetInfo().getTriple().isAArch64() || Context.getTargetInfo().getTriple().isX86()));
+
+  CharUnits RegSize =
+      bitsToCharUnits(Context.getTargetInfo().getRegisterWidth());
+  unsigned CharBits = Context.getCharWidth();
+
+  // Limit of useable tail padding at end of the record. Computed lazily and
+  // cached here.
+  CharUnits ScissorOffset = CharUnits::Zero();
+
+  // Data about the start of the span we're accumulating to create an access
+  // unit from. Begin is the first bitfield of the span. If Begin is FieldEnd,
+  // we've not got a current span. The span starts at the BeginOffset character
+  // boundary. BitSizeSinceBegin is the size (in bits) of the span -- this might
+  // include padding when we've advanced to a subsequent bitfield run.
+  RecordDecl::field_iterator Begin = FieldEnd;
+  CharUnits BeginOffset;
+  uint64_t BitSizeSinceBegin;
+
+  // The (non-inclusive) end of the largest acceptable access unit we've found
+  // since Begin. If this is Begin, we're gathering the initial set of bitfields
+  // of a new span. BestEndOffset is the end of that acceptable access unit --
+  // it might extend beyond the last character of the bitfield run, using
+  // available padding characters.
+  RecordDecl::field_iterator BestEnd = Begin;
+  CharUnits BestEndOffset;
+  bool BestClipped; // Whether the representation must be in a byte array.
+
   for (;;) {
-    // Check to see if we need to start a new run.
-    if (Run == FieldEnd) {
-      // If we're out of fields, return.
-      if (Field == FieldEnd)
-        break;
-      // Any non-zero-length bitfield can start a new run.
-      if (!Field->isZeroLengthBitField(Context)) {
-        Run = Field;
-        StartBitOffset = getFieldBitOffset(*Field);
-        Tail = StartBitOffset + Field->getBitWidthValue(Context);
-        StartFieldAsSingleRun = IsBetterAsSingleFieldRun(Tail - StartBitOffset,
-                                                         StartBitOffset);
+    // AtAlignedBoundary is true iff Field is the (potential) start of a new
+    // span (or the end of the bitfields). When true, LimitOffset is the
+    // character offset of that span and Barrier indicates whether the new
+    // span cannot be merged into the current one.
+    bool AtAlignedBoundary = false;
+    bool Barrier = false;
+
+    if (Field != FieldEnd && Field->isBitField()) {
+      uint64_t BitOffset = getFieldBitOffset(*Field);
+      if (Begin == FieldEnd) {
+        // Beginning a new span.
+        Begin = Field;
+        BestEnd = Begin;
+
+        assert((BitOffset % CharBits) == 0 && "Not at start of char");
+        BeginOffset = bitsToCharUnits(BitOffset);
+        BitSizeSinceBegin = 0;
+      } else if ((BitOffset % CharBits) != 0) {
+        // Bitfield occupies the same character as previous bitfield, it must be
+        // part of the same span. This can include zero-length bitfields, should
+        // the target not align them to character boundaries. Such non-alignment
+        // is at variance with the standards, which require zero-length
+        // bitfields be a barrier between access units. But of course we can't
+        // achieve that in the middle of a character.
+        assert(BitOffset == Context.toBits(BeginOffset) + BitSizeSinceBegin &&
+               "Concatenating non-contiguous bitfields");
+      } else {
+        // Bitfield potentially begins a new span. This includes zero-length
+        // bitfields on non-aligning targets that lie at character boundaries
+        // (those are barriers to merging).
+        if (Field->isZeroLengthBitField(Context))
+          Barrier = true;
+        AtAlignedBoundary = true;
       }
-      ++Field;
-      continue;
+    } else {
+      // We've reached the end of the bitfield run. Either we're done, or this
+      // is a barrier for the current span.
+      if (Begin == FieldEnd)
+        break;
+
+      Barrier = true;
+      AtAlignedBoundary = true;
     }
 
-    // If the start field of a new run is better as a single run, or
-    // if current field (or consecutive fields) is better as a single run, or
-    // if current field has zero width bitfield and either
-    // UseZeroLengthBitfieldAlignment or UseBitFieldTypeAlignment is set to
-    // true, or
-    // if the offset of current field is inconsistent with the offset of
-    // previous field plus its offset,
-    // skip the block below and go ahead to emit the storage.
-    // Otherwise, try to add bitfields to the run.
-    if (!StartFieldAsSingleRun && Field != FieldEnd &&
-        !IsBetterAsSingleFieldRun(Tail - StartBitOffset, StartBitOffset) &&
-        (!Field->isZeroLengthBitField(Context) ||
-         (!Context.getTargetInfo().useZeroLengthBitfieldAlignment() &&
-          !Context.getTargetInfo().useBitFieldTypeAlignment())) &&
-        Tail == getFieldBitOffset(*Field)) {
-      Tail += Field->getBitWidthValue(Context);
-      ++Field;
-      continue;
+    // InstallBest indicates whether we should create an access unit for the
+    // current best span: fields [Begin, BestEnd) occupying characters
+    // [BeginOffset, BestEndOffset).
+    bool InstallBest = false;
+    if (AtAlignedBoundary) {
+      // Field is the start of a new span or the end of the bitfields. The
+      // just-seen span now extends to BitSizeSinceBegin.
+
+      // Determine if we can accumulate that just-seen span into the current
+      // accumulation.
+      CharUnits AccessSize = bitsToCharUnits(BitSizeSinceBegin + CharBits - 1);
+      if (BestEnd == Begin) {
+        // This is the initial run at the start of a new span. By definition,
+        // this is the best seen so far.
+        BestEnd = Field;
+        BestEndOffset = BeginOffset + AccessSize;
+        // Assume clipped until proven not below.
+        BestClipped = true;
+        if (!BitSizeSinceBegin)
+          // A zero-sized initial span -- this will install nothing and reset
+          // for another.
+          InstallBest = true;
+      } else if (AccessSize > RegSize)
+        // Accumulating the just-seen span would create a multi-register access
+        // unit, which would increase register pressure.
+        InstallBest = true;
+
+      if (!InstallBest) {
+        // Determine if accumulating the just-seen span will create an expensive
+        // access unit or not.
+        llvm::Type *Type = getIntNType(Context.toBits(AccessSize));
+        if (hasUnalignedAccess) {
+          // Unaligned accesses are expensive. Only accumulate if the new unit
+          // is naturally aligned. Otherwise install the best we have, which is
+          // either the initial access unit (can't do better), or a naturally
+          // aligned accumulation (since we would have already installed it if
+          // it wasn't naturally aligned).
+          CharUnits Align = getAlignment(Type);
+          if (Align > Layout.getAlignment())
+            // The alignment required is greater than the containing structure
+            // itself.
+            InstallBest = true;
+          else if (!BeginOffset.isMultipleOf(Align))
+            // The access unit is not at a naturally aligned offset within the
+            // structure.
+            InstallBest = true;
+
+          if (InstallBest && BestEnd == Field)
+            // We're installing the first span, whose clipping was presumed
+            // above. Compute it correctly.
+            if (getSize(Type) == AccessSize)
+              BestClipped = false;
+        }
+
+        if (!InstallBest) {
+          // Find the next used storage offset to determine what the limit of
+          // the current span is. That's either the offset of the next field
+          // with storage (which might be Field itself) or the end of the
+          // non-reusable tail padding.
+          CharUnits LimitOffset;
+          for (auto Probe = Field; Probe != FieldEnd; ++Probe)
+            if (!isEmptyFieldForLayout(Context, *Probe)) {
+              // A member with storage sets the limit.
+              assert((getFieldBitOffset(*Probe) % CharBits) == 0 &&
+                     "Next storage is not byte-aligned");
+              LimitOffset = bitsToCharUnits(getFieldBitOffset(*Probe));
+              goto FoundLimit;
+            }
+          // We reached the end of the fields, determine the bounds of useable
+          // tail padding. As this can be complex for C++, we cache the result.
+          if (ScissorOffset.isZero()) {
+            ScissorOffset = calculateTailClippingOffset(isNonVirtualBaseType);
+            assert(!ScissorOffset.isZero() && "Tail clipping at zero");
+          }
+
+          LimitOffset = ScissorOffset;
+        FoundLimit:;
+
+          CharUnits TypeSize = getSize(Type);
+          if (BeginOffset + TypeSize <= LimitOffset) {
+            // There is space before LimitOffset to create a naturally-sized
+            // access unit.
+            BestEndOffset = BeginOffset + TypeSize;
+            BestEnd = Field;
+            BestClipped = false;
+          }
+
+          if (Barrier)
+            // The next field is a barrier that we cannot merge across.
+            InstallBest = true;
+          else if (Types.getCodeGenOpts().FineGrainedBitfieldAccesses)
+            // Fine-grained access, so no merging of spans.
+            InstallBest = true;
+          else
+            // Otherwise, we're not installing. Update the bit size
+            // of the current span to go all the way to LimitOffset, which is
+            // the (aligned) offset of next bitfield to consider.
+            BitSizeSinceBegin = Context.toBits(LimitOffset - BeginOffset);
+        }
+      }
     }
 
-    // We've hit a break-point in the run and need to emit a storage field.
-    llvm::Type *Type = getIntNType(Tail - StartBitOffset);
-    // Add the storage member to the record and set the bitfield info for all of
-    // the bitfields in the run.  Bitfields get the offset of their storage but
-    // come afterward and remain there after a stable sort.
-    Members.push_back(StorageInfo(bitsToCharUnits(StartBitOffset), Type));
-    for (; Run != Field; ++Run)
-      Members.push_back(MemberInfo(bitsToCharUnits(StartBitOffset),
-                                   MemberInfo::Field, nullptr, *Run));
-    Run = FieldEnd;
-    StartFieldAsSingleRun = false;
+    if (InstallBest) {
+      assert((Field == FieldEnd || !Field->isBitField() ||
+              (getFieldBitOffset(*Field) % CharBits) == 0) &&
+             "Installing but not at an aligned bitfield or limit");
+      CharUnits AccessSize = BestEndOffset - BeginOffset;
+      if (!AccessSize.isZero()) {
+        // Add the storage member for the access unit to the record. The
+        // bitfields get the offset of their storage but come afterward and
+        // remain there after a stable sort.
+        llvm::Type *Type;
+        if (BestClipped) {
+          assert(getSize(getIntNType(Context.toBits(AccessSize))) >
+                     AccessSize &&
+                 "Clipped access need not be clipped");
+          Type = getByteArrayType(AccessSize);
+        } else {
+          Type = getIntNType(Context.toBits(AccessSize));
+          assert(getSize(Type) == AccessSize &&
+                 "Unclipped access must be clipped");
+        }
+        Members.push_back(StorageInfo(BeginOffset, Type));
+        for (; Begin != BestEnd; ++Begin)
+          if (!Begin->isZeroLengthBitField(Context))
+            Members.push_back(
+                MemberInfo(BeginOffset, MemberInfo::Field, nullptr, *Begin));
+      }
+      // Reset to start a new span.
+      Field = BestEnd;
+      Begin = FieldEnd;
+    } else {
+      assert(Field != FieldEnd && Field->isBitField() &&
+             "Accumulating past end of bitfields");
+      assert(!Barrier && "Accumulating across barrier");
+      // Accumulate this bitfield into the current (potential) span.
+      BitSizeSinceBegin += Field->getBitWidthValue(Context);
+      ++Field;
+    }
   }
 }
 
@@ -710,7 +979,7 @@ void CGRecordLowering::accumulateVBases() {
 }
 
 bool CGRecordLowering::hasOwnStorage(const CXXRecordDecl *Decl,
-                                     const CXXRecordDecl *Query) {
+                                     const CXXRecordDecl *Query) const {
   const ASTRecordLayout &DeclLayout = Context.getASTRecordLayout(Decl);
   if (DeclLayout.isPrimaryBaseVirtual() && DeclLayout.getPrimaryBase() == Query)
     return false;
