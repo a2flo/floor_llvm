@@ -675,7 +675,7 @@ CGRecordLowering::accumulateBitFields(bool isNonVirtualBaseType,
         // Determine if accumulating the just-seen span will create an expensive
         // access unit or not.
         llvm::Type *Type = getIntNType(Context.toBits(AccessSize));
-        if (hasUnalignedAccess) {
+        if (!hasUnalignedAccess) {
           // Unaligned accesses are expensive. Only accumulate if the new unit
           // is naturally aligned. Otherwise install the best we have, which is
           // either the initial access unit (can't do better), or a naturally
