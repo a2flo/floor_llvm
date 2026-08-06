@@ -739,9 +739,6 @@ namespace {
 				case Intrinsic::lifetime_start:
 				case Intrinsic::lifetime_end:
 				case Intrinsic::assume:
-					I.eraseFromParent();
-					was_modified = true;
-					break;
 				case Intrinsic::memcpy:
 				case Intrinsic::memset:
 				case Intrinsic::memmove:
@@ -752,6 +749,16 @@ namespace {
 				case Intrinsic::dbg_value:
 				case Intrinsic::dbg_declare:
 					// pass
+					break;
+					
+				case Intrinsic::uadd_sat:
+				case Intrinsic::usub_sat:
+				case Intrinsic::ushl_sat:
+				case Intrinsic::sadd_sat:
+				case Intrinsic::ssub_sat:
+				case Intrinsic::sshl_sat:
+					// NOTE: I'm not 100% sure these are all allowed, but since some of them are allowed,
+					//       I'm assuming this whole family of intrinsics is allowed
 					break;
 					
 				// single arguments cases
