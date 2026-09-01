@@ -82,7 +82,10 @@ public:
 	explicit LibFloorGPUTargetLowering(const bool is_metal_, const bool is_vulkan_,
 									   const bool is_restricted_vector_support_) :
 	TargetLowering(*LibFloorGPUTargetMachine::get_instance()), is_metal(is_metal_), is_vulkan(is_vulkan_),
-	is_restricted_vector_support(is_restricted_vector_support_) {}
+	is_restricted_vector_support(is_restricted_vector_support_) {
+		// selects are always cheaper than branches
+		PredictableSelectIsExpensive = false;
+	}
 	
 	static LibFloorGPUTargetLowering* get_instance(const bool is_metal_, const bool is_vulkan_,
 												   const bool is_restricted_vector_support_) {

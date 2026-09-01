@@ -103,13 +103,14 @@ cl::opt<bool> llvm::RequireAndPreserveDomTree(
 // a select, so the "clamp" idiom (of a min followed by a max) will be caught.
 // To catch this, we need to fold a compare and a select, hence '2' being the
 // minimum reasonable default.
+// -- for GPU targets we prefer this to be significantly larger as selects are cheap, branches are not
 static cl::opt<unsigned> PHINodeFoldingThreshold(
-    "phi-node-folding-threshold", cl::Hidden, cl::init(2),
+    "phi-node-folding-threshold", cl::Hidden, cl::init(16),
     cl::desc(
         "Control the amount of phi node folding to perform (default = 2)"));
 
 static cl::opt<unsigned> TwoEntryPHINodeFoldingThreshold(
-    "two-entry-phi-node-folding-threshold", cl::Hidden, cl::init(4),
+    "two-entry-phi-node-folding-threshold", cl::Hidden, cl::init(16),
     cl::desc("Control the maximal total instruction cost that we are willing "
              "to speculatively execute to fold a 2-entry PHI node into a "
              "select (default = 4)"));
@@ -154,9 +155,10 @@ static cl::opt<int>
                                "small enough to thread through"));
 
 // Two is chosen to allow one negation and a logical combine.
+// -- same here: for GPU targets we prefer this to be significantly larger
 static cl::opt<unsigned>
     BranchFoldThreshold("simplifycfg-branch-fold-threshold", cl::Hidden,
-                        cl::init(2),
+                        cl::init(8),
                         cl::desc("Maximum cost of combining conditions when "
                                  "folding branches"));
 
