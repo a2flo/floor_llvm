@@ -1204,11 +1204,10 @@ namespace {
 			// -> add padding
 			for (auto field_iter = combined_st.begin(); field_iter != combined_st.end(); ) {
 				const auto& field = *field_iter;
-				total_size += field.value_size;
-				++field_iter;
+				const auto field_size = field.value_size;
 				
+				// do we need to add padding *prior* to the field?
 				if (auto cur_alignment = total_size % field.elemental_size; cur_alignment != 0u) {
-					// need to add padding
 					auto padding = field.elemental_size - cur_alignment;
 					total_size += padding;
 					// if the padding is small enough, just add small types
@@ -1235,6 +1234,9 @@ namespace {
 						++field_iter;
 					}
 				}
+				
+				total_size += field_size;
+				++field_iter;
 			}
 			assert(total_size > 0u);
 			

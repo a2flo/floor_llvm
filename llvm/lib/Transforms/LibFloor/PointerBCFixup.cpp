@@ -37,6 +37,7 @@
 #include "llvm/InitializePasses.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/CallingConv.h"
+#include "llvm/IR/ConstantFolder.h"
 #include "llvm/IR/ConstantRange.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
@@ -103,7 +104,7 @@ namespace {
 		bool is_task_func { false };
 		bool is_mesh_func { false };
 		bool was_modified { false };
-		ConstantFolder folder;
+		ConstantFolder folder {};
 		
 		// gather pointer bitcast instructions
 		std::vector<BitCastInst*> ptr_bc_instrs;
@@ -554,9 +555,16 @@ namespace {
 					// TODO: implement this
 					assert(false && "unhandled bitcast store replacement");
 				} else if (src_size < dst_size) {
+					[[maybe_unused]] bool is_multi_store = false; // just for informational purposes right now
 					if (stores.size() > 1) {
-						ctx->emitError(&BC, "invalid pointer bitcast: can't replace more than one store");
-						return {};
+						// generally we don't support multi-stores here (yet), because they are generally too complex too handle,
+						// however, for certain trivial cases where we only replace simple integer stores (both src and dst are integer) we can allow this
+						if (!src_type->isIntegerTy() || !dst_type->isIntegerTy()) {
+							ctx->emitError(&BC, "invalid pointer bitcast: can't replace more than one store");
+							return {};
+						} else {
+							is_multi_store = true;
+						}
 					}
 					
 					src_gep = dyn_cast_or_null<GetElementPtrInst>(src);
@@ -576,55 +584,61 @@ namespace {
 						src_gep_indices.emplace_back(idx);
 					}
 					
-					const auto store = stores[0];
-					auto store_value = store->getValueOperand();
-					Type* store_value_int_type = nullptr;
-					if (!store_value->getType()->isIntegerTy()) {
-						// if the source value is not an integer, we need to bitcast it to an integer
-						// NOTE/TODO: this probably won't work in all cases ...
-						assert(dst_size <= 8 && "source value is too large");
-						store_value_int_type = IntegerType::get(*ctx, dst_size * 8u);
-						store_value = new BitCastInst(store_value, store_value_int_type, "store_value_bc", store);
-					} else {
-						store_value_int_type = store_value->getType();
-					}
-					
-					cleanup_instrs.emplace_back(store);
-					for (uint32_t split_idx = 0u; split_idx < split_count; ++split_idx) {
-						Value* shifted_value = nullptr;
-						GetElementPtrInst* store_gep = nullptr;
-						if (split_idx > 0) {
-							// right shift by bitness * split-index
-							shifted_value = BinaryOperator::CreateLShr(store_value,
-																	   ConstantInt::get(store_value_int_type, split_idx * src_bitness),
-																	   "st_split_shift", store);
-							
-							// advance GEP by one
-							auto adj_gep_indices = src_gep_indices;
-							auto last_gep_idx = adj_gep_indices.back();
-							auto adv_idx = BinaryOperator::CreateAdd(last_gep_idx,
-																	 ConstantInt::get(last_gep_idx->getType(), split_idx),
-																	 "st_src_gep_idx_adv", src_gep);
-							adj_gep_indices[adj_gep_indices.size() - 1] = adv_idx;
-							
-							store_gep = llvm::GetElementPtrInst::Create(src_gep->getSourceElementType(), src_gep->getPointerOperand(),
-																		adj_gep_indices, "st_src_gep_adv", src_gep);
-							if (src_gep->isInBounds()) {
-								store_gep->setIsInBounds();
-							}
-							store_gep->copyMetadata(*src_gep);
-							store_gep->setDebugLoc(src_gep->getDebugLoc());
+					for (const auto& store : stores) {
+						auto store_value = store->getValueOperand();
+						Type* store_value_int_type = nullptr;
+						if (!store_value->getType()->isIntegerTy()) {
+							// if the source value is not an integer, we need to bitcast it to an integer
+							// NOTE/TODO: this probably won't work in all cases ...
+							assert(dst_size <= 8 && "source value is too large");
+							store_value_int_type = IntegerType::get(*ctx, dst_size * 8u);
+							store_value = new BitCastInst(store_value, store_value_int_type, "store_value_bc", store);
 						} else {
-							// first iteration: use value and GEP as is
-							shifted_value = store_value;
-							store_gep = src_gep;
+							store_value_int_type = store_value->getType();
 						}
-						auto trunc_shifted_value = new TruncInst(shifted_value, src_type, "st_trunc_split_shift", store);
-						auto repl_st = new StoreInst(trunc_shifted_value, store_gep, store->isVolatile(),
-													 store->getAlign(), store->getOrdering(), store->getSyncScopeID(),
-													 store);
-						repl_st->copyMetadata(*store);
-						repl_st->setDebugLoc(store->getDebugLoc());
+						
+						cleanup_instrs.emplace_back(store);
+						for (uint32_t split_idx = 0u; split_idx < split_count; ++split_idx) {
+							Value* shifted_value = nullptr;
+							GetElementPtrInst* store_gep = nullptr;
+							if (split_idx > 0) {
+								// right shift by bitness * split-index
+								shifted_value = BinaryOperator::CreateLShr(store_value,
+																		   ConstantInt::get(store_value_int_type, split_idx * src_bitness),
+																		   "st_split_shift", store);
+								
+								// advance GEP by one
+								auto adj_gep_indices = src_gep_indices;
+								auto last_gep_idx = adj_gep_indices.back();
+								Value* adv_idx = nullptr;
+								// in certain cases (e.g. struct indices), this already must be a constant here, so we can't rely on it being constant folded later
+								auto adv_constant = ConstantInt::get(last_gep_idx->getType(), split_idx);
+								if (auto folded_adv_idx = folder.FoldAdd(last_gep_idx, adv_constant); folded_adv_idx) {
+									adv_idx = folded_adv_idx;
+								} else {
+									adv_idx = BinaryOperator::CreateAdd(last_gep_idx, adv_constant, "st_src_gep_idx_adv", src_gep);
+								}
+								adj_gep_indices[adj_gep_indices.size() - 1] = adv_idx;
+								
+								store_gep = llvm::GetElementPtrInst::Create(src_gep->getSourceElementType(), src_gep->getPointerOperand(),
+																			adj_gep_indices, "st_src_gep_adv", src_gep);
+								if (src_gep->isInBounds()) {
+									store_gep->setIsInBounds();
+								}
+								store_gep->copyMetadata(*src_gep);
+								store_gep->setDebugLoc(src_gep->getDebugLoc());
+							} else {
+								// first iteration: use value and GEP as is
+								shifted_value = store_value;
+								store_gep = src_gep;
+							}
+							auto trunc_shifted_value = new TruncInst(shifted_value, src_type, "st_trunc_split_shift", store);
+							auto repl_st = new StoreInst(trunc_shifted_value, store_gep, store->isVolatile(),
+														 store->getAlign(), store->getOrdering(), store->getSyncScopeID(),
+														 store);
+							repl_st->copyMetadata(*store);
+							repl_st->setDebugLoc(store->getDebugLoc());
+						}
 					}
 				} else { // src_size == dst_size
 					// TODO: implement this?

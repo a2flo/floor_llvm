@@ -25,7 +25,7 @@
 //
 // dxil-spirv CFG structurizer adopted for LLVM use
 // ref: https://github.com/HansKristian-Work/dxil-spirv
-// @ d05d96b263daa4fb347f58a8ff4367e1aad023fe
+// @ 1b949ec2bed58cc1133e10e31211c9865b9b3821
 //
 //===----------------------------------------------------------------------===//
 
@@ -96,6 +96,8 @@ private:
   bool rewrite_complex_loop_exits(CFGNode *node, CFGNode *merge,
                                   std::vector<CFGNode *> &dominated_exits);
   bool rewrite_transposed_loops();
+  static uint32_t
+  earliest_dominance_frontier_post_visit_order(const CFGNode *node);
 
   struct LoopAnalysis {
     std::vector<CFGNode *> direct_exits;
@@ -122,9 +124,19 @@ private:
                                      CFGNode *impossible_merge_target,
                                      const LoopMergeAnalysis &analysis);
 
-  static bool is_ordered(const CFGNode *a, const CFGNode *b, const CFGNode *c);
+  static bool is_strictly_dominance_ordered(const CFGNode *a, const CFGNode *b,
+                                            const CFGNode *c);
+  bool is_reachability_ordered(const CFGNode *a, const CFGNode *b,
+                               const CFGNode *c);
+  bool serialize_interleaved_merge_scopes_aggressive();
   bool serialize_interleaved_merge_scopes();
   bool serialize_interleaved_early_returns();
+  static std::vector<std::pair<CFGNode *, CFGNode *>>
+  build_pdf_ranges(const std::vector<CFGNode *> &candidates);
+  static bool pdf_ranges_have_strict_dominance_ordering(
+      const std::vector<std::pair<CFGNode *, CFGNode *>> &candidates);
+  void
+  filter_serialization_candidates(std::vector<CFGNode *> &candidates) const;
   void split_merge_scopes();
   bool is_rewind_candidate_split_node(
       const std::vector<const CFGNode *> &visited_orphans, CFGNode *node,
@@ -149,6 +161,7 @@ private:
 
   enum class SwitchProgressMode { Done, SimpleModify, IterativeModify };
   SwitchProgressMode process_switch_blocks(unsigned pass);
+  bool rewrite_complex_loop_header_switch_constructs();
 
   bool find_switch_blocks(unsigned pass);
   void hoist_switch_branches_to_frontier(CFGNode *node, CFGNode *merge,
@@ -217,7 +230,7 @@ private:
     Exit,
     Merge,
     Escape,
-    MergeToInfiniteLoop,
+    MergeToOuterBackEdge,
     InnerLoopExit,
     InnerLoopMerge,
     InnerLoopFalsePositive
@@ -269,8 +282,11 @@ private:
   void log_cfg(const char *tag) const;
   void log_cfg_graphviz(const char *path) const;
 
-  static bool can_complete_phi_insertion(const PHI &phi,
-                                         const CFGNode *end_node);
+  bool can_complete_phi_insertion(const PHI &phi, const CFGNode *end_node);
+  CFGNode *find_linear_phi_control_flow_frontier(
+      const IncomingValue &incoming,
+      const std::vector<IncomingValue> &incoming_values,
+      const CFGNode *end_node);
   bool query_reachability_through_back_edges(const CFGNode &from,
                                              const CFGNode &to) const;
   bool query_reachability_split_loop_header(const CFGNode &from,
@@ -283,13 +299,14 @@ private:
   void traverse_dominated_blocks_and_rewrite_branch(CFGNode *dominator,
                                                     CFGNode *from, CFGNode *to);
   template <typename Op>
-  void traverse_dominated_blocks_and_rewrite_branch(CFGNode *dominator,
-                                                    CFGNode *from, CFGNode *to,
-                                                    const Op &op);
+  void traverse_dominated_blocks_and_rewrite_branch(
+      CFGNode *dominator, CFGNode *from, CFGNode *to, const Op &op,
+      const std::vector<CFGNode *> &barrier);
   template <typename Op>
   void traverse_dominated_blocks_and_rewrite_branch(
       const CFGNode *dominator, CFGNode *candidate, CFGNode *from, CFGNode *to,
-      const Op &op, std::unordered_set<CFGNode *> &visitation_cache);
+      const Op &op, const std::vector<CFGNode *> &barrier,
+      std::unordered_set<CFGNode *> &visitation_cache);
 
   CFGNode *transpose_code_path_through_ladder_block(CFGNode *header,
                                                     CFGNode *merge,
@@ -310,7 +327,8 @@ private:
   void
   collect_and_dispatch_control_flow(CFGNode *common_idom, CFGNode *common_pdom,
                                     const std::vector<CFGNode *> &constructs,
-                                    bool collect_all_code_paths_to_pdom);
+                                    bool collect_all_code_paths_to_pdom,
+                                    bool allow_crossing_branches);
 
   void collect_and_dispatch_control_flow_from_anchor(
       CFGNode *anchor, const std::vector<CFGNode *> &constructs);
@@ -321,5 +339,9 @@ private:
   SpvInstructionFlags get_instruction_flags(const Instruction *instr);
   void set_instruction_flags(Instruction *instr,
                              const SpvInstructionFlags new_flags);
+
+  template <typename Op>
+  void iterate_dominated_node_range_bottom_up(const CFGNode *start,
+                                              const CFGNode *end, const Op &op);
 };
 } // namespace llvm

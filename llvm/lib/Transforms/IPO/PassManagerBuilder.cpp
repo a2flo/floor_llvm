@@ -1146,6 +1146,8 @@ void PassManagerBuilder::populateModulePassManager(
     }
     // -> finally use the CFG structurizer from dxil-spirv to get a proper conformant CFG
     MPM.add(createCFGStructurizationPass());
+    // try to fix up allocas that were created during structurization
+    MPM.add(createPromoteMemoryToRegisterPass());
 
     // vulkanization
     MPM.add(createVulkanFinalPass());
