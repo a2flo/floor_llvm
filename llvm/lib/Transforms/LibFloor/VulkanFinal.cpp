@@ -1846,10 +1846,11 @@ namespace {
 			
 			const auto base_idx_count = base_gep->getNumIndices();
 			const auto idx_count = gep->getNumIndices();
+			assert(base_idx_count > 0 && idx_count > 0);
 			
 			DBG(errs() << ">>> fusing: " << *base_gep << " + " << *gep << "\n";)
 			
-			if(base_idx_count == 1 && replace_old_gep) {
+			if (base_idx_count == 1 && replace_old_gep) {
 				// -> base is just an offset pointer, can simply fuse both GEPs
 				DBG(errs() << ">> fused (simple): " << *gep;)
 				
@@ -1861,11 +1862,13 @@ namespace {
 				
 				DBG(errs() << ", with " << *gep << "\n";)
 				return { gep, false };
-			}
-			else {
+			} else {
 				// -> need to create a new GEP so that it can contain all indices from both GEPs
 				// NOTE: last idx in base + first in current always matches -> -1
 				const auto fused_idx_count = base_idx_count + idx_count - 1;
+				
+				auto gep_ptr = base_gep->getPointerOperand();
+				auto gep_ptr_type = cast<PointerType>(gep_ptr->getType()->getScalarType())->getPointerElementType();
 				
 				// create fused idx list
 				SmallVector<Value*, 4> idx_list;
@@ -1874,9 +1877,46 @@ namespace {
 				for(uint32_t i = 1, count = base_gep->getNumIndices() + 1; i < count; ++i) {
 					idx_list.push_back(base_gep->getOperand(i));
 				}
+				assert(idx_list.size() >= 2); // must be true with base_idx_count > 1
 				
-				// fust last (base) + first (current) idx
-				idx_list[idx_list.size() - 1] = fuse_index(idx_list.back(), gep->getOperand(1), gep);
+				// fuse last valid base index + first (current) index
+				auto fuse_idx = idx_list.size() - 1;
+				if (auto st_type = dyn_cast_or_null<StructType>(GetElementPtrInst::getIndexedType(gep_ptr_type, ArrayRef { idx_list.data(), idx_list.size() - 1u }));
+					st_type) {
+					// if we're indexing a struct type, both indices must be constant and within range
+					ConstantInt* lhs_const = dyn_cast_or_null<ConstantInt>(idx_list.back());
+					ConstantInt* rhs_const = dyn_cast_or_null<ConstantInt>(gep->getOperand(1));
+					bool traverse_up = true;
+					if (lhs_const && rhs_const) {
+						const auto st_elem_idx = lhs_const->getZExtValue() + rhs_const->getZExtValue();
+						if (st_elem_idx < st_type->getNumElements()) {
+							// -> all good
+							traverse_up = false;
+						}
+						// else: OOB -> traverse up
+					}
+					// else: either is dynamic -> traverse up
+					
+					if (traverse_up) {
+						// we must have at least 3 indices in our list + the upper type must support dynamic indexing, i.e. must be an array or generic ptr type
+						assert(idx_list.size() >= 3);
+						for (uint32_t depth = 2; idx_list.size() >= (depth + 1u); ++depth) {
+							--fuse_idx;
+							auto upper_type = GetElementPtrInst::getIndexedType(gep_ptr_type, ArrayRef { idx_list.data(), idx_list.size() - depth });
+							assert(upper_type);
+							if (upper_type->isArrayTy() || upper_type->isPointerTy()) {
+								// -> all good now
+								break;
+							} else if (upper_type->isStructTy()) {
+								// should only have a single element, otherwise the non-fused GEP is very strange by hopping struct types
+								assert(cast<StructType>(upper_type)->getNumElements() == 1);
+							} else {
+								assert(false && "unhandled type");
+							}
+						}
+					}
+				}
+				idx_list[fuse_idx] = fuse_index(idx_list[fuse_idx], gep->getOperand(1), gep);
 				
 				// add current indices
 				for(uint32_t i = 2, count = gep->getNumIndices() + 1; i < count; ++i) {
@@ -1885,8 +1925,6 @@ namespace {
 				assert(idx_list.size() == fused_idx_count && "invalid idx list size");
 				
 				// create the new GEP
-				auto gep_ptr = base_gep->getPointerOperand();
-				auto gep_ptr_type = cast<PointerType>(gep_ptr->getType()->getScalarType())->getPointerElementType();
 				if (const auto idx_type = GetElementPtrInst::getIndexedType(gep_ptr_type, idx_list); !idx_type) {
 					// can't handle it -> ignore it
 					// NOTE: since variable pointers are now used by default, PtrAccessChain is possible -> we don't necessarily
