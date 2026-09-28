@@ -2672,6 +2672,10 @@ void CodeGenModule::GenVulkanMetadata(const FunctionDecl *FD, llvm::Function *Fn
 				// tag as argument buffer
 				arg_iter->addAttr(llvm::Attribute::get(getLLVMContext(), "vulkan_arg_buffer"));
 				
+				if (field->hasAttr<FloorCoherentAttr>()) {
+					arg_iter->addAttr(llvm::Attribute::get(getLLVMContext(), "floor_coherent"));
+				}
+				
 				if (field_type->isArrayImageType(true)) {
 					const auto array_image_info = get_array_image_info(field_type->getAsCXXRecordDecl(), getContext(),
 																	   Types, getDataLayout());
@@ -3800,6 +3804,37 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				if (!struct_type_info.empty()) {
 					arg_info.push_back(llvm::MDString::get(VMContext, "air.struct_type_info"));
 					arg_info.push_back(llvm::MDNode::get(VMContext, struct_type_info));
+				}
+				
+				// handle coherent buffers contained within argument buffers: since we can't annotate types or struct fields directly,
+				// we need to go the roundabout way of putting that info into global metadata instead
+				// -> use the struct name + prefix as the lookup key, then list all field indices that are coherent
+				// NOTE: this will be untangled again in the PropagateCoherency pass
+				if (is_top_level && indirect_buffer) {
+					assert(llvm_pointee_type->isStructTy());
+					const auto llvm_st_type = (llvm::StructType*)llvm_pointee_type;
+					const auto md_name = "floor.coherent." + llvm_st_type->getName().str();
+					// only do this once per struct
+					if (!getModule().getNamedMetadata(md_name)) {
+						const auto fields = get_aggregate_fields(pointee_rdecl, Types, getDataLayout());
+						SmallVector<uint32_t, 8u> coherent_field_indices;
+						uint32_t field_idx = 0u;
+						for (const auto& field : fields) {
+							if (field->hasAttr<FloorCoherentAttr>()) {
+								coherent_field_indices.push_back(field_idx);
+							}
+							++field_idx;
+						}
+						
+						if (!coherent_field_indices.empty()) {
+							auto global_coherent_md = getModule().getOrInsertNamedMetadata(md_name);
+							SmallVector<llvm::Metadata*, 8u> coherent_field_md;
+							for (const auto& idx : coherent_field_indices) {
+								coherent_field_md.push_back(llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(Int32Ty, idx)));
+							}
+							global_coherent_md->addOperand(llvm::MDNode::get(VMContext, coherent_field_md));
+						}
+					}
 				}
 			}
 			

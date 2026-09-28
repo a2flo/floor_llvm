@@ -26,6 +26,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Analysis/AliasAnalysis.h"
@@ -89,6 +90,7 @@ namespace {
 		static char ID; // Pass identification, replacement for typeid
 		
 		static const uint32_t AIRAS_global = 1;
+		static const uint32_t AIRAS_constant = 2;
 		static const uint32_t SPIRAS_StorageBuffer = 12;
 		static const uint32_t SPIRAS_PhysicalStorageBuffer = 5349;
 		
@@ -142,64 +144,133 @@ namespace {
 					++arg_idx;
 					continue;
 				}
+				
 				const auto attr_arg_idx = llvm::AttributeList::FirstArgIndex + arg_idx++;
 				const auto coherent_attr = F.getAttributeAtIndex(attr_arg_idx, "floor_coherent");
 				const auto is_coherent = (coherent_attr.getRawPointer() != nullptr);
-				if (!is_coherent) {
+				
+				// Metal: check if this is an argument buffer (which may contain coherent buffers)
+				// NOTE: for Vulkan, we don't need to do this as we already unfold the arg buffer, i.e. each field is handled as an arg itself
+				bool is_mtl_arg_buffer = false;
+				if (is_metal) {
+					// right now, we don't flag argument buffers in Metal, but this must at least be a constant-AS ptr and a struct type
+					is_mtl_arg_buffer = (ptr_type->getAddressSpace() == AIRAS_constant &&
+										 ptr_type->getPointerElementType()->isStructTy());
+				}
+				
+				if (!is_coherent && !is_mtl_arg_buffer) {
 					continue;
 				}
 				
-				// recursively go through all users and their users (and so on), and find all loads/stores affected by the argument
-				std::unordered_set<Instruction*> child_instrs;
-				std::vector<Instruction*> load_store_instrs;
-				std::deque<Value*> todo_values { &arg };
-				while (!todo_values.empty()) {
-					auto val = todo_values.front();
-					todo_values.pop_front();
-					libfloor_utils::for_all_instruction_users(*val, [&child_instrs, &todo_values, &load_store_instrs](Instruction& instr) {
-						const auto [_, did_emplace] = child_instrs.emplace(&instr);
-						if (did_emplace) {
-							// we treat load and store instructions as leaf nodes, i.e. no need to recurse further
-							if (!isa<LoadInst>(instr) && !isa<StoreInst>(instr)) {
-								todo_values.emplace_back(&instr);
-							} else {
-								load_store_instrs.emplace_back(&instr);
+				if (is_coherent) {
+					propagate(&arg);
+					
+					// no longer need the attribute
+					if (is_metal) {
+						F.removeAttributeAtIndex(attr_arg_idx, "floor_coherent");
+					}
+				} else if (is_mtl_arg_buffer) {
+					// check if we have metadata for this struct / have flagged any field as coherent
+					const auto st_type = dyn_cast_or_null<StructType>(ptr_type->getPointerElementType());
+					const auto global_coherent_md = M->getNamedMetadata("floor.coherent." + st_type->getName().str());
+					if (global_coherent_md) {
+						// retrieve all fields indices / coherent buffers
+						llvm::SmallSet<uint32_t, 8> coherent_field_indices;
+						const auto md_ops = global_coherent_md->getOperand(0);
+						for (const auto& md_op : md_ops->operands()) {
+							if (const llvm::ConstantAsMetadata* constant_md = dyn_cast_or_null<llvm::ConstantAsMetadata>(md_op.get())) {
+								if (const llvm::ConstantInt* field_idx_int = dyn_cast_or_null<llvm::ConstantInt>(constant_md->getValue())) {
+									coherent_field_indices.insert(uint32_t(field_idx_int->getZExtValue()));
+								}
 							}
 						}
-					});
-				}
-				
-				// handle loads/stores
-				was_modified = !load_store_instrs.empty();
-				for (const auto& child_instr : load_store_instrs) {
-					if (auto load_instr = dyn_cast_or_null<LoadInst>(child_instr); load_instr) {
-						if (is_metal) {
-							handle_coherent_load_metal(*load_instr);
-						} else if (is_vulkan) {
-							handle_coherent_load_vulkan(*load_instr);
-						}
-					} else if (auto store_instr = dyn_cast_or_null<StoreInst>(child_instr); store_instr) {
-						if (is_metal) {
-							handle_coherent_store_metal(*store_instr);
-						} else if (is_vulkan) {
-							handle_coherent_store_vulkan(*store_instr);
+						
+						// go over all GEPs of our argument and perform coherency propagation for all GEPs that reference coherent buffers/fields
+						if (!coherent_field_indices.empty()) {
+							llvm::SmallVector<llvm::Value*, 16> coherent_input_values;
+							libfloor_utils::for_all_instruction_users(arg, [&coherent_field_indices, &coherent_input_values](Instruction& instr) {
+								if (auto GEP = dyn_cast_or_null<GetElementPtrInst>(&instr); GEP) {
+									assert(GEP->getNumIndices() >= 2);
+									const auto gep_st_field_idx = dyn_cast_or_null<ConstantInt>(GEP->idx_begin() + 1);
+									assert(gep_st_field_idx); // this must always be const when GEP'ing into a struct?
+									if (coherent_field_indices.contains(uint32_t(gep_st_field_idx->getZExtValue()))) {
+										// we generally have pairs of "GEP(0, st-idx) + ld GEP" -> coherent buffer pointer,
+										// for which we only want to handle/propagate the loaded pointer, not the loading of the pointer itself
+										if (GEP->getNumIndices() == 2u) {
+											libfloor_utils::for_all_instruction_users(*GEP, [&coherent_input_values](Instruction& gep_user) {
+												if (isa<LoadInst>(gep_user)) {
+													coherent_input_values.push_back(&gep_user);
+												} else {
+													llvm::errs() << "unhandled coherent buffer GEP user: " << gep_user << "\n";
+												}
+											});
+										} else {
+											// for all other GEPs, i.e. GEP(0, st-idx, ...), we want to fully handle/propagate the GEP themselves
+											coherent_input_values.push_back(GEP);
+										}
+									}
+								}
+							});
+							if (!coherent_input_values.empty()) {
+								propagate(coherent_input_values);
+							}
 						}
 					}
-				}
-				
-				// no longer need the attribute
-				if (is_metal) {
-					F.removeAttributeAtIndex(attr_arg_idx, "floor_coherent");
 				}
 			}
 			
 			return was_modified;
 		}
 		
+		void propagate(llvm::Value* coherent_input_value) {
+			std::array<llvm::Value*, 1> meh {{ coherent_input_value }};
+			propagate(meh);
+		}
+		
+		void propagate(std::span<llvm::Value*> coherent_input_values) {
+			// recursively go through all users and their users (and so on), and find all loads/stores affected by the argument
+			std::unordered_set<Instruction*> child_instrs;
+			std::vector<Instruction*> load_store_instrs;
+			std::deque<Value*> todo_values(coherent_input_values.begin(), coherent_input_values.end());
+			while (!todo_values.empty()) {
+				auto val = todo_values.front();
+				todo_values.pop_front();
+				libfloor_utils::for_all_instruction_users(*val, [&child_instrs, &todo_values, &load_store_instrs](Instruction& instr) {
+					const auto [_, did_emplace] = child_instrs.emplace(&instr);
+					if (did_emplace) {
+						// we treat load and store instructions as leaf nodes, i.e. no need to recurse further
+						if (!isa<LoadInst>(instr) && !isa<StoreInst>(instr)) {
+							todo_values.emplace_back(&instr);
+						} else {
+							load_store_instrs.emplace_back(&instr);
+						}
+					}
+				});
+			}
+			
+			// handle loads/stores
+			was_modified = !load_store_instrs.empty();
+			for (const auto& child_instr : load_store_instrs) {
+				if (auto load_instr = dyn_cast_or_null<LoadInst>(child_instr); load_instr) {
+					if (is_metal) {
+						handle_coherent_load_metal(*load_instr);
+					} else if (is_vulkan) {
+						handle_coherent_load_vulkan(*load_instr);
+					}
+				} else if (auto store_instr = dyn_cast_or_null<StoreInst>(child_instr); store_instr) {
+					if (is_metal) {
+						handle_coherent_store_metal(*store_instr);
+					} else if (is_vulkan) {
+						handle_coherent_store_vulkan(*store_instr);
+					}
+				}
+			}
+		}
+		
 		void handle_coherent_load_metal(LoadInst& load_instr) {
 			// only handle loads from global/device memory
 			const auto ptr_type = load_instr.getOperand(0)->getType();
-			if (ptr_type->getPointerAddressSpace() != AIRAS_global) {
+			if (auto ptr_as = ptr_type->getPointerAddressSpace(); ptr_as != AIRAS_global && ptr_as != AIRAS_constant) {
 				return;
 			}
 			
@@ -238,7 +309,7 @@ namespace {
 		void handle_coherent_store_metal(StoreInst& store_instr) {
 			// only handle stores to global/device memory
 			const auto ptr_type = store_instr.getOperand(1)->getType();
-			if (ptr_type->getPointerAddressSpace() != AIRAS_global) {
+			if (auto ptr_as = ptr_type->getPointerAddressSpace(); ptr_as != AIRAS_global && ptr_as != AIRAS_constant) {
 				return;
 			}
 			
