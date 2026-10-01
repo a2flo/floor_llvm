@@ -572,6 +572,11 @@ static inline memop_lower_info_t compute_memop_lower_info(llvm::Module& M, memop
 				src = (src_bitcast_op ? src_bitcast_op : src);
 				auto src_type = src->getType();
 				if (src_type != elem_type) {
+					if (!elem_type->isIntOrIntVectorTy()) {
+						ctx.emitError(&memop, "can't handle memset src extension with non-integer type");
+						return {};
+					}
+					
 					auto src_elem_size = M.getDataLayout().getTypeStoreSize(src_type).getFixedValue();
 					if ((elem_size % src_elem_size) != 0u) {
 						ctx.emitError(&memop, "can't handle uneven memset set/src type extension");

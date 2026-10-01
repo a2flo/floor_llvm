@@ -741,7 +741,6 @@ namespace {
 				case Intrinsic::assume:
 				case Intrinsic::memcpy:
 				case Intrinsic::memset:
-				case Intrinsic::memmove:
 				case Intrinsic::fshl:
 				case Intrinsic::fshr:
 				case Intrinsic::dbg_addr:
@@ -913,6 +912,10 @@ namespace {
 				case Intrinsic::vector_reduce_umin:
 				case Intrinsic::vector_reduce_xor:
 					ctx->emitError(&I, "unknown/unhandled vector reduce intrinsic (should have been expanded):\n" + print_instr(I));
+					break;
+					
+				case Intrinsic::memmove:
+					ctx->emitError(&I, "unknown/unhandled memmove intrinsic (should have been expanded):\n" + print_instr(I));
 					break;
 					
 				default:

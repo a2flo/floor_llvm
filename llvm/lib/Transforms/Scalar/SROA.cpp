@@ -4401,6 +4401,92 @@ AllocaInst *SROAPass::rewritePartition(AllocaInst &AI, AllocaSlices &AS,
   return NewAI;
 }
 
+// under certain circumstances where non-power-of-two ranges within a struct alloca aren't fully used (e.g. we copy a struct variable, but only actively use parts of it),
+// SROA might end up splitting the non-power-of-two range into an awkwardly sized array (e.g. [i8 x 6] for uint32_t + uint16_t) that makes further optimizations tricky or impossible,
+// sometimes even leading to invalid (for us) code that we absolutely need to prevent at the source (SROA)
+// -> for these kind of non-power-of-two ranges, add dummy slices consisting of the actual ("unused") member ranges, which will then make SROA choose sane alloca types (e.g. i32 + i16 for the above)
+static inline void fill_npot_holes(AllocaInst& AI, AllocaSlices& AS, const DataLayout& DL, const uint64_t AllocaSize, bool& IsSorted) {
+	// must be a struct
+	const auto alloca_type = AI.getType();
+	if (!alloca_type->isPointerTy() || !alloca_type->getPointerElementType()->isStructTy()) {
+		return;
+	}
+	
+	const auto alloca_st_type = cast<StructType>(alloca_type->getPointerElementType());
+	const StructLayout* st_layout = DL.getStructLayout(alloca_st_type);
+	if (!st_layout || st_layout->getSizeInBytes() != AllocaSize || alloca_st_type->getNumElements() == 0) {
+		// shouldn't happen, but let's be conservative here
+		return;
+	}
+	
+	// flag used ranges
+	SmallBitVector used_sub_slices(AllocaSize, false);
+	SmallDenseMap<uint64_t, Use*, 8> uses_at_offset;
+	Use* full_range_use = nullptr;
+	for (const Slice &S : AS) {
+		if (auto use = S.getUse(); use) {
+			if (uses_at_offset.count(S.beginOffset()) == 0) {
+				uses_at_offset.insert({ S.beginOffset(), S.getUse() });
+			}
+			if (!full_range_use && S.beginOffset() == 0 && S.endOffset() == AllocaSize) {
+				full_range_use = use;
+			}
+			if (isa<LoadInst>(use->getUser()) || isa<StoreInst>(use->getUser())) {
+				used_sub_slices.set(S.beginOffset(), S.endOffset());
+			}
+		}
+	}
+	
+	// flag tail padding as used as well, we don't want/need to handle this
+	const auto last_elem_offset = st_layout->getElementOffset(alloca_st_type->getNumElements() - 1u);
+	const auto last_elem_size = DL.getTypeStoreSize(alloca_st_type->getElementType(alloca_st_type->getNumElements() - 1u));
+	const auto st_actual_end_offset = last_elem_offset + last_elem_size;
+	if (st_actual_end_offset != AllocaSize) {
+		used_sub_slices.set(st_actual_end_offset, AllocaSize);
+	}
+	
+	// iterate over all unused ranges
+	SmallVector<Slice, 4> new_slices;
+	for (int unset_idx = used_sub_slices.find_first_unset(), end_unset_idx = 0; unset_idx != -1;
+		 unset_idx = (uint32_t(end_unset_idx) < AllocaSize ? used_sub_slices.find_next_unset(end_unset_idx) : -1)) {
+		const int next_set_idx = used_sub_slices.find_next(unset_idx);
+		end_unset_idx = (next_set_idx == -1 ? AllocaSize : next_set_idx);
+		const auto range_size = end_unset_idx - unset_idx;
+		
+		// we only want to do this if the slice size is not a power of two and does not cover the whole alloca
+		if (__builtin_popcount(range_size) == 1 || uint32_t(range_size) == AllocaSize) {
+			continue;
+		}
+		
+		// add a new slice for each actual member range
+		const auto member_offsets = st_layout->getMemberOffsets();
+		auto member_offset = uint32_t(unset_idx);
+		while (member_offset < uint32_t(end_unset_idx)) {
+			const auto member_idx = st_layout->getElementContainingOffset(member_offset);
+			const auto next_member_offset = (member_idx + 1 < member_offsets.size() ? member_offsets[member_idx + 1] : AllocaSize);
+			assert(next_member_offset > member_offset);
+			const auto member_size = next_member_offset - member_offset;
+			
+			// we need a "use" for the slice to actually be considered alive and well-defined,
+			// it is however unlikely that we have an actual use for this member offset, but still try
+			// -> fall back to the first full range use otherwise
+			const auto use_iter = uses_at_offset.find(member_offset);
+			const auto use = (use_iter != uses_at_offset.end() ? use_iter->second : full_range_use);
+			if (use) {
+				new_slices.push_back(Slice(member_offset, member_offset + member_size, use, false));
+			}
+			// else: if we have neither a full range use nor a specific use, just ignore this slice
+			
+			member_offset += member_size;
+		}
+	}
+	
+	if (!new_slices.empty()) {
+		AS.insert(new_slices);
+		IsSorted = false;
+	}
+}
+
 /// Walks the slices of an alloca and form partitions based on them,
 /// rewriting each of their uses.
 bool SROAPass::splitAlloca(AllocaInst &AI, AllocaSlices &AS) {
@@ -4448,6 +4534,8 @@ bool SROAPass::splitAlloca(AllocaInst &AI, AllocaSlices &AS) {
         IsSorted = false;
       }
     }
+
+    fill_npot_holes(AI, AS, DL, AllocaSize, IsSorted);
   }
   else {
     // We only allow whole-alloca splittable loads and stores
