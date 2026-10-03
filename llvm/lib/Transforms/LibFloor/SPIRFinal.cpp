@@ -86,6 +86,7 @@ namespace {
 		LLVMContext* ctx { nullptr };
 		Function* func { nullptr };
 		Instruction* alloca_insert { nullptr };
+		bool is_vulkan { false };
 		bool was_modified { false };
 		
 		SPIRFinal() : FunctionPass(ID) {
@@ -101,6 +102,7 @@ namespace {
 			ctx = &M->getContext();
 			func = &F;
 			builder = std::make_shared<llvm::IRBuilder<>>(*ctx);
+			is_vulkan = (Triple(M->getTargetTriple()).getEnvironment() == llvm::Triple::EnvironmentType::Vulkan);
 			
 			// visit everything in this function
 			was_modified = false; // reset every time
@@ -293,7 +295,8 @@ namespace {
 			if(!SI.getType()->isIntegerTy()) return;
 			
 			const auto bit_width = SI.getType()->getIntegerBitWidth();
-			if(M->getDataLayout().isLegalInteger(bit_width) || bit_width == 1 /* always allow bool */) {
+			if (M->getDataLayout().isLegalInteger(bit_width) || bit_width == 1 /* always allow bool */ ||
+				(bit_width == 64 && is_vulkan /* always allow 64-bit on Vulkan */)) {
 				return;
 			}
 			

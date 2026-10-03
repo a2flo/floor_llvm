@@ -4453,13 +4453,22 @@ static inline void fill_npot_holes(AllocaInst& AI, AllocaSlices& AS, const DataL
 		end_unset_idx = (next_set_idx == -1 ? AllocaSize : next_set_idx);
 		const auto range_size = end_unset_idx - unset_idx;
 		
-		// we only want to do this if the slice size is not a power of two and does not cover the whole alloca
-		if (__builtin_popcount(range_size) == 1 || uint32_t(range_size) == AllocaSize) {
+		// we only want to do this if the slice size does not cover the whole alloca, ...
+		if (uint32_t(range_size) == AllocaSize) {
+			continue;
+		}
+		
+		// ... and the respective member itself doesn't already cover the whole range
+		const auto member_offsets = st_layout->getMemberOffsets();
+		const auto first_member_offset = uint32_t(unset_idx);
+		const auto first_member_idx = st_layout->getElementContainingOffset(first_member_offset);
+		const auto second_member_offset = (first_member_idx + 1 < member_offsets.size() ? member_offsets[first_member_idx + 1] : AllocaSize);
+		const auto first_member_size = second_member_offset - first_member_offset;
+		if (first_member_size == uint32_t(range_size)) {
 			continue;
 		}
 		
 		// add a new slice for each actual member range
-		const auto member_offsets = st_layout->getMemberOffsets();
 		auto member_offset = uint32_t(unset_idx);
 		while (member_offset < uint32_t(end_unset_idx)) {
 			const auto member_idx = st_layout->getElementContainingOffset(member_offset);
