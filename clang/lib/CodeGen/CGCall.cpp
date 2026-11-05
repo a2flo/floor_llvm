@@ -90,6 +90,10 @@ CanQualType CodeGenTypes::DeriveThisType(const CXXRecordDecl *RD,
   else
     RecTy = Context.VoidTy;
 
+  // Explicit MSL method qualifiers are part of the implicit-object ABI.
+  // Keep unqualified wrapper methods on the fork's existing default ABI.
+  if (CGM.getLangOpts().Metal && MD && MD->getMethodQualifiers().hasAddressSpace())
+    RecTy = Context.getAddrSpaceQualType(RecTy, MD->getMethodQualifiers().getAddressSpace());
 #if 0 // we don't want this
   if (MD)
     RecTy = Context.getAddrSpaceQualType(RecTy, MD->getMethodQualifiers().getAddressSpace());
@@ -466,6 +470,35 @@ CodeGenTypes::arrangeCXXConstructorCall(const CallArgList &args,
                                  ParamInfos, Required);
 }
 
+// The AST's explicit MSL builtin parameters replace, rather than duplicate,
+// their floor implicit parameters. Count unique semantics even for invalid
+// source, so diagnostic emission cannot underflow the ABI count.
+static bool hasExplicitMetalVertexBuiltin(const FunctionDecl *FD, StringRef Name) {
+  for (const auto *P : FD->parameters())
+    if (const auto *A = P->getAttr<MetalVertexBuiltinAttr>())
+      if (StringRef(A->getSpelling()) == Name) return true;
+  return false;
+}
+
+static bool hasExplicitMetalThreadBuiltin(const FunctionDecl *FD, StringRef Name) {
+  for (const auto *P : FD->parameters())
+    if (const auto *A = P->getAttr<MetalThreadBuiltinAttr>())
+      if (StringRef(A->getSpelling()) == Name) return true;
+  return false;
+}
+
+static bool hasExplicitMetalFrontFacing(const FunctionDecl *FD) {
+  for (const auto *P : FD->parameters())
+    if (P->hasAttr<MetalFrontFacingAttr>()) return true;
+  return false;
+}
+
+static bool hasExplicitMetalPositionInPatch(const FunctionDecl *FD) {
+  for (const auto *P : FD->parameters())
+    if (P->hasAttr<MetalPositionInPatchAttr>()) return true;
+  return false;
+}
+
 uint32_t CodeGenTypes::getMetalVulkanImplicitArgCount(const FunctionDecl* FD) const {
   if (!FD) return 0;
 
@@ -479,13 +512,18 @@ uint32_t CodeGenTypes::getMetalVulkanImplicitArgCount(const FunctionDecl* FD) co
   if (LangOpts.Metal) {
     const uint32_t printf_arg = (CodeGenOpts.MetalSoftPrintf > 0 ? 1 : 0);
     if (FD->hasAttr<ComputeKernelAttr>() || FD->hasAttr<GraphicsTessellationControlShaderAttr>()) {
-      return 10 + printf_arg;
+      return 10 + printf_arg
+             - unsigned(hasExplicitMetalThreadBuiltin(FD, "thread_position_in_threadgroup"))
+             - unsigned(hasExplicitMetalThreadBuiltin(FD, "threadgroup_position_in_grid"))
+             - unsigned(hasExplicitMetalThreadBuiltin(FD, "thread_index_in_simdgroup"));
     } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
-      return 4 + printf_arg;
+      return 4 + printf_arg - unsigned(hasExplicitMetalVertexBuiltin(FD, "vertex_id"))
+             - unsigned(hasExplicitMetalVertexBuiltin(FD, "instance_id"))
+             - unsigned(hasExplicitMetalVertexBuiltin(FD, "base_instance"));
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
-      return 2 + printf_arg + (CodeGenOpts.GraphicsPrimitiveID ? 1 : 0) + (CodeGenOpts.GraphicsBarycentricCoord ? 1 : 0);
+      return 2 + printf_arg - unsigned(hasExplicitMetalFrontFacing(FD)) + (CodeGenOpts.GraphicsPrimitiveID ? 1 : 0) + (CodeGenOpts.GraphicsBarycentricCoord ? 1 : 0);
     } else if (FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
-      return 4 + printf_arg;
+      return 4 + printf_arg - unsigned(hasExplicitMetalPositionInPatch(FD));
     } else if (FD->hasAttr<GraphicsTaskShaderAttr>() || FD->hasAttr<GraphicsMeshShaderAttr>()) {
       return 10 + printf_arg;
     }
@@ -577,21 +615,27 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
       auto int3_type = Ctx.getExtVectorType(Ctx.IntTy, 3);
       add_arg(int3_type, "__metal__global_id__");
       add_arg(int3_type, "__metal__global_size__");
-      add_arg(int3_type, "__metal__local_id__");
+      if (!hasExplicitMetalThreadBuiltin(FD, "thread_position_in_threadgroup"))
+        add_arg(int3_type, "__metal__local_id__");
       add_arg(int3_type, "__metal__local_size__");
-      add_arg(int3_type, "__metal__group_id__");
+      if (!hasExplicitMetalThreadBuiltin(FD, "threadgroup_position_in_grid"))
+        add_arg(int3_type, "__metal__group_id__");
       add_arg(int3_type, "__metal__group_size__");
       // SIMD-group / sub-group ids
       add_arg(Ctx.IntTy, "__metal__sub_group_id__");
-      add_arg(Ctx.IntTy, "__metal__sub_group_local_id__");
+      if (!hasExplicitMetalThreadBuiltin(FD, "thread_index_in_simdgroup"))
+        add_arg(Ctx.IntTy, "__metal__sub_group_local_id__");
       add_arg(Ctx.IntTy, "__metal__sub_group_size__");
       add_arg(Ctx.IntTy, "__metal__num_sub_groups__");
     } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
       // only vertex id and instance id for now:
-      add_arg(Ctx.IntTy, "__metal__vertex_id__");
+      if (!hasExplicitMetalVertexBuiltin(FD, "vertex_id"))
+        add_arg(Ctx.IntTy, "__metal__vertex_id__");
       add_arg(Ctx.IntTy, "__metal__base_vertex_id__");
-      add_arg(Ctx.IntTy, "__metal__instance_id__");
-      add_arg(Ctx.IntTy, "__metal__base_instance_id__");
+      if (!hasExplicitMetalVertexBuiltin(FD, "instance_id"))
+        add_arg(Ctx.IntTy, "__metal__instance_id__");
+      if (!hasExplicitMetalVertexBuiltin(FD, "base_instance"))
+        add_arg(Ctx.IntTy, "__metal__base_instance_id__");
     } else if (FD->hasAttr<GraphicsFragmentShaderAttr>()) {
       // optional: primitive id and barycentric coord
       if (CodeGenOpts.GraphicsPrimitiveID) {
@@ -604,15 +648,20 @@ void CodeGenTypes::handleMetalVulkanEntryFunction(CanQualType* FTy, FunctionArgL
 
       auto float2_type = Ctx.getExtVectorType(Ctx.FloatTy, 2);
       add_arg(float2_type, "__metal__point_coord__");
-      add_arg(Ctx.BoolTy, "__metal__front_facing__");
+      if (!hasExplicitMetalFrontFacing(FD))
+        add_arg(Ctx.BoolTy, "__metal__front_facing__");
     } else if (FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>()) {
       // patch id, instance id and position-in-patch:
       add_arg(Ctx.IntTy, "__metal__patch_id__");
       add_arg(Ctx.IntTy, "__metal__instance_id__");
       add_arg(Ctx.IntTy, "__metal__base_instance_id__");
-      // TODO: figure out a way to support both triangles and quads! -> for now, triangle only
-      auto float3_type = Ctx.getExtVectorType(Ctx.FloatTy, 3);
-      add_arg(float3_type, "__metal__position_in_patch__");
+      if (!hasExplicitMetalPositionInPatch(FD)) {
+        const auto *Patch = FD->getAttr<GraphicsTessellationPatchAttr>();
+        const bool IsQuad = Patch && Patch->getPatchPrimitive() ==
+            GraphicsTessellationPatchAttr::PatchQuad;
+        add_arg(Ctx.getExtVectorType(Ctx.FloatTy, IsQuad ? 2 : 3),
+                "__metal__position_in_patch__");
+      }
     }
   } else if(LangOpts.Vulkan) {
     if (CodeGenOpts.VulkanSoftPrintf > 0) {

@@ -12,19 +12,23 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/Triple.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Bitcode/BitcodeWriterPass.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "../Writer140/ValueEnumerator140.h"
 #include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/VersionTuple.h"
+#include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/LibFloor/MetalTypes.h"
 #include "llvm/Transforms/LibFloor/FloorUtils.h"
@@ -34,6 +38,7 @@
 #include "bzip2/bzlib.h"
 #include "tar/microtar.h"
 #include <string>
+#include <limits>
 #include <unordered_set>
 #include <unordered_map>
 #include <random>
@@ -182,6 +187,7 @@ struct metallib_program_info {
     } tess;
 
     std::vector<vertex_attribute> vertex_attributes;
+    std::vector<function_constant> function_constants;
 
     // reflection flatbuffer data
     std::vector<uint8_t> reflection_data;
@@ -355,19 +361,6 @@ struct metallib_program_info {
   vector<entry> entries;
 };
 
-//
-static bool is_used_in_function(const Function *F, const GlobalVariable *GV) {
-  bool used = false;
-  libfloor_utils::for_all_instruction_users(
-      *GV,
-      [&used](const Instruction &) {
-        // always true with restriction below
-        used = true;
-      },
-      F /* restrict to this function */);
-  return used;
-}
-
 // version -> { AIR version, language version }
 static const unordered_map<uint32_t,
                            pair<array<uint32_t, 3>, array<uint32_t, 3>>>
@@ -456,6 +449,207 @@ compress_source_archive(const void *archive_ptr, const uint32_t archive_size) {
     return {nullptr, 0};
   }
   return {std::move(dst), dst_len};
+}
+
+// Public/private metadata lengths exclude the four-byte length prefix.
+// Derive the payload length from emitted bytes, including ENDT and all strings,
+// rather than duplicate the serializer's variable-length arithmetic.
+static void finish_metadata_length(std::string &block) {
+  if (block.size() < 4 || block.size() - 4 > std::numeric_limits<uint32_t>::max())
+    report_fatal_error("Metal metadata block length is out of range");
+  const auto size = static_cast<uint32_t>(block.size() - 4);
+  for (unsigned i = 0; i != 4; ++i)
+    block[i] = static_cast<char>((size >> (8 * i)) & 0xff);
+}
+
+// A library-wide constructor is not evidence that a particular entry uses a
+// function constant. Find uses in the entry's call graph before GlobalOpt sees
+// llvm.global_ctors, which otherwise keeps every initializer alive.
+static bool collect_entry_functions(Function &Entry,
+                                    SmallPtrSetImpl<const Function *> &Functions) {
+  SmallVector<const Function *, 16> Worklist{&Entry};
+  while (!Worklist.empty()) {
+    const Function *F = Worklist.pop_back_val();
+    if (!Functions.insert(F).second)
+      continue;
+    for (const BasicBlock &BB : *F)
+      for (const Instruction &I : BB)
+        if (const auto *Call = dyn_cast<CallBase>(&I)) {
+          if (Call->isInlineAsm())
+            continue;
+          const auto *Callee = dyn_cast<Function>(Call->getCalledOperand()->stripPointerCasts());
+          if (!Callee)
+            return false; // An indirect call may reach a function using any constant.
+          if (!Callee->isDeclaration())
+            Worklist.push_back(Callee);
+        }
+  }
+  return true;
+}
+
+static bool used_by_entry(const GlobalVariable &GV,
+                          const SmallPtrSetImpl<const Function *> &Functions) {
+  SmallVector<const Value *, 16> Worklist{&GV};
+  SmallPtrSet<const Value *, 32> Seen;
+  while (!Worklist.empty()) {
+    const Value *Current = Worklist.pop_back_val();
+    if (!Seen.insert(Current).second)
+      continue;
+    for (const User *User : Current->users()) {
+      if (const auto *I = dyn_cast<Instruction>(User)) {
+        if (Functions.count(I->getFunction()))
+          return true;
+      } else if (const auto *C = dyn_cast<Constant>(User)) {
+        // Includes constant expressions, aliases and globals initialized with
+        // a pointer to this constant. Follow their instruction users as well.
+        Worklist.push_back(C);
+      }
+    }
+  }
+  return false;
+}
+
+static void collect_entry_predicates(const MDNode &Node,
+    SmallPtrSetImpl<const MDNode *> &Visited,
+    SmallPtrSetImpl<const GlobalVariable *> &Predicates,
+    std::unordered_set<std::string> &Names) {
+  if (!Visited.insert(&Node).second)
+    return;
+  for (unsigned I = 0; I < Node.getNumOperands(); ++I) {
+    auto *Operand = Node.getOperand(I).get();
+    if (const auto *Key = dyn_cast_or_null<MDString>(Operand);
+        Key && Key->getString() == "air.function_constant" && I + 1 < Node.getNumOperands()) {
+      if (const auto *Predicate = dyn_cast_or_null<MDNode>(Node.getOperand(I + 1).get());
+          Predicate && Predicate->getNumOperands() == 3) {
+        if (const auto *Value = dyn_cast_or_null<ConstantAsMetadata>(Predicate->getOperand(0).get()))
+          if (const auto *GV = dyn_cast<GlobalVariable>(Value->getValue()))
+            Predicates.insert(GV);
+        if (const auto *Name = dyn_cast_or_null<MDString>(Predicate->getOperand(2).get()))
+          Names.insert(Name->getString().str());
+      }
+    }
+    if (const auto *Child = dyn_cast_or_null<MDNode>(Operand))
+      collect_entry_predicates(*Child, Visited, Predicates, Names);
+  }
+}
+
+static void replace_global_array(GlobalVariable &Old, ArrayRef<Constant *> Elements) {
+  auto *Type = ArrayType::get(Old.getValueType()->getArrayElementType(), Elements.size());
+  auto *Initializer = ConstantArray::get(Type, Elements);
+  auto *Replacement = new GlobalVariable(Type, Old.isConstant(), Old.getLinkage(),
+      Initializer, "", Old.getThreadLocalMode());
+  Old.getParent()->getGlobalList().insert(Old.getIterator(), Replacement);
+  Replacement->takeName(&Old);
+  Replacement->setSection(Old.getSection());
+  if (auto Alignment = Old.getAlign())
+    Replacement->setAlignment(Alignment);
+  if (!Old.use_empty()) {
+    Constant *AsOldType = Replacement;
+    if (AsOldType->getType() != Old.getType())
+      AsOldType = ConstantExpr::getBitCast(AsOldType, Old.getType());
+    Old.replaceAllUsesWith(AsOldType);
+  }
+  Old.eraseFromParent();
+}
+
+static void prepare_function_constants(Module &M, Function &Entry,
+    SmallPtrSetImpl<const GlobalVariable *> &Selected) {
+  const auto *Constants = M.getNamedMetadata("air.function_constants");
+  if (!Constants)
+    return;
+  SmallPtrSet<const Function *, 32> Reachable;
+  const bool DirectCallsOnly = collect_entry_functions(Entry, Reachable);
+  SmallPtrSet<const MDNode *, 32> Visited;
+  SmallPtrSet<const GlobalVariable *, 8> Predicates;
+  std::unordered_set<std::string> PredicateNames;
+  for (const char *Kind : {"air.kernel", "air.vertex", "air.fragment", "air.object", "air.mesh"})
+    if (const auto *Entries = M.getNamedMetadata(Kind))
+      for (const auto *Node : Entries->operands()) {
+        const auto *FunctionMD = Node->getNumOperands() ?
+            dyn_cast_or_null<ValueAsMetadata>(Node->getOperand(0).get()) : nullptr;
+        if (FunctionMD && FunctionMD->getValue() == &Entry)
+          collect_entry_predicates(*Node, Visited, Predicates, PredicateNames);
+      }
+
+  std::unordered_set<std::string> SelectedCtorNames;
+  for (const auto *Node : Constants->operands()) {
+    if (Node->getNumOperands() != 5)
+      continue; // The writer reports malformed entries before filtering them.
+    const auto *Value = dyn_cast_or_null<ConstantAsMetadata>(Node->getOperand(0).get());
+    const auto *Placeholder = Value ? dyn_cast<GlobalVariable>(Value->getValue()) : nullptr;
+    const auto *Index = mdconst::dyn_extract_or_null<ConstantInt>(Node->getOperand(3).get());
+    const auto *Name = dyn_cast_or_null<MDString>(Node->getOperand(2).get());
+    if (!Placeholder || !Index || Index->getValue().getActiveBits() > 16)
+      continue;
+    const std::string CtorName = "__metal_fc_init_" + std::to_string(Index->getZExtValue());
+    const Function *Ctor = M.getFunction(CtorName);
+    const GlobalVariable *Backing = nullptr;
+    if (Ctor)
+      for (const BasicBlock &BB : *Ctor)
+        for (const Instruction &I : BB)
+          if (const auto *Store = dyn_cast<StoreInst>(&I))
+            Backing = dyn_cast<GlobalVariable>(Store->getPointerOperand()->stripPointerCasts());
+    const bool Used = !DirectCallsOnly || used_by_entry(*Placeholder, Reachable) ||
+        (Backing && used_by_entry(*Backing, Reachable)) ||
+        (Name && PredicateNames.count(Name->getString().str()));
+    if (Used) {
+      Selected.insert(Placeholder);
+      SelectedCtorNames.insert(CtorName);
+    }
+  }
+
+  // The frontend places conditional-interface predicate globals in
+  // llvm.compiler.used. Drop other entries' predicates from this clone too,
+  // so removing their constructors can actually remove their storage.
+  if (auto *CompilerUsed = M.getGlobalVariable("llvm.compiler.used"))
+    if (const auto *Array = dyn_cast_or_null<ConstantArray>(CompilerUsed->getInitializer())) {
+      SmallVector<Constant *, 16> Kept;
+      for (unsigned I = 0; I < Array->getNumOperands(); ++I) {
+        auto *Item = cast<Constant>(Array->getOperand(I));
+        const auto *GV = dyn_cast<GlobalVariable>(Item->stripPointerCasts());
+        if (!GV || !GV->getName().startswith("__metal_implicit_fc_pred") ||
+            Predicates.count(GV))
+          Kept.push_back(Item);
+      }
+      if (Kept.size() != Array->getNumOperands()) {
+        // GlobalOpt's collectUsedGlobalVariables expects a nonempty array.
+        // An empty llvm.compiler.used has no effect and must be removed.
+        if (Kept.empty()) {
+          CompilerUsed->eraseFromParent();
+        } else {
+          replace_global_array(*CompilerUsed, Kept);
+        }
+      }
+    }
+
+  auto *Ctors = M.getGlobalVariable("llvm.global_ctors");
+  if (!Ctors || !Ctors->hasInitializer())
+    return;
+  const auto *Array = dyn_cast<ConstantArray>(Ctors->getInitializer());
+  if (!Array)
+    return;
+  SmallVector<Constant *, 16> Kept;
+  for (unsigned I = 0; I < Array->getNumOperands(); ++I) {
+    auto *Item = cast<Constant>(Array->getOperand(I));
+    const auto *Fields = dyn_cast<ConstantStruct>(Item);
+    const auto *Ctor = Fields ? dyn_cast<Function>(Fields->getOperand(1)->stripPointerCasts()) : nullptr;
+    bool Keep = true;
+    if (Ctor && Ctor->getName().startswith("__metal_fc_init_"))
+      Keep = SelectedCtorNames.count(Ctor->getName().str()) != 0;
+    else if (Ctor && Ctor->getName().startswith("__metal_fc_pred_init")) {
+      Keep = false;
+      for (const BasicBlock &BB : *Ctor)
+        for (const Instruction &Inst : BB)
+          if (const auto *Store = dyn_cast<StoreInst>(&Inst))
+            if (const auto *GV = dyn_cast<GlobalVariable>(Store->getPointerOperand()->stripPointerCasts()))
+              Keep |= Predicates.count(GV) != 0;
+    }
+    if (Keep)
+      Kept.push_back(Item);
+  }
+  if (Kept.size() == Array->getNumOperands())
+    return;
+  replace_global_array(*Ctors, Kept);
 }
 
 //
@@ -775,16 +969,10 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     // clone the module with the current entry point function and any global
     // vars that we need
     ValueToValueMapTy VMap;
-    auto cloned_mod = CloneModule(M, VMap, [&func](const GlobalValue *GV) {
-      if (GV == func) {
-        return true;
-      }
-      // only clone global vars if they are needed in a specific function
-      if (const GlobalVariable *GVar = dyn_cast<GlobalVariable>(GV)) {
-        return is_used_in_function(func, GVar);
-      }
-      return false;
-    });
+    auto cloned_mod = CloneModule(M, VMap);
+    SmallPtrSet<const GlobalVariable *, 8> selected_function_constants;
+    prepare_function_constants(*cloned_mod, *cloned_mod->getFunction(func->getName()),
+                               selected_function_constants);
 
     // metallib uses the function name as the source file name
     cloned_mod->setSourceFileName(func->getName());
@@ -796,25 +984,32 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
         "128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:"
         "1024-n8:16:32");
 
-    // remove all unused functions and global vars, since CloneModule only sets
-    // unused vars to external linkage and unused funcs are declarations only
-    // NOTE: this also removes entry points that are now unused (metadata is
-    // removed later)
-    for (auto I = cloned_mod->begin(), E = cloned_mod->end(); I != E;) {
-      Function &F = *I++;
-      if (F.isDeclaration() && F.use_empty()) {
-        F.eraseFromParent();
-        continue;
-      }
-    }
+    // Internalize and remove globals unused by this entry, including the
+    // function constant initializers removed from llvm.global_ctors above.
+    llvm::legacy::PassManager mpm;
 
-    for (auto I = cloned_mod->global_begin(), E = cloned_mod->global_end();
-         I != E;) {
-      GlobalVariable &GV = *I++;
-      if (GV.isDeclaration() && GV.use_empty()) {
-        GV.eraseFromParent();
-        continue;
+    mpm.add(createInternalizePass([&func](const GlobalValue& GV) -> bool {
+        return GV.getName() == func->getName();
+    }));
+
+    mpm.add(createGlobalOptimizerPass());
+
+    mpm.run(*cloned_mod);
+
+    // * strip floor_* calling convention from all functions and their users (replace it with C CC)
+    for (auto func_iter = cloned_mod->begin(); func_iter != cloned_mod->end();) {
+      auto& func = *func_iter;
+
+      if (func.getCallingConv() != CallingConv::C) {
+        func.setCallingConv(CallingConv::C);
+        for (auto user : func.users()) {
+          if (auto CB = dyn_cast<CallBase>(user)) {
+            CB->setCallingConv(CallingConv::C);
+          }
+        }
       }
+
+      ++func_iter;
     }
 
     // clean up metadata
@@ -1032,6 +1227,62 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       }
     }
 
+    // function constants
+    if (auto fc_md = cloned_mod->getNamedMetadata("air.function_constants");
+        fc_md && fc_md->getNumOperands() > 0) {
+      vector<MDNode *> kept_fcs;
+
+      for (auto op_iter = fc_md->op_begin();
+           op_iter != fc_md->op_end(); ++op_iter) {
+        auto node = dyn_cast_or_null<MDNode>(*op_iter);
+        // Named metadata is not shape-checked by the IR verifier. Validate
+        // before indexing; reflection's later validation cannot protect this loop.
+        if (!node || node->getNumOperands() != 5u) {
+          M.getContext().emitError("invalid Metal function constant metadata");
+          return false;
+        }
+        auto cnst_idx =
+            dyn_cast_or_null<ConstantAsMetadata>(node->getOperand(3));
+        auto cnst_type =
+            dyn_cast_or_null<MDString>(node->getOperand(1));
+        auto cnst_name =
+            dyn_cast_or_null<MDString>(node->getOperand(2));
+        if (!cnst_idx || !cnst_type || !cnst_name) {
+          M.getContext().emitError("invalid Metal function constant metadata");
+          return false;
+        }
+        auto cnst_idx_int =
+            dyn_cast_or_null<ConstantInt>(cnst_idx->getValue());
+        if (!cnst_idx_int || cnst_idx_int->getValue().getActiveBits() > 16u) {
+          M.getContext().emitError("invalid Metal function constant metadata");
+          return false;
+        }
+        const auto *value = dyn_cast_or_null<ConstantAsMetadata>(node->getOperand(0).get());
+        const auto *placeholder = value ? dyn_cast<GlobalVariable>(value->getValue()) : nullptr;
+        if (!placeholder || !selected_function_constants.count(placeholder))
+          continue;
+
+        kept_fcs.push_back(node);
+        function_constant cnst{
+            .name = cnst_name->getString().str(),
+            .index = (uint32_t)cnst_idx_int->getZExtValue(),
+            .type = data_type_from_string(cnst_type->getString().str()),
+            .active = true
+        };
+        entry.function_constants.emplace_back(std::move(cnst));
+      }
+
+      fc_md->dropAllReferences();
+      if (kept_fcs.empty()) {
+        fc_md->eraseFromParent();
+      }
+      else {
+        for (auto node : kept_fcs) {
+          fc_md->addOperand(node);
+        }
+      }
+    }
+
     // extract metadata and build reflection data from it
     entry.reflection_data = metal::reflection::create_reflection(*cloned_mod);
     if (entry.reflection_data.empty()) {
@@ -1056,20 +1307,56 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
     static const uint32_t tag_length = sizeof(TAG_TYPE);
 
     raw_string_ostream ext_md_stream{entry.extended_md_data};
-    uint32_t ext_md_length = tag_length + sizeof(uint32_t);
+    const uint32_t length_placeholder = 0;
+
+    uint16_t attr_count = 0;
+    uint16_t vatt_len = 0;
+    uint16_t vaty_len = 0;
+
     if (!entry.vertex_attributes.empty()) {
-      const auto attr_count = (uint16_t)entry.vertex_attributes.size();
-      ext_md_length += 2u * (tag_length + sizeof(uint16_t)); // VATT and VATY
-      uint16_t vatt_len = sizeof(uint16_t) /* attr count */ +
-                          2u * attr_count /* per-attr info */;
-      uint16_t vaty_len =
+      attr_count = (uint16_t)entry.vertex_attributes.size();
+      vatt_len =
+          sizeof(uint16_t) /* attr count */ +
+          2u * attr_count /* per-attr info */;
+      vaty_len =
           sizeof(uint16_t) /* attr count */ + attr_count /* per-attr type */;
       for (const auto &vattr : entry.vertex_attributes) {
         vatt_len += vattr.name.size() + 1u;
       }
-      ext_md_length += vatt_len + vaty_len;
-      ext_md_stream.write((const char *)&ext_md_length, sizeof(uint32_t));
+    }
 
+    uint16_t cnst_count = 0;
+    uint16_t cnst_len = 0;
+
+    if (!entry.function_constants.empty()) {
+      // CNST has 16-bit count and payload-length fields. Do not let either
+      // wrap while still writing the complete records into the container.
+      constexpr size_t max_cnst_field = std::numeric_limits<uint16_t>::max();
+      const size_t count = entry.function_constants.size();
+      auto reject_cnst_size = [&]() {
+        M.getContext().emitError("Metal function constant metadata exceeds CNST limits");
+        return false;
+      };
+      if (count > max_cnst_field)
+        return reject_cnst_size();
+      size_t length = sizeof(uint16_t) +
+          (sizeof(uint8_t) + sizeof(uint16_t) + sizeof(uint8_t)) * count;
+      if (length > max_cnst_field)
+        return reject_cnst_size();
+      for (const auto &cnst : entry.function_constants) {
+        // Include the terminator without allowing size_t addition to overflow.
+        if (length == max_cnst_field ||
+            cnst.name.size() > max_cnst_field - length - 1u)
+          return reject_cnst_size();
+        length += cnst.name.size() + 1u;
+      }
+      cnst_count = static_cast<uint16_t>(count);
+      cnst_len = static_cast<uint16_t>(length);
+    }
+
+    ext_md_stream.write((const char *)&length_placeholder, sizeof(length_placeholder));
+
+    if (!entry.vertex_attributes.empty()) {
       static const auto vatt_tag = TAG_TYPE::VATT;
       static const auto vaty_tag = TAG_TYPE::VATY;
 
@@ -1094,22 +1381,34 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
       for (const auto &vattr : entry.vertex_attributes) {
         ext_md_stream.write((const char *)&vattr.type, sizeof(DATA_TYPE));
       }
-    } else {
-      ext_md_stream.write((const char *)&ext_md_length, sizeof(uint32_t));
     }
+
+    if (!entry.function_constants.empty()) {
+      static const auto cnst_tag = TAG_TYPE::CNST;
+
+      // CNST
+      ext_md_stream.write((const char *)&cnst_tag, tag_length);
+      ext_md_stream.write((const char *)&cnst_len, sizeof(cnst_len));
+      ext_md_stream.write((const char *)&cnst_count, sizeof(cnst_count));
+      for (const auto& cnst : entry.function_constants) {
+        ext_md_stream.write(cnst.name.c_str(), cnst.name.size());
+        ext_md_stream.write('\0');
+
+        ext_md_stream.write((const char *)&cnst.type, sizeof(DATA_TYPE));
+
+        uint16_t index = (uint16_t)cnst.index;
+        ext_md_stream.write((const char *)&index, sizeof(index));
+        ext_md_stream.write((const char *)&cnst.active, sizeof(uint8_t));
+      }
+    }
+
     ext_md_stream.write((const char *)&end_tag, tag_length);
     ext_md_stream.flush();
+    finish_metadata_length(entry.extended_md_data);
 
     raw_string_ostream dbg_stream{entry.debug_data};
+    dbg_stream.write((const char *)&length_placeholder, sizeof(length_placeholder));
     if (emit_debug_info) {
-      const uint32_t dep_length =
-          (dependent_bc_file_name.empty()
-               ? 0
-               : tag_length + 2 + dependent_bc_file_name.size());
-      const uint32_t dbg_length = 4u /* len */ + tag_length + 2 + 4 /* line */ +
-                                  src_file_name_length + dep_length +
-                                  tag_length;
-      dbg_stream.write((const char *)&dbg_length, sizeof(dbg_length));
       dbg_stream.write((const char *)&dbg_tag, tag_length);
       const uint16_t src_file_info_len = uint16_t(4u + src_file_name_length);
       dbg_stream.write((const char *)&src_file_info_len,
@@ -1130,12 +1429,10 @@ bool llvm::WriteMetalLibToFile(Module &M, raw_ostream &OS) {
         dbg_stream.write(dependent_bc_file_name.c_str(), dep_info_length - 1u);
         dbg_stream.write('\0');
       }
-    } else {
-      const uint32_t dbg_length = 4u /* len */ + tag_length;
-      dbg_stream.write((const char *)&dbg_length, sizeof(dbg_length));
     }
     dbg_stream.write((const char *)&end_tag, tag_length);
     dbg_stream.flush();
+    finish_metadata_length(entry.debug_data);
 
     // finish
     entry.update_length();

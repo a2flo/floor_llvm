@@ -2186,6 +2186,12 @@ TypeInfo ASTContext::getTypeInfoImpl(const Type *T) const {
       Align = Target->getPointerAlign(0);
       break;
     case BuiltinType::OCLSampler: {
+      if (getLangOpts().Metal) {
+        AS = getTargetAddressSpace(LangAS::opencl_constant);
+        Width = Target->getPointerWidth(AS);
+        Align = Target->getPointerAlign(AS);
+        break;
+      }
       // NOTE: samplers are modeled as integers for now.
       Width = Target->getIntWidth();
       Align = Target->getIntAlign();

@@ -915,15 +915,13 @@ bool CodeGenModule::isPaddedAtomicType(const AtomicType *type) {
   return Context.getTypeSize(type) != Context.getTypeSize(type->getValueType());
 }
 
-/// image type cache for structs with 1 image field and 2 image fields (used below)
-static std::unordered_map<COMPUTE_IMAGE_TYPE, llvm::StructType*> image_type_cache_1if;
-static std::unordered_map<COMPUTE_IMAGE_TYPE, llvm::StructType*> image_type_cache_2if;
-
 /// we need to ensure that image-based types are always unique (for Metal)
 /// -> if this RecordDecl contains an opaque (image) type, check the existing cache of converted image types and
 ///    set Entry to a matching StructType if there is one + return { true-if-new, cache-func } if this is an image type
 static std::pair<bool, std::function<void(llvm::StructType*)>>
-handle_image_rdecl(ASTContext& Context, const RecordDecl *RD, llvm::StructType *&Entry) {
+handle_image_rdecl(ASTContext& Context, const RecordDecl *RD, llvm::StructType *&Entry,
+                   llvm::DenseMap<uint64_t, llvm::StructType *> &OneFieldCache,
+                   llvm::DenseMap<uint64_t, llvm::StructType *> &TwoFieldCache) {
 	if (Entry || !Context.getLangOpts().Metal) {
 		return { false, {} };
 	}
@@ -975,11 +973,10 @@ handle_image_rdecl(ASTContext& Context, const RecordDecl *RD, llvm::StructType *
 		COMPUTE_IMAGE_TYPE::FLAG_MSAA
 	};
 	const auto image_type = (COMPUTE_IMAGE_TYPE)arg_0.getAsIntegral().getZExtValue();
-	const auto masked_image_type = image_type & opaque_image_mask;
+	const auto masked_image_type = static_cast<uint64_t>(image_type & opaque_image_mask);
 	
 	// check if we have a cached entry, return it if so
-	std::unordered_map<COMPUTE_IMAGE_TYPE, llvm::StructType*>& cache =
-		(active_field_count == 1 ? image_type_cache_1if : image_type_cache_2if);
+	auto &cache = (active_field_count == 1 ? OneFieldCache : TwoFieldCache);
 	auto iter = cache.find(masked_image_type);
 	if (iter != cache.end()) {
 		Entry = iter->second;
@@ -987,10 +984,8 @@ handle_image_rdecl(ASTContext& Context, const RecordDecl *RD, llvm::StructType *
 	}
 	
 	// this is a new image type, provide cache function
-	std::function<void(llvm::StructType*)> cache_func = [masked_image_type, active_field_count](llvm::StructType* type) {
-		std::unordered_map<COMPUTE_IMAGE_TYPE, llvm::StructType*>& cache =
-			(active_field_count == 1 ? image_type_cache_1if : image_type_cache_2if);
-		cache.emplace(masked_image_type, type);
+	std::function<void(llvm::StructType*)> cache_func = [&cache, masked_image_type](llvm::StructType* type) {
+		cache.try_emplace(masked_image_type, type);
 	};
 	
 	return { true, std::move(cache_func) };
@@ -1005,7 +1000,8 @@ llvm::StructType *CodeGenTypes::ConvertRecordDeclType(const RecordDecl *RD, type
   llvm::StructType *&Entry = (!opts.io_type_conversion ? RecordDeclTypes[Key] : GraphicsIORecordDeclTypes[Key]);
 
   // we need to ensure that image-based types are always unique (for Metal)
-  auto [is_new_image_rdecl, cache_func] = handle_image_rdecl(Context, RD, Entry);
+  auto [is_new_image_rdecl, cache_func] = handle_image_rdecl(Context, RD, Entry,
+      ImageTypeCacheOneField, ImageTypeCacheTwoFields);
 
   // If we don't have a StructType at all yet, create the forward declaration.
   if (!Entry) {

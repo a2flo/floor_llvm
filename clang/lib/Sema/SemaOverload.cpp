@@ -5412,6 +5412,20 @@ TryObjectArgumentInitialization(Sema &S, SourceLocation Loc, QualType FromType,
     return ICS;
   }
 
+  // An MSL address-space-qualified method accepts only objects in that
+  // address space. Unqualified automatic objects live in thread memory;
+  // methods without an explicit qualifier keep the fork's existing behavior.
+  if (S.getLangOpts().Metal && Quals.hasAddressSpace()) {
+    const LangAS ObjectAS = FromTypeCanon.hasAddressSpace()
+                               ? FromTypeCanon.getAddressSpace()
+                               : LangAS::opencl_private;
+    if (!Qualifiers::isAddressSpaceSupersetOf(Quals.getAddressSpace(), ObjectAS)) {
+      ICS.setBad(BadConversionSequence::bad_qualifiers,
+                 FromType, ImplicitParamType);
+      return ICS;
+    }
+  }
+
 #if 0 // we don't want this
   if (FromTypeCanon.hasAddressSpace()) {
     Qualifiers QualsImplicitParamType = ImplicitParamType.getQualifiers();

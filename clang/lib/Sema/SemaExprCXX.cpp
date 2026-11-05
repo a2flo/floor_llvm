@@ -1477,6 +1477,42 @@ Sema::BuildCXXTypeConstructExpr(TypeSourceInfo *TInfo,
                                               Locs.getEnd());
   }
 
+  // MSL function-style vector construction uses component initialization,
+  // not C++ scalar direct-initialization or same-width vector bitcasts.
+  // Keep ordinary C++/OpenCL and scalar-splat handling unchanged.
+  if (getLangOpts().Metal && !ListInitialization && Ty->isExtVectorType()) {
+    if (Exprs.size() == 1 && Exprs[0]->getType()->isVectorType()) {
+      ExprResult Arg = DefaultLvalueConversion(Exprs[0]);
+      if (Arg.isInvalid()) return ExprError();
+      return SemaConvertVectorExpr(Arg.get(), TInfo, TyBeginLoc, RParenOrBraceLoc);
+    }
+    if (Exprs.size() > 1) {
+      SmallVector<Expr *, 8> Components;
+      const QualType Element = Ty->castAs<VectorType>()->getElementType();
+      for (Expr *Input : Exprs) {
+        ExprResult Arg = Input;
+        if (const auto *InputVector = Input->getType()->getAs<VectorType>()) {
+          Arg = DefaultLvalueConversion(Input);
+          if (Arg.isInvalid()) return ExprError();
+          const QualType Converted = Context.getExtVectorType(Element, InputVector->getNumElements());
+          Arg = SemaConvertVectorExpr(Arg.get(), Context.getTrivialTypeSourceInfo(Converted, Input->getExprLoc()),
+                                     Input->getExprLoc(), RParenOrBraceLoc);
+          if (Arg.isInvalid()) return ExprError();
+        } else if (Input->getType()->isArithmeticType() || Input->getType()->isEnumeralType()) {
+          // Constructor conversions are explicit, not brace-list narrowing.
+          Arg = BuildCXXFunctionalCastExpr(Context.getTrivialTypeSourceInfo(Element, Input->getExprLoc()),
+                                          Element, LParenOrBraceLoc, Input, RParenOrBraceLoc);
+          if (Arg.isInvalid()) return ExprError();
+        }
+        Components.push_back(Arg.get());
+      }
+      // The existing vector literal checker enforces the exact lane count;
+      // its normal AST/codegen evaluates each component expression once.
+      auto *List = ParenListExpr::Create(Context, LParenOrBraceLoc, Components, RParenOrBraceLoc);
+      return BuildVectorLiteral(LParenOrBraceLoc, RParenOrBraceLoc, List, TInfo);
+    }
+  }
+
   // C++ [expr.type.conv]p1:
   // If the expression list is a parenthesized single expression, the type
   // conversion expression is equivalent (in definedness, and if defined in

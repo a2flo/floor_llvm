@@ -26,6 +26,7 @@ set(LLVM_LINK_COMPONENTS
   ProfileData
   Remarks
   ScalarOpts
+  SelectionDAG
   SPIRVLib
   Support
   Target

@@ -122,6 +122,11 @@ class CodeGenTypes {
   llvm::DenseMap<const Type*, llvm::StructType *> RecordDeclTypes;
   llvm::DenseMap<const Type*, llvm::StructType *> GraphicsIORecordDeclTypes;
 
+  /// Metal image wrappers must be unique within this module, never process-wide.
+  /// Their StructType pointers belong to TheModule's LLVMContext.
+  llvm::DenseMap<uint64_t, llvm::StructType *> ImageTypeCacheOneField;
+  llvm::DenseMap<uint64_t, llvm::StructType *> ImageTypeCacheTwoFields;
+
   /// Hold memoized CGFunctionInfo results.
   llvm::FoldingSet<CGFunctionInfo> FunctionInfos;
 

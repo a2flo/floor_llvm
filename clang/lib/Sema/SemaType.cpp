@@ -5496,6 +5496,25 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
                                         : ASIdx);
           EPI.TypeQuals.addAddressSpace(AS);
         }
+        // MSL's trailing thread/device/constant/threadgroup qualifiers apply
+        // to the implicit object, not the function or its return type. Preserve
+        // them in the method type so overload resolution and `this` retain the
+        // address space, including in dependent class templates.
+        if (S.getLangOpts().Metal && IsClassMember() && FTI.MethodQualifiers) {
+          LangAS AS = LangAS::Default;
+          for (ParsedAttr &Attr : FTI.MethodQualifiers->getAttributes()) {
+            const LangAS NewAS = Attr.asOpenCLLangAS();
+            if (NewAS == LangAS::Default)
+              continue;
+            if (DiagnoseMultipleAddrSpaceAttributes(S, AS, NewAS, Attr.getLoc()))
+              D.setInvalidType(true);
+            else
+              AS = NewAS;
+            Attr.setInvalid(); // Consumed as an implicit-object qualifier.
+          }
+          if (AS != LangAS::Default)
+            EPI.TypeQuals.addAddressSpace(AS);
+        }
         T = Context.getFunctionType(T, ParamTys, EPI);
       }
       break;

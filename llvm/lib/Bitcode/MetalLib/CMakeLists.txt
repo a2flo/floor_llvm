@@ -18,6 +18,7 @@ add_llvm_component_library(LLVMMetalLib
   LINK_COMPONENTS
   Analysis
   Core
+  IPO
   MC
   Object
   Support

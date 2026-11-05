@@ -279,6 +279,7 @@ namespace {
 			// added tessellation evaluation function args
 			Argument* patch_id { nullptr };
 			Argument* position_in_patch { nullptr };
+			ConstantInt* patch_control_point_count { nullptr };
 			
 			// any function args
 			Argument* soft_printf { nullptr };
@@ -357,7 +358,7 @@ namespace {
 			is_tess_eval_func = F.getCallingConv() == CallingConv::FLOOR_TESS_EVAL;
 			is_task_func = F.getCallingConv() == CallingConv::FLOOR_TASK;
 			is_mesh_func = F.getCallingConv() == CallingConv::FLOOR_MESH;
-			assert(is_kernel_func || is_vertex_func || is_fragment_func || is_tess_control_func || is_tess_eval_func || is_task_func || is_mesh_func);
+			const bool is_entry = is_kernel_func || is_vertex_func || is_fragment_func || is_tess_control_func || is_tess_eval_func || is_task_func || is_mesh_func;
 			
 			for(auto& instr : F.getEntryBlock().getInstList()) {
 				if(!isa<AllocaInst>(instr)) {
@@ -412,7 +413,62 @@ namespace {
 					}
 				}
 				
-				if (F.arg_size() >= METAL_KERNEL_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
+                bool found_air_entry = false, invalid_air_entry = false;
+                const std::array<StringRef, 10> Names {
+                    "air.thread_position_in_grid", "air.threads_per_grid",
+                    "air.thread_position_in_threadgroup", "air.threads_per_threadgroup",
+                    "air.threadgroup_position_in_grid", "air.threadgroups_per_grid",
+                    "air.simdgroup_index_in_threadgroup", "air.thread_index_in_simdgroup",
+                    "air.threads_per_simdgroup", "air.simdgroups_per_threadgroup"};
+                std::array<Argument **, 10> Slots { &state.global_id, &state.global_size,
+                    &state.local_id, &state.local_size, &state.group_id, &state.group_size,
+                    &state.sub_group_id, &state.sub_group_local_id, &state.sub_group_size, &state.num_sub_groups };
+                if (auto *Entries = M->getNamedMetadata("air.kernel")) {
+                    for (auto *Entry : Entries->operands()) {
+                        if (!Entry->getNumOperands()) continue;
+                        auto *FunctionMD = dyn_cast_or_null<ValueAsMetadata>(Entry->getOperand(0).get());
+                        if (!FunctionMD || FunctionMD->getValue() != &F) continue;
+                        if (found_air_entry || Entry->getNumOperands() < 3) { invalid_air_entry = true; break; }
+                        found_air_entry = true;
+                        auto *Inputs = dyn_cast_or_null<MDNode>(Entry->getOperand(2).get());
+                        if (!Inputs) { invalid_air_entry = true; break; }
+                        for (const auto &InputMD : Inputs->operands()) {
+                            auto *Input = dyn_cast_or_null<MDNode>(InputMD.get());
+                            if (!Input || Input->getNumOperands() < 2) { invalid_air_entry = true; break; }
+                            auto *Index = mdconst::dyn_extract_or_null<ConstantInt>(Input->getOperand(0).get());
+                            auto *Semantic = dyn_cast_or_null<MDString>(Input->getOperand(1).get());
+                            if (!Index || !Semantic || Index->getValue().uge(F.arg_size())) { invalid_air_entry = true; break; }
+                            auto *Arg = F.getArg(unsigned(Index->getZExtValue()));
+                            for (unsigned N = 0; N < Names.size(); ++N) {
+                                if (Semantic->getString() != Names[N]) continue;
+                                auto *VT = dyn_cast<FixedVectorType>(Arg->getType());
+                                bool Vector = VT && VT->getNumElements() == 3 && VT->getElementType()->isIntegerTy(32);
+                                bool Scalar = Arg->getType()->isIntegerTy(32);
+                                if (*Slots[N] || (N < 6 ? !(Vector || ((N == 2 || N == 4) && Scalar)) : !Scalar)) {
+                                    invalid_air_entry = true; break;
+                                }
+                                *Slots[N] = Arg;
+                            }
+                            for (unsigned I = 2; I + 1 < Input->getNumOperands(); ++I) {
+                                auto *Key = dyn_cast_or_null<MDString>(Input->getOperand(I).get());
+                                auto *Value = dyn_cast_or_null<MDString>(Input->getOperand(I+1).get());
+                                if (Key && Value && Key->getString() == "air.arg_name" && Value->getString() == "__metal__printf_buffer__") {
+                                    if (state.soft_printf || !Arg->getType()->isPointerTy()) { invalid_air_entry = true; break; }
+                                    state.soft_printf = Arg;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (found_air_entry) {
+                    for (auto *Slot : Slots) if (!*Slot) invalid_air_entry = true;
+                    if (has_soft_printf && !state.soft_printf) invalid_air_entry = true;
+                }
+                if (invalid_air_entry) {
+                    ctx->emitError("invalid or incomplete AIR compute builtin metadata");
+                    return false;
+                }
+				if (!found_air_entry && F.arg_size() >= METAL_KERNEL_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
 					int32_t rev_idx = -1;
 					state.num_sub_groups = get_arg_by_idx(rev_idx--);
 					state.sub_group_size = get_arg_by_idx(rev_idx--);
@@ -429,7 +485,7 @@ namespace {
 					}
 					
 					implicit_arg_count = METAL_KERNEL_ARG_COUNT;
-				} else {
+				} else if (!found_air_entry) {
 					errs() << "invalid ";
 					if (is_kernel_func) {
 						errs() << "kernel";
@@ -446,7 +502,63 @@ namespace {
 			
 			// get args if this is a vertex function
 			if(is_vertex_func) {
-				if (F.arg_size() >= METAL_VERTEX_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
+				// Explicit MSL builtin parameters may be interleaved with buffers or
+				// expanded stage inputs. AIR semantics, not trailing positions, now
+				// identify them. Preserve the old path only when no entry metadata exists.
+				bool found_air_entry = false, invalid_air_entry = false;
+				std::array<Argument*, 4> builtin_args {};
+				Argument *printf_arg = nullptr;
+				if (auto *Entries = M->getNamedMetadata("air.vertex")) {
+					for (auto *Entry : Entries->operands()) {
+						if (!Entry->getNumOperands()) continue;
+						auto *FunctionMD = dyn_cast_or_null<ValueAsMetadata>(Entry->getOperand(0).get());
+						if (!FunctionMD || FunctionMD->getValue() != &F) continue;
+						if (found_air_entry || Entry->getNumOperands() < 3) {
+							invalid_air_entry = true;
+							break;
+						}
+						found_air_entry = true;
+						auto *Inputs = dyn_cast_or_null<MDNode>(Entry->getOperand(2).get());
+						if (!Inputs) { invalid_air_entry = true; break; }
+						for (const auto &InputMD : Inputs->operands()) {
+							auto *Input = dyn_cast_or_null<MDNode>(InputMD.get());
+							if (!Input || Input->getNumOperands() < 2) { invalid_air_entry = true; break; }
+							auto *Index = mdconst::dyn_extract_or_null<ConstantInt>(Input->getOperand(0).get());
+							auto *Semantic = dyn_cast_or_null<MDString>(Input->getOperand(1).get());
+							if (!Index || !Semantic || Index->getValue().uge(F.arg_size())) { invalid_air_entry = true; break; }
+							Argument *Arg = F.getArg(unsigned(Index->getZExtValue()));
+							const StringRef Name = Semantic->getString();
+							int Slot = Name == "air.vertex_id" ? 0 : Name == "air.base_vertex" ? 1 :
+								Name == "air.instance_id" ? 2 : Name == "air.base_instance" ? 3 : -1;
+							if (Slot >= 0) {
+								if (builtin_args[Slot] || !Arg->getType()->isIntegerTy(32)) { invalid_air_entry = true; break; }
+								builtin_args[Slot] = Arg;
+							}
+							for (unsigned I = 2; I + 1 < Input->getNumOperands(); ++I) {
+								auto *Key = dyn_cast_or_null<MDString>(Input->getOperand(I).get());
+								auto *Value = dyn_cast_or_null<MDString>(Input->getOperand(I+1).get());
+								if (Key && Value && Key->getString() == "air.arg_name" &&
+									Value->getString() == "__metal__printf_buffer__") {
+									if (printf_arg || !Arg->getType()->isPointerTy()) { invalid_air_entry = true; break; }
+									printf_arg = Arg;
+								}
+							}
+						}
+					}
+				}
+				if (invalid_air_entry || (found_air_entry &&
+					(!builtin_args[0] || !builtin_args[1] || !builtin_args[2] || !builtin_args[3] || (has_soft_printf && !printf_arg)))) {
+					ctx->emitError("invalid or incomplete AIR vertex builtin metadata");
+					return false;
+				}
+				if (found_air_entry) {
+					state.vertex_id = builtin_args[0];
+					state.base_vertex_id = builtin_args[1];
+					state.instance_id = builtin_args[2];
+					state.base_instance_id = builtin_args[3];
+					if (has_soft_printf) state.soft_printf = printf_arg;
+				} else if (F.arg_size() >= METAL_VERTEX_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
+					// TODO: this should be optional / only happen on request
 					state.vertex_id = get_arg_by_idx(METAL_VERTEX_ID);
 					state.base_vertex_id = get_arg_by_idx(METAL_BASE_VERTEX_ID);
 					state.instance_id = get_arg_by_idx(METAL_VS_INSTANCE_ID);
@@ -463,7 +575,49 @@ namespace {
 			
 			// get args if this is a tessellation evaluation function
 			if(is_tess_eval_func) {
-				if (F.arg_size() >= METAL_TESS_EVAL_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
+				bool FoundEntry = false;
+				if (auto *Entries = M->getNamedMetadata("air.vertex")) {
+					for (auto *Entry : Entries->operands()) {
+						if (Entry->getNumOperands() < 4) continue;
+						auto *FunctionMD = dyn_cast_or_null<ValueAsMetadata>(Entry->getOperand(0).get());
+						if (!FunctionMD || FunctionMD->getValue() != &F) continue;
+						FoundEntry = true;
+						auto *Inputs = dyn_cast_or_null<MDNode>(Entry->getOperand(2).get());
+						auto *Patch = dyn_cast_or_null<MDNode>(Entry->getOperand(3).get());
+						if (!Inputs || !Patch || Patch->getNumOperands() != 4) {
+							ctx->emitError("invalid AIR patch interface metadata"); return false;
+						}
+						state.patch_control_point_count = mdconst::dyn_extract_or_null<ConstantInt>(Patch->getOperand(3).get());
+						for (const auto &InputMD : Inputs->operands()) {
+							auto *Input = dyn_cast_or_null<MDNode>(InputMD.get());
+							if (!Input || Input->getNumOperands() < 2) continue;
+							auto *Index = mdconst::dyn_extract_or_null<ConstantInt>(Input->getOperand(0).get());
+							auto *Semantic = dyn_cast_or_null<MDString>(Input->getOperand(1).get());
+							if (!Index || !Semantic || Index->getValue().uge(F.arg_size())) {
+								ctx->emitError("invalid AIR patch argument metadata"); return false;
+							}
+							auto *Arg = F.getArg(unsigned(Index->getZExtValue()));
+							const auto Name = Semantic->getString();
+							if (Name == "air.patch_id") state.patch_id = Arg;
+							else if (Name == "air.instance_id") state.instance_id = Arg;
+							else if (Name == "air.base_instance") state.base_instance_id = Arg;
+							else if (Name == "air.position_in_patch") state.position_in_patch = Arg;
+							for (unsigned I = 2; I + 1 < Input->getNumOperands(); ++I) {
+								auto *Key = dyn_cast_or_null<MDString>(Input->getOperand(I).get());
+								auto *Value = dyn_cast_or_null<MDString>(Input->getOperand(I + 1).get());
+								if (Key && Value && Key->getString() == "air.arg_name" &&
+								    Value->getString() == "__metal__printf_buffer__") state.soft_printf = Arg;
+							}
+						}
+					}
+				}
+				if (FoundEntry) {
+					if (!state.patch_id || !state.instance_id || !state.base_instance_id ||
+					    !state.position_in_patch || !state.patch_control_point_count || (has_soft_printf && !state.soft_printf)) {
+						ctx->emitError("incomplete AIR patch builtin metadata"); return false;
+					}
+				} else if (F.arg_size() >= METAL_TESS_EVAL_ARG_COUNT + (has_soft_printf ? 1 : 0)) {
+					// TODO: this should be optional / only happen on request
 					state.patch_id = get_arg_by_idx(METAL_PATCH_ID);
 					state.instance_id = get_arg_by_idx(METAL_TES_INSTANCE_ID);
 					state.base_instance_id = get_arg_by_idx(METAL_TES_BASE_INSTANCE_ID);
@@ -478,34 +632,73 @@ namespace {
 				}
 			}
 			
-			// get args if this is a fragment function
-			if(is_fragment_func) {
-				const uint32_t opt_builtin_arg_count = (has_primitive_id ? 1u : 0u) + (has_barycentric_coord ? 1u : 0u);
-				const uint32_t opt_arg_count = (has_soft_printf ? 1u : 0u) + opt_builtin_arg_count;
-				if (F.arg_size() >= METAL_FRAGMENT_ARG_COUNT + opt_arg_count) {
-					state.point_coord = get_arg_by_idx(METAL_POINT_COORD);
-					state.front_facing = get_arg_by_idx(METAL_FRONT_FACING);
-					
-					// NOTE: reverse order!
-					uint32_t opt_arg_counter = 1;
-					if (has_barycentric_coord) {
-						state.barycentric_coord = get_arg_by_idx(-(METAL_FRAGMENT_ARG_COUNT + opt_arg_counter++));
-					}
-					if (has_primitive_id) {
-						state.primitive_id = get_arg_by_idx(-(METAL_FRAGMENT_ARG_COUNT + opt_arg_counter++));
-					}
-					if (has_soft_printf) {
-						state.soft_printf = get_arg_by_idx(-(METAL_FRAGMENT_ARG_COUNT + opt_arg_counter++));
-					}
-					
-					implicit_arg_count = METAL_FRAGMENT_ARG_COUNT + opt_builtin_arg_count;
-				} else {
-					errs() << "invalid fragment function (" << F.getName() << ") argument count: " << F.arg_size() << "\n";
-				}
-			}
-			
+			// Resolve fragment builtins by semantic: explicit MSL arguments need not
+            // be trailing, and may replace the implicit front-facing argument.
+            if (is_fragment_func) {
+                bool found_entry = false;
+                if (auto *Entries = M->getNamedMetadata("air.fragment")) {
+                    for (auto *Entry : Entries->operands()) {
+                        if (!Entry->getNumOperands()) continue;
+                        auto *FM = dyn_cast_or_null<ValueAsMetadata>(Entry->getOperand(0).get());
+                        if (!FM || FM->getValue() != &F) continue;
+                        if (found_entry || Entry->getNumOperands() < 3) {
+                            ctx->emitError("invalid AIR fragment entry metadata"); return false;
+                        }
+                        found_entry = true;
+                        auto *Inputs = dyn_cast_or_null<MDNode>(Entry->getOperand(2).get());
+                        if (!Inputs) { ctx->emitError("invalid AIR fragment inputs"); return false; }
+                        for (const auto &InputMD : Inputs->operands()) {
+                            auto *Input = dyn_cast_or_null<MDNode>(InputMD.get());
+                            if (!Input || Input->getNumOperands() < 2) {
+                                ctx->emitError("invalid AIR fragment input"); return false;
+                            }
+                            auto *Index = mdconst::dyn_extract_or_null<ConstantInt>(Input->getOperand(0).get());
+                            auto *Semantic = dyn_cast_or_null<MDString>(Input->getOperand(1).get());
+                            if (!Index || !Semantic || Index->getValue().uge(F.arg_size())) {
+                                ctx->emitError("invalid AIR fragment input index"); return false;
+                            }
+                            auto *Arg = F.getArg(unsigned(Index->getZExtValue()));
+                            const auto Name = Semantic->getString();
+                            Argument **Slot = Name == "air.point_coord" ? &state.point_coord :
+                                Name == "air.front_facing" ? &state.front_facing :
+                                Name == "air.primitive_id" ? &state.primitive_id :
+                                Name == "air.barycentric_coord" ? &state.barycentric_coord : nullptr;
+                            if (Slot) {
+                                if (*Slot) { ctx->emitError("duplicate AIR fragment builtin"); return false; }
+                                *Slot = Arg;
+                            }
+                            for (unsigned I = 2; I + 1 < Input->getNumOperands(); ++I) {
+                                auto *Key = dyn_cast_or_null<MDString>(Input->getOperand(I).get());
+                                auto *Value = dyn_cast_or_null<MDString>(Input->getOperand(I + 1).get());
+                                if (Key && Value && Key->getString() == "air.arg_name" &&
+                                    Value->getString() == "__metal__printf_buffer__") state.soft_printf = Arg;
+                            }
+                        }
+                    }
+                }
+                const uint32_t optional_count = (has_primitive_id ? 1u : 0u) + (has_barycentric_coord ? 1u : 0u);
+                if (found_entry) {
+                    if (!state.point_coord || !state.front_facing ||
+                        (has_primitive_id && !state.primitive_id) ||
+                        (has_barycentric_coord && !state.barycentric_coord) ||
+                        (has_soft_printf && !state.soft_printf)) {
+                        ctx->emitError("incomplete AIR fragment builtin metadata"); return false;
+                    }
+                } else if (F.arg_size() >= METAL_FRAGMENT_ARG_COUNT + optional_count + (has_soft_printf ? 1u : 0u)) {
+                    state.point_coord = get_arg_by_idx(METAL_POINT_COORD);
+                    state.front_facing = get_arg_by_idx(METAL_FRONT_FACING);
+                    uint32_t offset = 1;
+                    if (has_barycentric_coord) state.barycentric_coord = get_arg_by_idx(-(METAL_FRAGMENT_ARG_COUNT + offset++));
+                    if (has_primitive_id) state.primitive_id = get_arg_by_idx(-(METAL_FRAGMENT_ARG_COUNT + offset++));
+                    if (has_soft_printf) state.soft_printf = get_arg_by_idx(-(METAL_FRAGMENT_ARG_COUNT + offset++));
+                    implicit_arg_count = METAL_FRAGMENT_ARG_COUNT + optional_count;
+                } else {
+                    ctx->emitError("invalid fragment builtin argument count"); return false;
+                }
+            }
+
 			// update function signature / param list
-			{
+			if (is_entry) {
 				std::vector<Type*> param_types;
 				for (auto& arg : F.args()) {
 					// replace noalias LLVM attribute with "air-buffer-no-alias" string attribute
@@ -549,7 +742,18 @@ namespace {
 			visit(F);
 			
 			// strip unused implicit function arguments + update metadata
-			strip_implicit_args(F, implicit_arg_count);
+            // The frontend records the actual trailing implicit count after
+            // explicit MSL inputs have replaced their corresponding hidden args.
+            if (auto *CountMD = F.getMetadata("floor.implicit_arg_count")) {
+                auto *Count = CountMD->getNumOperands() == 1 ?
+                    mdconst::dyn_extract_or_null<ConstantInt>(CountMD->getOperand(0).get()) : nullptr;
+                if (!Count || Count->getValue().ugt(F.arg_size())) {
+                    ctx->emitError("invalid implicit argument count metadata"); return false;
+                }
+                implicit_arg_count = unsigned(Count->getZExtValue());
+                F.setMetadata("floor.implicit_arg_count", nullptr);
+            }
+            if (is_entry && implicit_arg_count) strip_implicit_args(F, implicit_arg_count);
 			
 			// always modified
 			(void)was_modified;
@@ -760,6 +964,31 @@ namespace {
 					//       I'm assuming this whole family of intrinsics is allowed
 					break;
 					
+				case Intrinsic::bitreverse: {
+					// InstCombine can introduce this even without a source builtin.
+					// Only the scalar 32-bit AIR operation is supported here.
+					if (!I.getType()->isIntegerTy(32)) {
+						ctx->emitError(&I, "unsupported bitreverse type (expected scalar i32):\n" + print_instr(I));
+						return;
+					}
+					const auto intrinsic_attrs = I.getCalledFunction()->getAttributes();
+					auto air_callee = M->getOrInsertFunction(
+						"air.reverse_bits.i32", I.getFunctionType(), intrinsic_attrs);
+					auto* air_func = dyn_cast<Function>(air_callee.getCallee());
+					if (!air_func || air_func->getFunctionType() != I.getFunctionType() || !air_func->isDeclaration()) {
+						ctx->emitError(&I, "incompatible air.reverse_bits.i32 declaration");
+						return;
+					}
+					// Retain the intrinsic guarantees when reusing an existing AIR
+					// declaration, without dropping that declaration's attributes.
+					air_func->addFnAttrs(AttrBuilder(*ctx, intrinsic_attrs.getFnAttrs()));
+					// Retarget in place to preserve SSA uses, call attributes, tail
+					// kind, operand bundles, metadata and the debug location.
+					I.setCalledFunction(air_func);
+					was_modified = true;
+					break;
+				}
+
 				// single arguments cases
 				case Intrinsic::abs:
 				case Intrinsic::fabs: {
@@ -1087,6 +1316,15 @@ namespace {
 				I.eraseFromParent();
 				return;
 			}
+			else if(func_name == "floor.get_patch_control_point_count.i32") {
+				if (!is_tess_eval_func || !state.patch_control_point_count) {
+					ctx->emitError(&I, "patch_control_point::size requires a patch entry");
+					return;
+				}
+				I.replaceAllUsesWith(state.patch_control_point_count);
+				I.eraseFromParent();
+				return;
+			}
 			else if(func_name == "floor.get_position_in_patch.float3") {
 				if(state.position_in_patch == nullptr) {
 					DBG(printf("failed to get position_in_patch arg, probably not in a tessellation-evaluation function?\n"); fflush(stdout);)
@@ -1192,7 +1430,11 @@ namespace {
 			uint32_t dim_idx = 0u;
 			if (get_from_vector) {
 				dim_idx = get_dim_idx(I.getOperand(0), &I);
-				repl = builder->CreateExtractElement(id, dim_idx);
+				// A scalar explicit position is the one-dimensional form.
+                if (id->getType()->isIntegerTy(32))
+                    repl = dim_idx == 0 ? id : builder->getInt32(0);
+                else
+                    repl = builder->CreateExtractElement(id, dim_idx);
 			} else {
 				repl = id;
 			}
@@ -1200,8 +1442,9 @@ namespace {
 			I.eraseFromParent();
 			
 			// add metadata
-			if (func_name == "floor.get_local_id.i32" && state.has_fixed_local_size()) {
-				libfloor_utils::add_range_info(*ctx, *(llvm::Instruction*)repl, 0u, state.kernel_local_size[dim_idx]);
+			if (auto *ReplInst = dyn_cast<llvm::Instruction>(repl);
+                ReplInst && func_name == "floor.get_local_id.i32" && state.has_fixed_local_size()) {
+				libfloor_utils::add_range_info(*ctx, *ReplInst, 0u, state.kernel_local_size[dim_idx]);
 			}
 		}
 		
@@ -1240,7 +1483,8 @@ namespace {
 				vec_type_name = "v" + std::to_string(from_vec_type->getNumElements());
 			}
 			
-			static const std::unordered_map<llvm::Type*, const char*> type_map {
+			// Type pointers belong to this invocation's LLVMContext.
+			const std::unordered_map<llvm::Type*, const char*> type_map {
 				{ llvm::Type::getInt1Ty(*ctx), "i1" }, // not sure about signed/unsigned conversion here
 				{ llvm::Type::getInt8Ty(*ctx), "i8" },
 				{ llvm::Type::getInt16Ty(*ctx), "i16" },
@@ -1314,19 +1558,35 @@ namespace {
 			return builder->CreateCall(M->getOrInsertFunction(func_name, func_type), from);
 		}
 		
-		// si/ui/fp -> si/ui/fp conversions require a call to an intrinsic air function (air.convert.*)
+		// Most si/ui/fp conversions require a call to an intrinsic air function (air.convert.*).
 		template <Instruction::CastOps cast_op>
 		__attribute__((always_inline))
 		void scalar_or_vector_conversion(CastInst& I) {
 			builder->SetInsertPoint(&I);
 			
-			// replace original conversion
-			auto conv_instr = call_conversion_func<cast_op>(I.getOperand(0), I.getDestTy());
+			// Scalar i1 is 0/-1 when signed, or 0/1 when unsigned.
+			// Use an exact select instead of depending on an air.convert.*.i1 call.
+			llvm::Value* conv_instr = nullptr;
+			if constexpr (cast_op == Instruction::SIToFP || cast_op == Instruction::UIToFP) {
+				auto* from = I.getOperand(0);
+				auto* to_type = I.getDestTy();
+				if (from->getType()->isIntegerTy(1) &&
+					(to_type->isHalfTy() || to_type->isFloatTy() || to_type->isDoubleTy())) {
+					conv_instr = builder->CreateSelect(from,
+						ConstantFP::get(to_type, cast_op == Instruction::SIToFP ? -1.0 : 1.0),
+						ConstantFP::get(to_type, 0.0));
+				}
+			}
+			if (!conv_instr) {
+				conv_instr = call_conversion_func<cast_op>(I.getOperand(0), I.getDestTy());
+			}
 			if (!conv_instr) {
 				// something failed, don't continue replacing the instruction
 				return;
 			}
-			conv_instr->setDebugLoc(I.getDebugLoc());
+			if (auto* inst = dyn_cast<Instruction>(conv_instr)) {
+				inst->setDebugLoc(I.getDebugLoc());
+			}
 			I.replaceAllUsesWith(conv_instr);
 			I.eraseFromParent();
 			was_modified = true;
@@ -1450,9 +1710,13 @@ namespace {
 				// kill all functions named floor.*
 				auto& func = *func_iter;
 				if (func.getName().startswith("floor.")) {
-					if (func.getNumUses() != 0) {
-						errs() << func.getName() << " should not have any uses at this point!\n";
-					}
+                    if (!func.use_empty()) {
+                        // An earlier lowering diagnostic can leave an intrinsic
+                        // call alive. Never erase a value with live uses.
+                        ctx->emitError("unlowered floor intrinsic remains: " + func.getName());
+                        ++func_iter;
+                        continue;
+                    }
 					++func_iter; // inc before erase
 					func.eraseFromParent();
 					continue;
@@ -1468,8 +1732,10 @@ namespace {
 					}
 				}
 				
-				// remove dso_local from all functions
-				func.setDSOLocal(false);
+				// Clear explicit dso_local for AIR, but retain locality required by
+				// internal/private linkage or non-default visibility. The remaining
+				// LLVM passes and verifier must still receive valid IR.
+				func.setDSOLocal(func.isImplicitDSOLocal());
 				
 				// strip debug info from declarations
 				if (func.isDeclaration()) {

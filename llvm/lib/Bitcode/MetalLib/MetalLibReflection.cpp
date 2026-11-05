@@ -22,6 +22,7 @@
 #include <optional>
 #include <vector>
 #include <array>
+#include <unordered_set>
 #include "llvm/Transforms/LibFloor/MetalTypes.h"
 #include "llvm/Transforms/LibFloor/metal_reflection.hpp"
 #include "llvm/Transforms/LibFloor/metal_reflection_writing.hpp"
@@ -127,12 +128,11 @@ static std::optional<uint32_t> md_get_uint(const llvm::MDNode& md_node, llvm::MD
 		llvm::errs() << "reflection: expected constant integer: " << md_node << "\n";
 		return {};
 	}
-	const auto val = cnst_int->getZExtValue();
-	if (val > 0xFFFF'FFFFull) {
-		llvm::errs() << "reflection: expected constant 32-bit unsigned integer: " << md_node << " -> " << val << "\n";
+	if (cnst_int->getValue().getActiveBits() > 32) {
+		llvm::errs() << "reflection: expected constant 32-bit unsigned integer: " << md_node << "\n";
 		return {};
 	}
-	return uint32_t(val);
+	return uint32_t(cnst_int->getZExtValue());
 }
 static std::optional<uint32_t> md_get_next_uint(const llvm::MDNode& md_node, llvm::MDNode::op_iterator& iter) {
 	return md_get_uint(md_node, ++iter);
@@ -500,6 +500,9 @@ static inline node_id_t create_fragment_input(const llvm::MDNode& md_node, refle
 		} else if (type_str == "air.centroid") {
 			node.sampling_qualifier = SAMPLING_QUALIFIER::CENTROID;
 			return true;
+		} else if (type_str == "air.sample") {
+			node.sampling_qualifier = SAMPLING_QUALIFIER::SAMPLE;
+			return true;
 		} else if (type_str == "air.perspective") {
 			node.interpolation_qualifier = INTERPOLATION_QUALIFIER::PERSPECTIVE;
 			return true;
@@ -519,6 +522,11 @@ static inline node_id_t create_fragment_input(const llvm::MDNode& md_node, refle
 				node.name = str->str();
 				return true;
 			}
+		} else if (type_str == "air.arg_unused") {
+			// A zero-operand flag; preserve it in the serialized reflection.
+			if (node.unused.has_value()) return false;
+			node.unused = true;
+			return true;
 		}
 		return false;
 	}, 1u /* start one earlier so that we get air.fragment_input */)) {
@@ -774,6 +782,11 @@ static inline node_id_t create_position(const llvm::MDNode& md_node, reflection_
 				node.name = str->str();
 				return true;
 			}
+		} else if (type_str == "air.arg_unused") {
+			// A zero-operand flag; preserve it in the serialized reflection.
+			if (node.unused.has_value()) return false;
+			node.unused = true;
+			return true;
 		}
 		return false;
 	})) {
@@ -800,6 +813,53 @@ static inline node_id_t create_simdgroup_index_in_threadgroup(const llvm::MDNode
 static inline node_id_t create_simdgroups_per_threadgroup(const llvm::MDNode& md_node, reflection_state_t& state) {
 	auto [node, node_id] = state.create_node<node_simdgroups_per_threadgroup_arg_t>();
 	return generic_create_type_name_and_name(node, md_node, state) ? node_id : invalid_node_id;
+}
+
+// MSL scalar stage inputs and samplers share the same indexed reflection shape.
+// Keep the semantic node kind distinct; do not translate a stage input to a buffer.
+template <typename node_type>
+static inline node_id_t create_indexed_msl_argument(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_type>();
+	bool has_location = false, has_type = false, has_name = false;
+	if (!md_node_iterate(md_node, [&](llvm::StringRef type_str, llvm::MDNode::op_iterator& iter) {
+		if (type_str == "air.location_index") {
+			if (has_location) return false;
+			const auto index = md_get_next_uint(md_node, iter);
+			if (!index) return false;
+			const auto count = md_get_next_uint(md_node, iter);
+			if (!count || *count == 0 || uint64_t(*index) + *count > 0x1'0000'0000ull) return false;
+			node.location_index = { *index };
+			node.location_count = { *count };
+			has_location = true;
+			return true;
+		}
+		if (type_str == "air.arg_type_name") {
+			if (has_type) return false;
+			const auto name = md_get_next_string(md_node, iter);
+			if (!name || name->empty()) return false;
+			node.type_name = name->str();
+			has_type = true;
+			return true;
+		}
+		if (type_str == "air.arg_name") {
+			if (has_name) return false;
+			const auto name = md_get_next_string(md_node, iter);
+			if (!name) return false;
+			node.name = name->str();
+			has_name = true;
+			return true;
+		}
+		return false;
+	}) || !has_location || !has_type) {
+		llvm::errs() << "reflection: invalid indexed MSL argument\n";
+		return invalid_node_id;
+	}
+	return node_id;
+}
+
+static inline node_id_t create_thread_index_in_threadgroup(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_thread_index_in_threadgroup_arg_t>();
+	return generic_create_type_name_and_name(node, md_node, state) && node.type_name == "uint" ? node_id : invalid_node_id;
 }
 
 static inline node_id_t create_texture(const llvm::MDNode& md_node, reflection_state_t& state) {
@@ -986,7 +1046,32 @@ static inline node_id_t create_point_size_ret(const llvm::MDNode& md_node, refle
 
 static inline node_id_t create_position_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
 	auto [node, node_id] = state.create_node<node_position_ret_t>();
-	return generic_create_type_name_and_name(node, md_node, state, 1u /* start at #1 for return type */) ? node_id : invalid_node_id;
+	bool has_type = false, has_name = false;
+	if (!md_node_iterate(md_node, [&](llvm::StringRef type_str, llvm::MDNode::op_iterator& iter) {
+		if (type_str == "air.invariant") {
+			if (node.invariant) return false;
+			node.invariant = true;
+			return true;
+		}
+		if (type_str == "air.arg_type_name") {
+			if (has_type) return false;
+			const auto name = md_get_next_string(md_node, iter);
+			if (!name || name->empty()) return false;
+			node.type_name = name->str();
+			has_type = true;
+			return true;
+		}
+		if (type_str == "air.arg_name") {
+			if (has_name) return false;
+			const auto name = md_get_next_string(md_node, iter);
+			if (!name) return false;
+			node.name = name->str();
+			has_name = true;
+			return true;
+		}
+		return false;
+	}, 1u) || !has_type) return invalid_node_id;
+	return node_id;
 }
 
 static inline node_id_t create_primitive_culled_ret(const llvm::MDNode& md_node, reflection_state_t& state) {
@@ -1017,6 +1102,39 @@ static inline node_id_t create_vertex_output_ret(const llvm::MDNode& md_node, re
 	}, 0u /* start at #0 for vertex output */)) {
 		return invalid_node_id;
 	}
+	return node_id;
+}
+
+static inline node_id_t create_render_target_arg(const llvm::MDNode& md_node, reflection_state_t& state) {
+	auto [node, node_id] = state.create_node<node_render_target_arg_t>();
+	bool has_index = false, has_type = false, has_name = false;
+	if (!md_node_iterate(md_node, [&](llvm::StringRef type_str, llvm::MDNode::op_iterator& iter) {
+		if (type_str == "air.render_target") {
+			if (has_index) return false;
+			const auto index = md_get_next_uint(md_node, iter);
+			if (!index || *index > 7u) return false;
+			node.render_target_index = { *index };
+			has_index = true;
+			return true;
+		}
+		if (type_str == "air.arg_type_name") {
+			if (has_type) return false;
+			const auto name = md_get_next_string(md_node, iter);
+			if (!name || name->empty()) return false;
+			node.type_name = name->str();
+			has_type = true;
+			return true;
+		}
+		if (type_str == "air.arg_name") {
+			if (has_name) return false;
+			const auto name = md_get_next_string(md_node, iter);
+			if (!name) return false;
+			node.name = name->str();
+			has_name = true;
+			return true;
+		}
+		return false;
+	}, 1u) || !has_index || !has_type) return invalid_node_id;
 	return node_id;
 }
 
@@ -1116,6 +1234,41 @@ static inline node_id_t create_patch_fn_attr(const llvm::MDNode& md_node, reflec
 
 static inline node_id_t create_node(const llvm::MDNode& md_node, const std::string node_type_name, reflection_state_t& state,
 									const bool is_return_type) {
+	if (node_type_name == "air.function_constant") {
+		const unsigned prefix = is_return_type ? 0u : 1u;
+		if (md_node.getNumOperands() < prefix + 5u) return invalid_node_id;
+		const auto *predicate = llvm::dyn_cast_or_null<llvm::MDNode>(md_node.getOperand(prefix + 1u));
+		const auto *semantic = llvm::dyn_cast_or_null<llvm::MDString>(md_node.getOperand(prefix + 2u));
+		if (!predicate || predicate->getNumOperands() != 3u || !semantic || semantic->getString() != "air.render_target") {
+			llvm::errs() << "reflection: unsupported conditional MSL semantic\n";
+			return invalid_node_id;
+		}
+		const auto *value = llvm::dyn_cast_or_null<llvm::ConstantAsMetadata>(predicate->getOperand(0));
+		const auto *global = value ? llvm::dyn_cast<llvm::GlobalVariable>(value->getValue()) : nullptr;
+		const auto *type = llvm::dyn_cast_or_null<llvm::MDString>(predicate->getOperand(1));
+		const auto *name = llvm::dyn_cast_or_null<llvm::MDString>(predicate->getOperand(2));
+		if (!global || global->getAddressSpace() != 2u || !global->getValueType()->isIntegerTy(8) ||
+			!global->hasInternalLinkage() || !global->hasInitializer() || !type || type->getString() != "bool" ||
+			!name || name->getString().empty()) {
+			llvm::errs() << "reflection: invalid conditional MSL predicate\n";
+			return invalid_node_id;
+		}
+		// Reflection records conditional presence, not an evaluated predicate value.
+		// The original predicate graph and AIR metadata remain untouched and are
+		// authoritative during specialization; this schema has no predicate slot.
+		std::vector<llvm::Metadata*> operands;
+		if (!is_return_type) operands.push_back(md_node.getOperand(0).get());
+		for (unsigned i = prefix + 2u; i < md_node.getNumOperands(); ++i)
+			operands.push_back(md_node.getOperand(i).get());
+		const auto *unwrapped = llvm::MDNode::get(md_node.getContext(), operands);
+		const auto id = create_node(*unwrapped, "air.render_target", state, is_return_type);
+		if (id.id == invalid_node_id.id) return id;
+		if (is_return_type)
+			static_cast<node_render_target_ret_t&>(*(*state.refl.nodes)[id.id]).function_constant = true;
+		else
+			static_cast<node_render_target_arg_t&>(*(*state.refl.nodes)[id.id]).function_constant = true;
+		return id;
+	}
 	using create_func_t = node_id_t (*)(const llvm::MDNode&, reflection_state_t&);
 	static const std::unordered_map<std::string, create_func_t> arg_attr_handlers {
 		// argument nodes
@@ -1137,8 +1290,13 @@ static inline node_id_t create_node(const llvm::MDNode& md_node, const std::stri
 		{ "air.position", &create_position },
 		{ "air.position_in_patch", &create_position_in_patch },
 		{ "air.primitive_id", &create_primitive_id },
+		{ "air.render_target", &create_render_target_arg },
 		{ "air.simdgroup_index_in_threadgroup", &create_simdgroup_index_in_threadgroup },
 		{ "air.simdgroups_per_threadgroup", &create_simdgroups_per_threadgroup },
+		{ "air.sampler", &create_indexed_msl_argument<node_sampler_arg_t> },
+		{ "air.stage_in", &create_indexed_msl_argument<node_stage_in_arg_t> },
+		{ "air.vertex_input", &create_indexed_msl_argument<node_vertex_input_arg_t> },
+		{ "air.thread_index_in_threadgroup", &create_thread_index_in_threadgroup },
 		{ "air.texture", &create_texture },
 		{ "air.thread_index_in_simdgroup", &create_thread_index_in_simdgroup },
 		{ "air.thread_position_in_grid", &create_thread_position_in_grid },
@@ -1448,6 +1606,41 @@ std::vector<uint8_t> create_reflection(llvm::Module& M) {
 		}
 	}
 	
+	// Preserve the explicit specialization inventory in reflection as well as AIR.
+	if (const auto *constants = M.getNamedMetadata("air.function_constants")) {
+		if (!refl.nodes) refl.nodes = std::vector<std::unique_ptr<node_base_t>> {};
+		refl.function_constants = std::vector<node_id_t> {};
+		std::unordered_set<uint32_t> indices;
+		for (const auto *entry : constants->operands()) {
+			if (entry->getNumOperands() != 5u) {
+				llvm::errs() << "reflection: unsupported function constant shape\n";
+				return {};
+			}
+			const auto *value = llvm::dyn_cast_or_null<llvm::ConstantAsMetadata>(entry->getOperand(0));
+			const auto *global = value ? llvm::dyn_cast<llvm::GlobalVariable>(value->getValue()) : nullptr;
+			auto iter = std::next(entry->op_begin());
+			const auto type = md_get_string(*entry, iter);
+			const auto name = md_get_next_string(*entry, iter);
+			const auto index = md_get_next_uint(*entry, iter);
+			const auto required = md_get_next_uint(*entry, iter);
+			if (!global || global->getAddressSpace() != 2u || !global->isConstant() ||
+				!global->isExternallyInitialized() || !global->hasInitializer() ||
+				global->getSection() != "air.fc_initializer" || !type || !name || name->empty() ||
+				!index || *index > 65535u || !indices.insert(*index).second || !required || *required > 1u ||
+				!(((*type == "bool") && global->getValueType()->isIntegerTy(8)) ||
+				  ((*type == "int") && global->getValueType()->isIntegerTy(32)))) {
+				llvm::errs() << "reflection: unsupported function constant definition\n";
+				return {};
+			}
+			auto [node, id] = state.create_node<node_function_constant_t>();
+			node.type_name = type->str();
+			node.name = name->str();
+			node.index = *index;
+			node.required = *required != 0u;
+			refl.function_constants->push_back(id);
+		}
+	}
+
 	// handle local memory allocations
 	for (const auto& GV : M.globals()) {
 		if (GV.getType()->getAddressSpace() != uint32_t(ADDRESS_SPACE::LOCAL)) {

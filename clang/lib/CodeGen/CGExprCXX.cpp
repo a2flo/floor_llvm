@@ -50,7 +50,15 @@ commonEmitCXXMemberOrOperatorCall(CodeGenFunction &CGF, const CXXMethodDecl *MD,
   ASTContext &C = CGF.getContext();
   QualType this_type = C.VoidPtrTy;
   if (RD) {
-    this_type = C.getPointerType(C.getAddrSpaceQualType(C.getTypeDeclType(RD), (LangAS)This->getType()->getPointerAddressSpace()));
+    const bool IsMetal = CGF.CGM.getLangOpts().Metal;
+    const LangAS ThisAS = IsMetal ? MD->getMethodQualifiers().getAddressSpace()
+                                 : (LangAS)This->getType()->getPointerAddressSpace();
+    this_type = C.getPointerType(C.getAddrSpaceQualType(C.getTypeDeclType(RD), ThisAS));
+    // Unqualified compatibility methods use the default implicit-object ABI.
+    // Do not emit a mismatched call signature for constant/device objects:
+    // preserve the pointer through an explicit cast, removable after inlining.
+    if (IsMetal && !MD->getMethodQualifiers().hasAddressSpace())
+      This = CGF.Builder.CreatePointerBitCastOrAddrSpaceCast(This, CGF.ConvertType(this_type));
   }
   Args.add(RValue::get(This), this_type);
 

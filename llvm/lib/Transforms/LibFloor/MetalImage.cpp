@@ -60,7 +60,6 @@
 #include "llvm/Transforms/LibFloor.h"
 #include "llvm/Transforms/LibFloor/FloorImage.h"
 #include "llvm/Transforms/LibFloor/MetalTypes.h"
-#include <unordered_map>
 using namespace llvm;
 
 #define DEBUG_TYPE "MetalImage"
@@ -89,7 +88,7 @@ namespace {
 				case COMPUTE_IMAGE_TYPE::IMAGE_1D_ARRAY:
 					return "texture_1d_array";
 				case COMPUTE_IMAGE_TYPE::IMAGE_1D_BUFFER:
-					return "texture_1d_buffer";
+					return "texture_buffer_1d";
 				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH:
 				case COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_STENCIL:
 					return "depth_2d";
@@ -135,6 +134,19 @@ namespace {
 				return nullptr;
 			}
 			
+            auto* sampler_pointer = dyn_cast<PointerType>(dyn_sampler_arg->getType());
+            auto* sampler_struct = sampler_pointer ?
+                dyn_cast<StructType>(sampler_pointer->getPointerElementType()) : nullptr;
+            if (!sampler_pointer || sampler_pointer->getAddressSpace() != Metal_ConstantAS ||
+                !sampler_struct || !sampler_struct->isOpaque() ||
+                sampler_struct->getName() != "struct._sampler_t") {
+                ctx->emitError(&originating_instruction, "invalid Metal sampler handle type");
+                return nullptr;
+            }
+            // Runtime handles are already opaque AIR sampler values. Preserve the
+            // loaded SSA value; never substitute an immutable sampler state.
+            if (!isa<Constant>(dyn_sampler_arg)) return dyn_sampler_arg;
+
 			auto ce_sampler = dyn_cast<ConstantExpr>(dyn_sampler_arg);
 			if (ce_sampler == nullptr) {
 				ctx->emitError(&originating_instruction, "sampler arg must be a constant expression");
@@ -152,30 +164,37 @@ namespace {
 				return nullptr;
 			}
 			
-			// create global sampler state
-			// NOTE: since we're often using the same sampler -> cache them
-			static std::unordered_map<uint64_t, GlobalVariable*> sample_state_cache;
+			// Reuse only globals owned by this module. A process-static pointer cache
+			// survives LLVMContext destruction and can return freed or foreign values.
 			auto sampler_constant_value_u64 = sampler_constant_value->getZExtValue();
-			auto cache_iter = sample_state_cache.find(sampler_constant_value_u64);
-			GlobalVariable* sampler_state = nullptr;
-			if (cache_iter != sample_state_cache.end()) {
-				sampler_state = cache_iter->second;
-			} else {
-				auto sampler_const_array = ConstantArray::get(ArrayType::get(sampler_constant_value->getType(), 2u), {
+			Constant* sampler_initializer = sampler_constant_value;
+			if (metal::get_metal_version(M) >= 320) {
+				sampler_initializer = ConstantArray::get(ArrayType::get(sampler_constant_value->getType(), 2u), {
 					ConstantInt::get(Type::getInt64Ty(*ctx), sampler_constant_value_u64),
 					ConstantInt::get(Type::getInt64Ty(*ctx), 0ull)
 				});
-				sampler_state = new GlobalVariable(M,
-												   sampler_const_array->getType(),
-												   true,
-												   GlobalVariable::InternalLinkage,
-												   sampler_const_array,
-												   "__air_sampler_state",
-												   nullptr,
-												   GlobalValue::NotThreadLocal,
-												   Metal_ConstantAS);
-				sampler_state->setAlignment(MaybeAlign { 8u }); // always 8-byte aligned
-				sample_state_cache.emplace(sampler_constant_value_u64, sampler_state);
+			}
+			GlobalVariable* sampler_state = nullptr;
+			if (auto* samplers = M.getNamedMetadata("air.sampler_states")) {
+				for (auto* record : samplers->operands()) {
+					if (record->getNumOperands() != 2) continue;
+					auto* tag = dyn_cast<MDString>(record->getOperand(0).get());
+					auto* value = dyn_cast<ConstantAsMetadata>(record->getOperand(1).get());
+					if (!tag || tag->getString() != "air.sampler_state" || !value) continue;
+					auto* candidate = dyn_cast<GlobalVariable>(value->getValue());
+					if (candidate && candidate->getParent() == &M && candidate->isConstant() &&
+						candidate->getAddressSpace() == Metal_ConstantAS && candidate->hasInitializer() &&
+						candidate->getInitializer() == sampler_initializer) {
+						sampler_state = candidate;
+						break;
+					}
+				}
+			}
+			if (!sampler_state) {
+				sampler_state = new GlobalVariable(M, sampler_initializer->getType(), true,
+					GlobalVariable::InternalLinkage, sampler_initializer, "__air_sampler_state",
+					nullptr, GlobalValue::NotThreadLocal, Metal_ConstantAS);
+				sampler_state->setAlignment(MaybeAlign { 8u });
 				
 				// insert metadata
 				SmallVector<llvm::Metadata*, 2> sampler_md_info;
@@ -193,6 +212,73 @@ namespace {
 			return cast_sampler_state;
 		}
 		
+        // Narrow float gather ABI, independently checked against Xcode AIR and
+        // DXMT AIRBuilder. Preserve the runtime texture and sampler handles.
+        void handle_gather_image(CallBase& CB) override {
+            auto fail = [&]() {
+                ctx->emitError(&CB, "unsupported or malformed float texture gather");
+            };
+            if (CB.arg_size() != 7) { fail(); return; }
+            auto *kind = dyn_cast<ConstantInt>(CB.getArgOperand(2));
+            auto *component = dyn_cast<ConstantInt>(CB.getArgOperand(6));
+            if (!kind || !kind->getType()->isIntegerTy(64) ||
+                !component || !component->getType()->isIntegerTy(32) ||
+                component->getZExtValue() > 3) { fail(); return; }
+            const auto bits = kind->getZExtValue();
+            const bool array = bits == 0x12f400ULL;
+            const bool cube = bits == 0x82f400ULL;
+            if (bits != 0x2f400ULL && !array && !cube) { fail(); return; }
+            const StringRef geometry = array ? "texture_2d_array" :
+                (cube ? "texture_cube" : "texture_2d");
+            auto *image = CB.getArgOperand(0);
+            auto *image_pointer = dyn_cast<PointerType>(image->getType());
+            auto *image_record = image_pointer && !image_pointer->isOpaque() ?
+                dyn_cast<StructType>(image_pointer->getPointerElementType()) : nullptr;
+            const std::string expected_type = "struct._" + geometry.str() + "_t";
+            auto *f4 = FixedVectorType::get(builder->getFloatTy(), 4);
+            auto *coord_type = FixedVectorType::get(builder->getFloatTy(), cube ? 3 : 2);
+            auto *offset_type = FixedVectorType::get(builder->getInt32Ty(), 2);
+            if (!image_pointer || image_pointer->getAddressSpace() != 1 ||
+                !image_record || image_record->getName() != expected_type ||
+                CB.getType() != f4 || CB.getArgOperand(3)->getType() != coord_type ||
+                !CB.getArgOperand(4)->getType()->isIntegerTy(32) ||
+                CB.getArgOperand(5)->getType() != offset_type) { fail(); return; }
+            if (!array) {
+                auto *layer = dyn_cast<ConstantInt>(CB.getArgOperand(4));
+                if (!layer || !layer->isZero()) { fail(); return; }
+            }
+            if (cube) {
+                auto *offset = dyn_cast<Constant>(CB.getArgOperand(5));
+                if (!offset || !offset->isNullValue()) { fail(); return; }
+            }
+            auto *sampler = make_sampler(nullptr, CB.getArgOperand(1), ctx, *M, CB);
+            if (!sampler) return;
+            builder->SetInsertPoint(&CB);
+            SmallVector<Value*, 8> args { image, sampler, CB.getArgOperand(3) };
+            if (array) args.push_back(CB.getArgOperand(4));
+            if (!cube) {
+                args.push_back(builder->getTrue());
+                args.push_back(CB.getArgOperand(5));
+            }
+            args.push_back(component);
+            args.push_back(builder->getInt32(0)); // sample access
+            SmallVector<Type*, 8> types;
+            for (auto *arg : args) types.push_back(arg->getType());
+            auto *result_type = StructType::get(*ctx, { f4, builder->getInt8Ty() });
+            auto *function_type = FunctionType::get(result_type, types, false);
+            const std::string symbol = "air.gather_" + geometry.str() + ".v4f32";
+            if (auto *existing = M->getFunction(symbol)) {
+                if (existing->getFunctionType() != function_type) { fail(); return; }
+            }
+            auto callee = M->getOrInsertFunction(symbol, function_type);
+            auto *call = builder->CreateCall(callee, args);
+            call->setDoesNotThrow();
+            call->setOnlyReadsMemory();
+            auto *value = builder->CreateExtractValue(call, { 0 });
+            CB.replaceAllUsesWith(value);
+            CB.eraseFromParent();
+        }
+
 		void handle_read_image(Instruction& I,
 							   const StringRef& func_name,
 							   llvm::Value* img_handle_arg,
@@ -280,6 +366,11 @@ namespace {
 			// for msaa: always read
 			// for all else: read if int coords, sample if float coords
 			const bool is_sample_call = (!is_msaa && !coord_type->isIntegerTy());
+            const bool is_buffer = image_type == COMPUTE_IMAGE_TYPE::IMAGE_1D_BUFFER;
+            if (is_buffer && (is_sample_call || coord_vec_type->getNumElements() != 1)) {
+                ctx->emitError(&I, "buffer textures require scalar integer read coordinates");
+                return;
+            }
 			
 			// img handle and sampler
 			func_arg_types.push_back(img_handle_arg->getType());
@@ -290,6 +381,7 @@ namespace {
 			uint32_t sampler_param_idx = 0;
 			if (is_sample_call) {
 				auto sampler = make_sampler(const_sampler_arg, dyn_sampler_arg, ctx, *M, I);
+				if (!sampler) return; // make_sampler already emitted a diagnostic.
 				
 				func_arg_types.push_back(sampler->getType());
 				func_args.push_back(sampler);
@@ -413,7 +505,7 @@ namespace {
 				}
 				
 				// -> read
-				if(!is_msaa) { // msaa is always lod 0, hence needs no arg
+				if(!is_msaa && !is_buffer) { // neither MSAA nor buffer textures have a mip argument
 					// -> lod
 					if(is_lod_or_bias) {
 						// for read, only int lods are allowed
@@ -435,9 +527,10 @@ namespace {
 					}
 				}
 				
-				// additional (unknown) i32 0 argument
-				func_arg_types.push_back(llvm::Type::getInt32Ty(*ctx));
-				func_args.push_back(builder->getInt32(0));
+                // AIR read access: buffer textures in this supported subset
+                // use read (1). Preserve existing sample-access textures (0).
+                func_arg_types.push_back(llvm::Type::getInt32Ty(*ctx));
+                func_args.push_back(builder->getInt32(is_buffer ? 1 : 0));
 			}
 			else {
 				// -> sample
@@ -457,7 +550,16 @@ namespace {
 				// -> offset
 				if(!is_cube) { // cube allows no offset
 					func_arg_types.push_back(llvm::Type::getInt1Ty(*ctx));
-					func_args.push_back(builder->getInt1(is_offset));
+                    // Xcode AIR and pinned DXMT use true for this control
+                    // operand on supported 2D/3D/2D-array samples, including gradients and a zero
+                    // offset. Its precise semantic name is not established.
+                    // Do not extrapolate to depth, cube or other geometries.
+                    const bool reference_sample_control =
+                        image_type == COMPUTE_IMAGE_TYPE::IMAGE_2D ||
+                        image_type == COMPUTE_IMAGE_TYPE::IMAGE_3D ||
+                        image_type == COMPUTE_IMAGE_TYPE::IMAGE_2D_ARRAY ||
+                        image_type == COMPUTE_IMAGE_TYPE::IMAGE_DEPTH_ARRAY;
+                    func_args.push_back(builder->getInt1(reference_sample_control || is_offset));
 					
 					func_arg_types.push_back(offset_arg->getType());
 					func_args.push_back(offset_arg);
@@ -559,7 +661,11 @@ namespace {
 								llvm::Value* lod_arg,
 								const bool is_lod,
 								llvm::Value* data_arg) override {
-			SmallVector<llvm::Type*, 16> func_arg_types;
+			if (image_type == COMPUTE_IMAGE_TYPE::IMAGE_1D_BUFFER) {
+                ctx->emitError(&I, "buffer texture writes are not supported");
+                return;
+            }
+            SmallVector<llvm::Type*, 16> func_arg_types;
 			SmallVector<llvm::Value*, 16> func_args;
 			
 			//// more arg checking
@@ -677,7 +783,10 @@ namespace {
 			
 			// additional rounding mode argument (always set to 0 for now, or 2 if depth)
 			func_arg_types.push_back(llvm::Type::getInt32Ty(*ctx));
-			func_args.push_back(builder->getInt32(!is_depth ? 0 : 2));
+			const bool write_only_access =
+                (full_image_type & COMPUTE_IMAGE_TYPE::__ACCESS_MASK) == COMPUTE_IMAGE_TYPE::WRITE &&
+                (image_type == COMPUTE_IMAGE_TYPE::IMAGE_2D || image_type == COMPUTE_IMAGE_TYPE::IMAGE_3D);
+            func_args.push_back(builder->getInt32(write_only_access ? 2 : (!is_depth ? 0 : 2)));
 			
 			// -> build write func name
 			const std::string write_func_name = "air.write_" + geom + '.' + dtype;
@@ -827,6 +936,7 @@ namespace {
 			func_args.push_back(img_handle_arg);
 			
 			auto sampler = make_sampler(const_sampler_arg, dyn_sampler_arg, ctx, *M, I);
+			if (!sampler) return; // make_sampler already emitted a diagnostic.
 			func_arg_types.push_back(sampler->getType());
 			func_args.push_back(sampler);
 			

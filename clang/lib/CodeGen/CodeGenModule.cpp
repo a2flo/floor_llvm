@@ -54,6 +54,7 @@
 #include "llvm/IR/CallingConv.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ProfileSummary.h"
@@ -2946,6 +2947,7 @@ static bool is_indirect_buffer(const clang::QualType& type, CodeGenModule &CGM,
 		const std::function<bool(const clang::QualType&)> indirect_checker = [&indirect_checker, &CGM](const clang::QualType& type) {
 			if (type->isPointerType() ||
 				type->isReferenceType() ||
+				type->isSamplerT() ||
 				type->isImageType() ||
 				type->isArrayImageType(true) ||
 				type->isArrayBufferType() ||
@@ -3015,8 +3017,7 @@ static std::optional<control_point_info_t> extract_control_point_info(CodeGenMod
 			scalar_type = CGM.getContext().get_compat_vector_type(cxx_rdecl);
 		}
 		// vector type -> scalar type
-		if (isa<VectorType>(scalar_type)) {
-			auto vec_type = cast<VectorType>(scalar_type);
+		if (const auto *vec_type = scalar_type->getAs<VectorType>()) {
 			if (vec_type->getNumElements() < 1u || vec_type->getNumElements() > 4u) {
 				CGM.Error(cp_field->getSourceRange().getBegin(),
 						  StringRef("vector type with #elements < 1 or > 4 not supported as a control point type"));
@@ -3144,6 +3145,7 @@ std::string CodeGenModule::make_air_type_name(const clang::QualType& type) const
 	// NOTE: air wants the type w/o qualifiers
 	const auto base_unq_type = type.getTypePtr()->getBaseElementTypeUnsafe();
 	const auto unqualified_type = base_unq_type->getCanonicalTypeInternal();
+	if (unqualified_type->isSamplerT()) return std::string("sampler");
 	
 	// strips "const", "volatile", "restrict" and "__restrict" from the type name
 	const auto strip_cvr = [](std::string in_str) {
@@ -3379,14 +3381,420 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 								   const CGFunctionInfo &FnInfo,
 								   SmallVector <llvm::Metadata*, 5> &kernelMDArgs,
 								   CGBuilderTy& Builder) {
+	// Once any buffer uses explicit MSL indices, require every buffer to do so.
+	// Mixing inferred and explicit locations can silently alias resources.
+	bool has_explicit_buffers = false;
+	for (const auto *P : FD->parameters())
+		has_explicit_buffers |= P->hasAttr<MetalBufferBindingAttr>();
+	uint32_t used_buffer_indices = 0;
+	if (has_explicit_buffers) {
+		for (const auto *P : FD->parameters()) {
+			const auto T = P->getType();
+			if (!T->isPointerType() && !T->isReferenceType())
+				continue;
+			const auto AS = T->getPointeeType().getAddressSpace();
+			if (P->hasAttr<GraphicsStageInputAttr>() ||
+			    (AS != LangAS::opencl_global && AS != LangAS::opencl_constant))
+				continue;
+			const auto *Binding = P->getAttr<MetalBufferBindingAttr>();
+			if (!Binding) {
+				Error(P->getBeginLoc(), "all buffer parameters require explicit buffer attributes");
+				return;
+			}
+			const auto Index = Binding->getIndex();
+			if (Index > 30 || (used_buffer_indices & (uint32_t(1) << Index))) {
+				Error(P->getBeginLoc(), "duplicate or invalid Metal buffer binding");
+				return;
+			}
+			used_buffer_indices |= uint32_t(1) << Index;
+		}
+	}
 	const bool is_kernel = FD->hasAttr<ComputeKernelAttr>();
+  // Threadgroup resources use their own binding namespace and must never
+  // advance or alias the device/constant buffer counter.
+  bool ExplicitThreadgroups = false;
+  for (const auto *P : FD->parameters())
+    ExplicitThreadgroups |= P->hasAttr<MetalThreadgroupBindingAttr>();
+  uint32_t UsedThreadgroupIndices = 0;
+  if (ExplicitThreadgroups) {
+    if (!is_kernel) {
+      Error(FD->getBeginLoc(), "threadgroup resource bindings require a compute kernel");
+      return;
+    }
+    for (const auto *P : FD->parameters()) {
+      const auto T = P->getType();
+      const auto *Binding = P->getAttr<MetalThreadgroupBindingAttr>();
+      const bool Local = (T->isPointerType() || T->isReferenceType()) &&
+          T->getPointeeType().getAddressSpace() == LangAS::opencl_local;
+      if (!Binding && !Local) continue;
+      if (!Binding || !Local || Binding->getIndex() > 30 ||
+          (UsedThreadgroupIndices & (uint32_t(1) << Binding->getIndex()))) {
+        Error(P->getBeginLoc(), "missing, duplicate or invalid threadgroup resource binding");
+        return;
+      }
+      for (const auto *A : P->attrs()) {
+        if (!isa<MetalThreadgroupBindingAttr>(A)) {
+          Error(P->getBeginLoc(), "threadgroup resource binding has unsupported additional attributes");
+          return;
+        }
+      }
+      UsedThreadgroupIndices |= uint32_t(1) << Binding->getIndex();
+    }
+  }
+
 	const bool is_vertex = FD->hasAttr<GraphicsVertexShaderAttr>();
 	const bool is_fragment = FD->hasAttr<GraphicsFragmentShaderAttr>();
+	bool explicit_front_facing = false;
+	for (const auto *P : FD->parameters())
+		explicit_front_facing |= P->hasAttr<MetalFrontFacingAttr>();
 	const bool is_tess_control = FD->hasAttr<GraphicsTessellationControlShaderAttr>();
 	const bool is_tess_eval = FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>();
 	const bool is_task = FD->hasAttr<GraphicsTaskShaderAttr>();
 	const bool is_mesh = FD->hasAttr<GraphicsMeshShaderAttr>();
 	
+  // Required conditional render-target interface support. Struct layout and
+  // function parameters remain present; Metal specializes the AIR interface.
+  // Inspect declarations before ABI flattening: malformed/nested interface
+  // records must diagnose rather than trigger the flattening helper's asserts.
+  std::function<bool(const CXXRecordDecl *)> has_fc_predicate = [&](const CXXRecordDecl *R) {
+    if (!R || !(R = R->getDefinition())) return false;
+    for (const auto &Base : R->bases())
+      if (has_fc_predicate(Base.getType()->getAsCXXRecordDecl())) return true;
+    for (const auto *Field : R->fields()) {
+      if (Field->hasAttr<MetalFunctionConstantPredicateAttr>()) return true;
+      if (has_fc_predicate(getContext().getBaseElementType(Field->getType())->getAsCXXRecordDecl()))
+        return true;
+    }
+    return false;
+  };
+  for (const auto *P : FD->parameters()) {
+    const auto T = P->getType();
+    const auto Base = T->isPointerType() || T->isReferenceType() ? T->getPointeeType() : T;
+    if (has_fc_predicate(Base->getAsCXXRecordDecl())) {
+      Error(P->getBeginLoc(), "conditional fields are supported only in fragment output records");
+      return;
+    }
+    if (P->hasAttr<MetalFunctionConstantPredicateAttr>()) {
+      unsigned ColorCount = 0;
+      for (const auto *A : P->attrs()) {
+        ColorCount += isa<GraphicsFBOColorLocationAttr>(A);
+        if (!isa<MetalFunctionConstantPredicateAttr>(A) && !isa<GraphicsFBOColorLocationAttr>(A)) {
+          Error(P->getBeginLoc(), "conditional color parameter has unsupported additional attributes");
+          return;
+        }
+      }
+      if (ColorCount != 1 || !is_fragment || !P->hasAttr<GraphicsFBOColorLocationAttr>() ||
+          P->hasAttr<GraphicsStageInputAttr>() || P->hasAttr<MetalBufferBindingAttr>() ||
+          P->hasAttr<GraphicsVertexPositionAttr>() || P->hasAttr<GraphicsPointSizeAttr>() ||
+          P->hasAttr<GraphicsFBODepthTypeAttr>()) {
+        Error(P->getBeginLoc(), "conditional color input requires an unambiguous fragment render-target parameter");
+        return;
+      }
+    }
+  }
+  const auto *FCOutput = FD->getReturnType()->getAsCXXRecordDecl();
+  if (has_fc_predicate(FCOutput)) {
+    if (!is_fragment || FCOutput->isUnion() || FCOutput->getNumBases() ||
+        !FCOutput->isStandardLayout() || !FCOutput->isTriviallyCopyable()) {
+      Error(FD->getBeginLoc(), "conditional outputs require a plain fragment output record");
+      return;
+    }
+    for (const auto *Field : FCOutput->fields()) {
+      const auto *V = Field->getType()->getAs<VectorType>();
+      const auto *Color = Field->getAttr<GraphicsFBOColorLocationAttr>();
+      unsigned ColorCount = 0;
+      for (const auto *A : Field->attrs()) ColorCount += isa<GraphicsFBOColorLocationAttr>(A);
+      if (ColorCount != 1 || !V || V->getNumElements() != 4 ||
+          !V->getElementType()->isSpecificBuiltinType(BuiltinType::Float) ||
+          !Color || Color->getEvalLocation() > 7 || Field->isBitField() ||
+          Field->hasAttr<GraphicsVertexPositionAttr>() || Field->hasAttr<MetalUserVaryingAttr>() ||
+          Field->hasAttr<MetalVertexAttributeAttr>() || (Field->hasAttr<MetalInterpolationAttr>() || Field->hasAttr<GraphicsInterpolateFlatAttr>()) ||
+          Field->hasAttr<GraphicsFBODepthTypeAttr>() || Field->hasAttr<GraphicsPointSizeAttr>()) {
+        Error(Field->getBeginLoc(), "unsupported conditional fragment output layout or semantic");
+        return;
+      }
+    }
+  }
+  auto make_fc_predicate = [this](const MetalFunctionConstantPredicateAttr *Attr) -> llvm::MDNode * {
+    const auto *Ref = cast<DeclRefExpr>(Attr->getCondition()->IgnoreParenImpCasts());
+    const auto *V = cast<VarDecl>(Ref->getDecl());
+    const auto Index = V->getAttr<MetalFunctionConstantAttr>()->getIndex();
+    // Ensure numeric lowering exists even when the bool is only referenced by
+    // an attribute, not by a statement in the shader body.
+    (void)GetAddrOfGlobalVar(V);
+    llvm::GlobalVariable *Placeholder = nullptr;
+    const auto *Constants = TheModule.getNamedMetadata("air.function_constants");
+    if (Constants) for (const auto *N : Constants->operands()) {
+      if (N->getNumOperands() != 5) continue;
+      const auto *I = llvm::mdconst::dyn_extract<llvm::ConstantInt>(N->getOperand(3));
+      if (I && I->getZExtValue() == Index)
+        Placeholder = llvm::mdconst::dyn_extract<llvm::GlobalVariable>(N->getOperand(0));
+    }
+    if (!Placeholder || !Placeholder->getValueType()->isIntegerTy(8) ||
+        !Placeholder->isExternallyInitialized()) {
+      Error(Attr->getLocation(), "missing required bool specialization initializer");
+      return nullptr;
+    }
+    auto *I8 = llvm::Type::getInt8Ty(VMContext);
+    auto *Pred = new llvm::GlobalVariable(TheModule, I8, false,
+        llvm::GlobalValue::InternalLinkage, llvm::ConstantInt::get(I8, 0),
+        "__metal_implicit_fc_pred", nullptr, llvm::GlobalVariable::NotThreadLocal, 2);
+    Pred->setAlignment(llvm::Align(1));
+    addCompilerUsedGlobal(Pred);
+    auto *Ctor = llvm::Function::Create(
+        llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext), false),
+        llvm::GlobalValue::InternalLinkage, "__metal_fc_pred_init", TheModule);
+    Ctor->setSection("air.static_init");
+    llvm::IRBuilder<> B(llvm::BasicBlock::Create(VMContext, "entry", Ctor));
+    auto Normalize = TheModule.getOrInsertFunction(
+        "air.normalize_function_constant_predicate.i8",
+        llvm::FunctionType::get(I8, {I8}, false));
+    if (auto *F = llvm::dyn_cast<llvm::Function>(Normalize.getCallee())) {
+      F->setDoesNotThrow();
+      F->setDoesNotAccessMemory();
+    }
+    // Load placeholder directly, avoiding dependencies on equal-priority ctor
+    // ordering. Xcode's single aggregated ctor loads this same placeholder.
+    B.CreateStore(B.CreateCall(Normalize, {B.CreateLoad(I8, Placeholder)}), Pred);
+    B.CreateRetVoid();
+    AddGlobalCtor(Ctor);
+    llvm::Metadata *Ops[] = {llvm::ConstantAsMetadata::get(Pred),
+        llvm::MDString::get(VMContext, "bool"), llvm::MDString::get(VMContext, V->getName())};
+    return llvm::MDNode::get(VMContext, Ops);
+  };
+
+    // Transport the exact appended ABI count to the final lowering pass.
+    // The final pass consumes this internal metadata before writing AIR.
+    Fn->setMetadata("floor.implicit_arg_count", llvm::MDNode::get(VMContext, {
+        llvm::ConstantAsMetadata::get(Builder.getInt32(
+            getTypes().getMetalVulkanImplicitArgCount(FD) -
+            (getCodeGenOpts().MetalSoftPrintf > 0 ? 1u : 0u)))}));
+
+	// Apple-MSL stage_in is a by-value plain interface record. The older floor
+	// stage_input path retains its existing aggregate behavior.
+	// Detect annotations without ABI flattening. Unsupported aggregates must reach
+	// diagnostics below, not the flattening helper's valid-position/array assertions.
+	std::function<bool(const CXXRecordDecl *)> has_msl_io = [&](const CXXRecordDecl *R) {
+		if (!R || !(R = R->getDefinition())) return false;
+		for (const auto &Base : R->bases())
+			if (has_msl_io(Base.getType()->getAsCXXRecordDecl())) return true;
+		for (const auto *F : R->fields()) {
+			if (F->hasAttr<MetalVertexAttributeAttr>() || F->hasAttr<MetalUserVaryingAttr>() || F->hasAttr<MetalInterpolationAttr>() || F->hasAttr<MetalInvariantAttr>())
+				return true;
+			if (has_msl_io(getContext().getBaseElementType(F->getType())->getAsCXXRecordDecl()))
+				return true;
+		}
+		return false;
+	};
+  unsigned explicit_thread_builtins = 0;
+  for (const auto *P : FD->parameters()) {
+    const auto *A = P->getAttr<MetalThreadBuiltinAttr>();
+    if (!A) continue;
+    const StringRef Name = A->getSpelling();
+    const unsigned Slot = Name == "thread_index_in_simdgroup" ? 0 : Name == "thread_index_in_threadgroup" ? 1 : Name == "threadgroup_position_in_grid" ? 2 : 3;
+    if ((!is_kernel && !(is_fragment && Slot == 0)) ||
+        (explicit_thread_builtins & (1u << Slot)) ||
+        P->hasAttr<GraphicsStageInputAttr>() || P->hasAttr<MetalBufferBindingAttr>() ||
+          P->hasAttr<MetalVertexBuiltinAttr>() || P->hasAttr<GraphicsVertexPositionAttr>() ||
+          P->hasAttr<MetalFrontFacingAttr>() || P->hasAttr<GraphicsFBOColorLocationAttr>() ||
+          P->hasAttr<GraphicsFBODepthTypeAttr>() || P->hasAttr<GraphicsPointSizeAttr>() ||
+          P->hasAttr<MetalFunctionConstantPredicateAttr>()) {
+      Error(P->getBeginLoc(), "unsupported or duplicate Metal thread builtin parameter");
+      return;
+    }
+    explicit_thread_builtins |= 1u << Slot;
+  }
+	bool explicit_position_in_patch = false;
+	for (const auto *P : FD->parameters()) {
+		if (!P->hasAttr<MetalPositionInPatchAttr>()) continue;
+		const auto *Patch = FD->getAttr<GraphicsTessellationPatchAttr>();
+		const bool IsQuad = Patch && Patch->getPatchPrimitive() == GraphicsTessellationPatchAttr::PatchQuad;
+		const auto *V = P->getType()->getAs<VectorType>();
+		if (!is_tess_eval || !Patch || explicit_position_in_patch || !V ||
+			V->getNumElements() != (IsQuad ? 2u : 3u) ||
+			!V->getElementType()->isSpecificBuiltinType(BuiltinType::Float) ||
+			P->hasAttr<GraphicsStageInputAttr>() || P->hasAttr<MetalBufferBindingAttr>() ||
+			P->hasAttr<MetalVertexBuiltinAttr>() || P->hasAttr<GraphicsVertexPositionAttr>() ||
+			P->hasAttr<MetalFrontFacingAttr>()) {
+			Error(P->getBeginLoc(), "position_in_patch requires a unique float3 triangle or float2 quad patch input");
+			return;
+		}
+		explicit_position_in_patch = true;
+	}
+	bool explicit_vertex_id = false, explicit_instance_id = false, explicit_base_instance = false;
+	for (const auto *P : FD->parameters()) {
+		if (const auto *A = P->getAttr<MetalVertexBuiltinAttr>()) {
+			const auto Name = StringRef(A->getSpelling());
+			bool &Present = Name == "vertex_id" ? explicit_vertex_id : Name == "instance_id" ? explicit_instance_id : explicit_base_instance;
+			if (!is_vertex || Present || P->hasAttr<GraphicsStageInputAttr>() ||
+				P->hasAttr<MetalBufferBindingAttr>() || P->hasAttr<GraphicsVertexPositionAttr>() || P->hasAttr<MetalFrontFacingAttr>() ||
+				P->hasAttr<GraphicsFBOColorLocationAttr>() || P->hasAttr<GraphicsFBODepthTypeAttr>() ||
+				P->hasAttr<GraphicsPointSizeAttr>()) {
+				Error(P->getBeginLoc(), "duplicate, conflicting or non-vertex Metal builtin parameter");
+				return;
+			}
+			Present = true;
+		}
+	}
+	bool direct_fragment_position = false, direct_front_facing = false;
+	for (const auto *P : FD->parameters()) {
+		const bool IsPosition = P->hasAttr<GraphicsVertexPositionAttr>();
+		const bool IsFrontFacing = P->hasAttr<MetalFrontFacingAttr>();
+		if (!IsPosition && !IsFrontFacing) continue;
+		const auto *V = P->getType()->getAs<VectorType>();
+		if (!is_fragment || (IsPosition && IsFrontFacing) ||
+			(IsPosition && (direct_fragment_position || !V || V->getNumElements() != 4 ||
+				!V->getElementType()->isSpecificBuiltinType(BuiltinType::Float))) ||
+			(IsFrontFacing && (direct_front_facing || !P->getType()->isSpecificBuiltinType(BuiltinType::Bool))) ||
+			P->hasAttr<GraphicsStageInputAttr>() || P->hasAttr<MetalBufferBindingAttr>() || P->hasAttr<MetalVertexBuiltinAttr>() ||
+			P->hasAttr<GraphicsFBOColorLocationAttr>() || P->hasAttr<GraphicsFBODepthTypeAttr>() || P->hasAttr<GraphicsPointSizeAttr>()) {
+			Error(P->getBeginLoc(), "unsupported or duplicate Metal fragment builtin parameter");
+			return;
+		}
+		direct_fragment_position |= IsPosition;
+		direct_front_facing |= IsFrontFacing;
+	}
+	unsigned all_stage_inputs = 0;
+	for (const auto *P : FD->parameters())
+		all_stage_inputs += P->hasAttr<GraphicsStageInputAttr>();
+	unsigned msl_stage_inputs = 0;
+	for (const auto *P : FD->parameters()) {
+		const auto *Stage = P->getAttr<GraphicsStageInputAttr>();
+		if (direct_fragment_position && Stage && !Stage->isMSL()) {
+			Error(P->getBeginLoc(), "direct Metal position cannot be combined with legacy stage_input; use stage_in");
+			return;
+		}
+		if (!Stage || !Stage->isMSL()) {
+			const auto T = P->getType();
+			const auto Base = T->isPointerType() || T->isReferenceType() ? T->getPointeeType() : T;
+			// Interface field attributes do not turn explicitly bound storage into
+			// another stage input. Binding validation above and in Sema still applies.
+			// In particular, never exempt a conflicting legacy stage_input parameter.
+			const bool IsStoragePointer = !Stage && (T->isPointerType() || T->isReferenceType());
+			const auto AS = Base.getAddressSpace();
+			bool HasOnlyBufferBinding = true;
+			for (const auto *A : P->attrs())
+				HasOnlyBufferBinding &= isa<MetalBufferBindingAttr>(A);
+			const bool IsBoundBuffer = IsStoragePointer && HasOnlyBufferBinding &&
+				P->hasAttr<MetalBufferBindingAttr>() &&
+				(AS == LangAS::opencl_global || AS == LangAS::opencl_constant);
+			const bool IsBoundThreadgroup = IsStoragePointer && is_kernel &&
+				P->hasAttr<MetalThreadgroupBindingAttr>() && AS == LangAS::opencl_local;
+			if (!IsBoundBuffer && !IsBoundThreadgroup && has_msl_io(Base->getAsCXXRecordDecl())) {
+				Error(P->getBeginLoc(), "explicit MSL stage-input semantics require stage_in");
+				return;
+			}
+			continue;
+		}
+		const auto *R = P->getType()->getAsCXXRecordDecl();
+		if (++msl_stage_inputs > 1 || all_stage_inputs != 1 || (!is_vertex && !is_fragment && !is_tess_eval && !is_kernel) || !R ||
+			R->isUnion() || R->getNumBases() || R->isPolymorphic() ||
+			R->field_empty() || !R->isStandardLayout() || !R->isTriviallyCopyable()) {
+			Error(P->getBeginLoc(), "MSL stage_in requires one plain by-value shader interface record");
+			return;
+		}
+		if (is_tess_eval) {
+			const auto Fields = getTypes().get_aggregate_scalar_fields(R, R);
+			if (Fields.size() != 1 || !Fields[0].type->isPatchControlPointT() || Fields[0].parents.empty()) {
+				Error(P->getBeginLoc(), "patch stage_in requires one patch_control_point record");
+				return;
+			}
+			auto CP = extract_control_point_info(*this, Fields[0].parents[0], Fields[0].field_decl);
+			if (!CP) return;
+			std::unordered_set<unsigned> Locations;
+			for (const auto &Field : CP->fields) {
+				const auto *Location = Field->getAttr<MetalVertexAttributeAttr>();
+				if (!Location || Location->getIndex() > 31 || !Locations.insert(Location->getIndex()).second ||
+					Field->hasAttr<MetalUserVaryingAttr>() || Field->hasAttr<GraphicsVertexPositionAttr>() ||
+					(Field->hasAttr<MetalInterpolationAttr>() || Field->hasAttr<GraphicsInterpolateFlatAttr>()) || Field->hasAttr<MetalInvariantAttr>()) {
+					Error(Field->getBeginLoc(), "patch control-point fields require unique attribute locations");
+					return;
+				}
+			}
+			continue;
+		}
+		std::unordered_set<unsigned> locations;
+		std::unordered_set<std::string> semantics;
+		bool position = false;
+		for (const auto *F : R->fields()) {
+			const auto *Location = F->getAttr<MetalVertexAttributeAttr>();
+			const auto *User = F->getAttr<MetalUserVaryingAttr>();
+			const bool IsPosition = F->hasAttr<GraphicsVertexPositionAttr>();
+			const auto T = F->getType();
+			if (F->isBitField() || F->hasAttr<MetalInvariantAttr>() || F->hasAttr<GraphicsPointSizeAttr>() ||
+				F->hasAttr<GraphicsFBOColorLocationAttr>() || F->hasAttr<GraphicsFBODepthTypeAttr>() ||
+				(!T->isScalarType() && !T->isVectorType()) ||
+				T->isPointerType() || T->isReferenceType() ||
+				((is_vertex || is_kernel) && (!Location || User || IsPosition || (F->hasAttr<MetalInterpolationAttr>() || F->hasAttr<GraphicsInterpolateFlatAttr>()))) ||
+				(is_fragment && (Location || (bool(User) == IsPosition)))) {
+				Error(F->getBeginLoc(), "unsupported or conflicting MSL stage-input field");
+				return;
+			}
+			if ((Location && !locations.insert(Location->getIndex()).second) ||
+				(User && !semantics.insert(User->getSemantic()->getName().str()).second) ||
+				(IsPosition && (position || direct_fragment_position))) {
+				Error(F->getBeginLoc(), "duplicate MSL stage-input semantic");
+				return;
+			}
+			if (IsPosition) {
+				position = true;
+				const auto *V = T->getAs<VectorType>();
+				if (!V || V->getNumElements() != 4 || !V->getElementType()->isSpecificBuiltinType(BuiltinType::Float) || (F->hasAttr<MetalInterpolationAttr>() || F->hasAttr<GraphicsInterpolateFlatAttr>())) {
+					Error(F->getBeginLoc(), "fragment position must be float4 without interpolation attributes");
+					return;
+				}
+			}
+		}
+	}
+
+	const auto *OutputRecord = FD->getReturnType()->getAsCXXRecordDecl();
+	if (has_msl_io(OutputRecord)) {
+		if ((!is_vertex && !is_tess_eval) || OutputRecord->isUnion() || OutputRecord->getNumBases() ||
+			!OutputRecord->isStandardLayout() || !OutputRecord->isTriviallyCopyable()) {
+			Error(FD->getBeginLoc(), "explicit MSL output semantics require a plain vertex-output record");
+			return;
+		}
+		std::unordered_set<std::string> semantics;
+		bool position = false, point_size = false;
+		for (const auto *F : OutputRecord->fields()) {
+			const auto *User = F->getAttr<MetalUserVaryingAttr>();
+			const bool IsPosition = F->hasAttr<GraphicsVertexPositionAttr>();
+			const bool IsPointSize = F->hasAttr<GraphicsPointSizeAttr>();
+			const auto T = F->getType();
+			if (F->isBitField() || (F->hasAttr<MetalInvariantAttr>() && !IsPosition) || F->hasAttr<MetalVertexAttributeAttr>() ||
+				(F->hasAttr<MetalInterpolationAttr>() || F->hasAttr<GraphicsInterpolateFlatAttr>()) || F->hasAttr<GraphicsFBOColorLocationAttr>() ||
+				F->hasAttr<GraphicsFBODepthTypeAttr>() ||
+				(unsigned(bool(User)) + unsigned(IsPosition) + unsigned(IsPointSize) != 1)) {
+				Error(F->getBeginLoc(), "unsupported or conflicting MSL vertex-output semantic; output interpolation is not supported yet");
+				return;
+			}
+			if ((User && !semantics.insert(User->getSemantic()->getName().str()).second) ||
+				(IsPosition && position) || (IsPointSize && point_size)) {
+				Error(F->getBeginLoc(), "duplicate MSL vertex-output semantic");
+				return;
+			}
+			if (IsPosition) {
+				position = true;
+				const auto *V = T->getAs<VectorType>();
+				if (!V || V->getNumElements() != 4 || !V->getElementType()->isSpecificBuiltinType(BuiltinType::Float)) {
+					Error(F->getBeginLoc(), "vertex position must be float4");
+					return;
+				}
+			}
+			if (IsPointSize) {
+				point_size = true;
+				if (!T->isSpecificBuiltinType(BuiltinType::Float)) {
+					Error(F->getBeginLoc(), "vertex point_size must be float");
+					return;
+				}
+			}
+		}
+		if (!position) {
+			Error(FD->getBeginLoc(), "MSL vertex-output record requires a position");
+			return;
+		}
+	}
+
 	//
 	SmallVector<llvm::Metadata*, 4> stage_infos;
 	SmallVector<llvm::Metadata*, 8> arg_infos;
@@ -3426,7 +3834,9 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(elem_count)));
 			// #5: access type (sample = 0, read = 1 or write = 2)
 			// note that "read" is essentially a subset of "sample" -> use "sample" for r/o
-			if (flags_attr && flags_attr->isWriteOnly()) {
+			if (type->isSpecificBuiltinType(BuiltinType::OCLImage1dBuffer)) {
+                arg_info.push_back(llvm::MDString::get(VMContext, "air.read"));
+            } else if (flags_attr && flags_attr->isWriteOnly()) {
 				arg_info.push_back(llvm::MDString::get(VMContext, "air.write"));
 			} else if (flags_attr && flags_attr->isReadWrite()) {
 				arg_info.push_back(llvm::MDString::get(VMContext, "air.read_write"));
@@ -3454,7 +3864,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 					tex_type_name += "texture1d_array";
 					break;
 				case BuiltinType::OCLImage1dBuffer:
-					tex_type_name += "texture1d_buffer";
+					tex_type_name += "texture_buffer";
 					break;
 				case BuiltinType::OCLImage2d:
 					tex_type_name += "texture2d";
@@ -3520,7 +3930,9 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			}
 			tex_type_name += sample_type_str;
 			tex_type_name += ", ";
-			if (flags_attr && flags_attr->isReadOnly()) {
+			if (type->isSpecificBuiltinType(BuiltinType::OCLImage1dBuffer)) {
+                tex_type_name += "read";
+            } else if (flags_attr && flags_attr->isReadOnly()) {
 				tex_type_name += "sample";
 			} else if (flags_attr && flags_attr->isReadWrite()) {
 				tex_type_name += "read_write";
@@ -3598,10 +4010,44 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 						 uint32_t& buffer_or_tex_idx_child,
 						 uint32_t* total_size) -> SmallVector<llvm::Metadata*, 16> {
 			const auto fields = get_aggregate_fields(&struct_rdecl, Types, getDataLayout());
+			bool explicit_ids = false;
+			for (const auto &field : fields)
+				explicit_ids |= field->hasAttr<MetalArgumentIDAttr>();
+			if (explicit_ids && (!(indirect_buffer || is_indirect) ||
+				struct_rdecl.getNumBases() || struct_rdecl.isPolymorphic())) {
+				Error(struct_rdecl.getBeginLoc(), "id fields require a plain constant argument-buffer reference");
+				return {};
+			}
+			// Ordinary data-buffer reflection describes the AST memory layout, not
+			// a sum of LLVM store sizes. Packed LLVM records can contain explicit
+			// padding, and three-component vectors have padded allocation sizes.
+			// Keep argument-buffer IDs, stage/payload packing and flattened base
+			// classes on their existing paths. A base field's index is not an index
+			// into this record's AST layout.
+			bool use_ast_layout = !is_indirect && !indirect_buffer && !align_vectors &&
+				!parent_decl.hasAttr<GraphicsStageInputAttr>() && !struct_rdecl.isUnion() &&
+				!struct_rdecl.getNumBases() && !struct_rdecl.isPolymorphic();
+			for (const auto &field : fields)
+				use_ast_layout &= !field->isBitField();
+			const auto *record_layout = use_ast_layout ? &Context.getASTRecordLayout(&struct_rdecl) : nullptr;
 			SmallVector<llvm::Metadata*, 16> struct_info;
 			uint32_t offset = 0;
 			for (const auto& field : fields) {
 				auto field_type = field->getType();
+				if (explicit_ids) {
+					const auto *ID = field->getAttr<MetalArgumentIDAttr>();
+					const auto &layout = Context.getASTRecordLayout(&struct_rdecl);
+					if (!ID || !(field_type->isPointerType() || field_type->isImageType() || field_type->isAggregateImageType() || field_type->isSamplerT()) ||
+						Context.getTypeSize(field_type) != 64 ||
+                        Context.getTypeAlign(field_type) != 64 ||
+						layout.getAlignment().getQuantity() != 8 ||
+						layout.getFieldOffset(field->getFieldIndex()) != uint64_t(ID->getIndex()) * 64) {
+						Error(field->getBeginLoc(), "unsupported sparse argument-buffer field layout");
+						return {};
+					}
+					offset = ID->getIndex() * 8;
+					buffer_or_tex_idx_child = ID->getIndex();
+				}
 				auto llvm_field_type = getTypes().ConvertTypeForMem(field_type); // TODO: should use this _everywhere_ instead of llvm type tracking/matching!
 				uint32_t array_size = 0;
 				if (field_type->isArrayType()) {
@@ -3640,6 +4086,12 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				}
 				
 				auto size = (uint32_t)getDataLayout().getTypeStoreSize(llvm_field_type);
+				if (record_layout) {
+					offset = (uint32_t)(record_layout->getFieldOffset(field->getFieldIndex()) / Context.getCharWidth());
+					// For arrays, field_type is the element type: AIR stores its stride
+					// separately from the element count, including tail padding.
+					size = (uint32_t)Context.getTypeSizeInChars(field_type).getQuantity();
+				}
 				if (align_vectors && (llvm_field_type->isVectorTy() || is_vector_compat)) {
 					const auto vec_type = (is_vector_compat ? getTypes().ConvertTypeForMem(Context.get_compat_vector_type(field_cxx_rdecl)) : llvm_field_type);
 					assert(size > 0 && vec_type && vec_type->isVectorTy());
@@ -3662,8 +4114,31 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 				// #2: array size (0 signals "no array")
 				struct_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(array_size)));
 				// #3: type name
-				struct_info.push_back(llvm::MDString::get(VMContext, make_air_type_name(!field_pointee_type.isNull() ?
-																						field_pointee_type : field_type)));
+                // Explicit image IDs currently admit only image2d_t with
+                // checked float/read-only attributes. Match the AIR image type
+                // spelling in the outer structure descriptor as well.
+                auto field_type_name = make_air_type_name(!field_pointee_type.isNull() ? field_pointee_type : field_type);
+                if (explicit_ids) {
+                    auto image_type = field_type;
+                    const FieldDecl *image_field = *field;
+                    if (field_type->isAggregateImageType()) {
+                        image_field = *field_type->getAsCXXRecordDecl()->field_begin();
+                        image_type = image_field->getType();
+                    }
+                    const auto *image_flags = image_field->getAttr<FloorImageFlagsAttr>();
+                    const bool image_write = image_flags && image_flags->isWriteOnly();
+                    if (image_type->isSpecificBuiltinType(BuiltinType::OCLImage2d))
+                        field_type_name = image_write ? "texture2d<float, write>" : "texture2d<float, sample>";
+                    else if (image_type->isSpecificBuiltinType(BuiltinType::OCLImage3d))
+                        field_type_name = image_write ? "texture3d<float, write>" : "texture3d<float, sample>";
+                    else if (image_type->isSpecificBuiltinType(BuiltinType::OCLImage2dArray))
+                        field_type_name = "texture2d_array<float, sample>";
+                    else if (image_type->isSpecificBuiltinType(BuiltinType::OCLImageCube))
+                        field_type_name = "texturecube<float, sample>";
+                    else if (image_type->isSpecificBuiltinType(BuiltinType::OCLImage1dBuffer))
+                        field_type_name = "texture_buffer<float, read>";
+                }
+                struct_info.push_back(llvm::MDString::get(VMContext, field_type_name));
 				// #4: name/identifier
 				struct_info.push_back(llvm::MDString::get(VMContext, field->getName()));
 				// #5/#6: indirect argument (aka "argument buffer")
@@ -3680,6 +4155,20 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 							return {};
 						}
 						struct_info.push_back(llvm::MDNode::get(VMContext, field_arg_info));
+					} else if (field_type->isSamplerT()) {
+                        // AIR sampler binding tuple follows DXMT AIRSignature.
+                        SmallVector<llvm::Metadata*, 16> sampler_info {
+                            llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx_child++)),
+                            llvm::MDString::get(VMContext, "air.sampler"),
+                            llvm::MDString::get(VMContext, "air.location_index"),
+                            llvm::ConstantAsMetadata::get(Builder.getInt32(buffer_or_tex_idx_child++)),
+                            llvm::ConstantAsMetadata::get(Builder.getInt32(1)),
+                            llvm::MDString::get(VMContext, "air.arg_type_name"),
+                            llvm::MDString::get(VMContext, "sampler"),
+                            llvm::MDString::get(VMContext, "air.arg_name"),
+                            llvm::MDString::get(VMContext, field->getName())
+                        };
+                        struct_info.push_back(llvm::MDNode::get(VMContext, sampler_info));
 					} else if (field_type->isImageType()) {
 						auto field_arg_info = add_image_arg(field_type, field->getAttr<FloorImageFlagsAttr>(),
 															field->getAttr<FloorImageDataTypeAttr>(), field->getName().str(),
@@ -3714,7 +4203,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 							auto arg_info = add_image_arg(img->getType(),
 														  img->getAttr<FloorImageFlagsAttr>(),
 														  img->getAttr<FloorImageDataTypeAttr>(),
-														  base_name + std::to_string(img_idx),
+														  (explicit_ids ? field->getName().str() : base_name + std::to_string(img_idx)),
 														  false, arg_idx_child, buffer_or_tex_idx_child);
 							if (arg_info.empty()) {
 								return {};
@@ -3845,7 +4334,13 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_align_size"));
 			// max out at 16 for normal types, anything higher is unreasonable
 			// for argument/indirect buffers, always assume an 8-byte alignment
-			const auto align_size = std::min(getDataLayout().getABITypeAlign(llvm_pointee_type).value(),
+			// LLVM's packed record alignment can be smaller than the source
+			// buffer alignment even when explicit padding preserves all offsets.
+			const auto type_align = !indirect_buffer && !is_indirect &&
+				!clang_pointee_type->isIncompleteType() && !clang_pointee_type->isFunctionType() ?
+				uint64_t(Context.getTypeAlignInChars(clang_pointee_type).getQuantity()) :
+				getDataLayout().getABITypeAlign(llvm_pointee_type).value();
+			const auto align_size = std::min(type_align,
 											 indirect_buffer ? uint64_t(8u) : uint64_t(16u));
 			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(align_size)));
 			// #14/#15: type name
@@ -3912,7 +4407,72 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			arg_iter->addAttr(llvm::Attribute::get(getLLVMContext(), "floor_coherent"));
 		}
 		
-		if (clang_type->isPointerType() || clang_type->isReferenceType()) { // pointer / buffer / payload
+        if (const auto *Conditional = parm->getAttr<MetalFunctionConstantPredicateAttr>()) {
+            auto *Predicate = make_fc_predicate(Conditional);
+            if (!Predicate) return;
+            SmallVector<llvm::Metadata *, 10> Info {
+                llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)),
+                llvm::MDString::get(VMContext, "air.function_constant"), Predicate,
+                llvm::MDString::get(VMContext, "air.render_target"),
+                llvm::ConstantAsMetadata::get(Builder.getInt32(
+                    parm->getAttr<GraphicsFBOColorLocationAttr>()->getEvalLocation())),
+                llvm::MDString::get(VMContext, "air.arg_type_name"),
+                llvm::MDString::get(VMContext, "float4"),
+                llvm::MDString::get(VMContext, "air.arg_name"),
+                llvm::MDString::get(VMContext, parm->getName())};
+            arg_infos.push_back(llvm::MDNode::get(VMContext, Info));
+        } else if (parm->hasAttr<MetalThreadBuiltinAttr>()) {
+            llvm::Metadata *Info[] = {
+                llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)),
+                llvm::MDString::get(VMContext, std::string("air.") + parm->getAttr<MetalThreadBuiltinAttr>()->getSpelling()),
+                llvm::MDString::get(VMContext, "air.arg_type_name"),
+                llvm::MDString::get(VMContext, parm->getType()->isVectorType() ? "uint3" : "uint"),
+                llvm::MDString::get(VMContext, "air.arg_name"),
+                llvm::MDString::get(VMContext, parm->getName())};
+            arg_infos.push_back(llvm::MDNode::get(VMContext, Info));
+        } else if (parm->hasAttr<GraphicsVertexPositionAttr>() || parm->hasAttr<MetalFrontFacingAttr>()) {
+			const bool IsPosition = parm->hasAttr<GraphicsVertexPositionAttr>();
+			SmallVector<llvm::Metadata*, 8> arg_info;
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+			arg_info.push_back(llvm::MDString::get(VMContext, IsPosition ? "air.position" : "air.front_facing"));
+			if (IsPosition) {
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.center"));
+				arg_info.push_back(llvm::MDString::get(VMContext, "air.no_perspective"));
+			}
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, IsPosition ? "float4" : "bool"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, parm->getNameAsString()));
+			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+		} else if (parm->hasAttr<MetalPositionInPatchAttr>()) {
+			SmallVector<llvm::Metadata*, 6> arg_info;
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.position_in_patch"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, make_air_type_name(clang_type)));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, parm->getName()));
+			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+		} else if (const auto *Builtin = parm->getAttr<MetalVertexBuiltinAttr>()) {
+			SmallVector<llvm::Metadata*, 6> arg_info;
+			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
+			arg_info.push_back(llvm::MDString::get(VMContext,
+				StringRef(Builtin->getSpelling()) == "vertex_id" ? "air.vertex_id" :
+				StringRef(Builtin->getSpelling()) == "instance_id" ? "air.instance_id" : "air.base_instance"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "uint"));
+			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
+			arg_info.push_back(llvm::MDString::get(VMContext, parm->getName()));
+			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
+		} else if (const auto *Binding = parm->getAttr<MetalThreadgroupBindingAttr>()) {
+            uint32_t ThreadgroupIndex = Binding->getIndex();
+            auto Info = add_buffer_arg(clang_type, *parm, true, false,
+                                       arg_idx, ThreadgroupIndex, 0);
+            if (Info.empty()) return;
+            arg_infos.push_back(llvm::MDNode::get(VMContext, Info));
+		} else if (clang_type->isPointerType() || clang_type->isReferenceType()) { // pointer / buffer / payload
+			if (const auto *Binding = parm->getAttr<MetalBufferBindingAttr>())
+				buffer_idx = Binding->getIndex();
 			SmallVector<llvm::Metadata*, 16> arg_info;
 			if (clang_type->getPointeeType().getAddressSpace() == LangAS::task_payload) {
 				arg_info = add_payload(clang_type, *parm, arg_idx);
@@ -3985,7 +4545,16 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 					// TODO: handle perspective/center correctly
 					const auto type_name = make_air_type_name(field.type);
 					bool has_name_and_type = true;
-					if (field.hasAttr<GraphicsVertexPositionAttr>()) {
+					if (const auto *Location = field.getAttr<MetalVertexAttributeAttr>()) {
+						if ((!is_vertex && !is_kernel) || !parm->getAttr<GraphicsStageInputAttr>()->isMSL()) {
+							Error(field.field_decl->getBeginLoc(), "attribute requires a vertex or compute stage_in record");
+							return;
+						}
+						arg_info.push_back(llvm::MDString::get(VMContext, is_kernel ? "air.stage_in" : "air.vertex_input"));
+						arg_info.push_back(llvm::MDString::get(VMContext, "air.location_index"));
+						arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(Location->getIndex())));
+						arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(1)));
+					} else if (field.hasAttr<GraphicsVertexPositionAttr>()) {
 						arg_info.push_back(llvm::MDString::get(VMContext, "air.position"));
 						arg_info.push_back(llvm::MDString::get(VMContext, "air.center"));
 						arg_info.push_back(llvm::MDString::get(VMContext, "air.no_perspective"));
@@ -4047,7 +4616,9 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 						for (const auto& cp_field : cp->fields) {
 							SmallVector<llvm::Metadata*, 8> cp_field_info;
 							cp_field_info.push_back(llvm::MDString::get(VMContext, "air.location_index"));
-							cp_field_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(buffer_idx++)));
+							const auto *Location = cp_field->getAttr<MetalVertexAttributeAttr>();
+							const unsigned Index = Location ? Location->getIndex() : buffer_idx++;
+							cp_field_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(Index)));
 							cp_field_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(1))); // no arrays for now
 							cp_field_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
 							cp_field_info.push_back(llvm::MDString::get(VMContext, make_air_type_name(cp_field->getType())));
@@ -4073,7 +4644,9 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 						}
 						
 						arg_info.push_back(llvm::MDString::get(VMContext, "air.fragment_input"));
-						arg_info.push_back(llvm::MDString::get(VMContext, StringRef(field.mangled_name)));
+						const auto *User = field.getAttr<MetalUserVaryingAttr>();
+						const std::string Semantic = User ? "user(" + User->getSemantic()->getName().str() + ")" : field.mangled_name;
+						arg_info.push_back(llvm::MDString::get(VMContext, Semantic));
 						bool is_int_type = field.type->isIntegerType();
 						if (!is_int_type && field.type->isVectorType()) {
 							auto vec_type = llvm::dyn_cast<clang::ExtVectorType>(field.type.getTypePtr()->getBaseElementTypeUnsafe()->getCanonicalTypeInternal().getTypePtr());
@@ -4081,12 +4654,18 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 								is_int_type = vec_type->getElementType()->isIntegerType();
 							}
 						}
-						if (is_int_type || field.hasAttr<GraphicsInterpolateFlatAttr>()) {
-							// use flat "interpolation" for uint* and int* types as well as when explicitly set by the user
+						const auto *Interpolation = field.getAttr<MetalInterpolationAttr>();
+						const StringRef Mode = field.hasAttr<GraphicsInterpolateFlatAttr>() ? "flat" : Interpolation ? Interpolation->getSpelling() : "";
+						if (is_int_type && Mode != "flat" && (!Mode.empty() || parm->getAttr<GraphicsStageInputAttr>()->isMSL())) {
+							Error(field.field_decl->getBeginLoc(), "integer varyings require flat interpolation");
+							return;
+						}
+						if (is_int_type || Mode == "flat" || field.hasAttr<GraphicsInterpolateFlatAttr>()) {
+							// use flat "interpolation" for uint* and int* types
 							arg_info.push_back(llvm::MDString::get(VMContext, "air.flat"));
 						} else {
-							arg_info.push_back(llvm::MDString::get(VMContext, "air.center"));
-							arg_info.push_back(llvm::MDString::get(VMContext, "air.perspective"));
+							arg_info.push_back(llvm::MDString::get(VMContext, Mode.startswith("centroid_") ? "air.centroid" : Mode.startswith("sample_") ? "air.sample" : "air.center"));
+							arg_info.push_back(llvm::MDString::get(VMContext, Mode.endswith("no_perspective") ? "air.no_perspective" : "air.perspective"));
 						}
 					}
 					
@@ -4250,7 +4829,10 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 	
 	// add id handling arg metadata
 	// NOTE: the actual args are added by handleMetalVulkanEntryFunction + the order in here must match the order in there
-	const auto add_id_arg = [this, &arg_idx, &arg_infos, &Builder](const char* name, const char* air_name, const char* air_type) {
+	const auto add_id_arg = [this, FD, &arg_idx, &arg_infos, &Builder](const char* name, const char* air_name, const char* air_type) {
+        for (const auto *P : FD->parameters())
+            if (const auto *A = P->getAttr<MetalThreadBuiltinAttr>())
+                if (std::string("air.") + A->getSpelling() == air_name) return;
 		SmallVector<llvm::Metadata*, 6> arg_info;
 		arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
 		arg_info.push_back(llvm::MDString::get(VMContext, air_name));
@@ -4278,7 +4860,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		add_id_arg("__metal__num_sub_groups__", "air.simdgroups_per_threadgroup", "uint");
 	} else if (is_vertex || is_tess_eval) {
 		if (is_vertex) {
-			{
+			if (!explicit_vertex_id) {
 				SmallVector<llvm::Metadata*, 6> arg_info;
 				arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
 				arg_info.push_back(llvm::MDString::get(VMContext, "air.vertex_id"));
@@ -4313,7 +4895,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			++arg_idx; // next llvm arg
 		}
 		
-		{
+		if (!explicit_instance_id) {
 			SmallVector<llvm::Metadata*, 6> arg_info;
 			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.instance_id"));
@@ -4325,7 +4907,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			++arg_idx; // next llvm arg
 		}
 		
-		{
+		if (!explicit_base_instance) {
 			SmallVector<llvm::Metadata*, 6> arg_info;
 			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.base_instance"));
@@ -4337,12 +4919,14 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			++arg_idx; // next llvm arg
 		}
 		
-		if (is_tess_eval) {
+		if (is_tess_eval && !explicit_position_in_patch) {
 			SmallVector<llvm::Metadata*, 6> arg_info;
 			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.position_in_patch"));
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
-			arg_info.push_back(llvm::MDString::get(VMContext, "float3")); // TODO: quad support (need float2)
+			const auto *Patch = FD->getAttr<GraphicsTessellationPatchAttr>();
+			arg_info.push_back(llvm::MDString::get(VMContext,
+				Patch && Patch->getPatchPrimitive() == GraphicsTessellationPatchAttr::PatchQuad ? "float2" : "float3"));
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.arg_name"));
 			arg_info.push_back(llvm::MDString::get(VMContext, "__metal__position_in_patch__"));
 			arg_infos.push_back(llvm::MDNode::get(VMContext, arg_info));
@@ -4352,14 +4936,23 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 		const auto add_vs_output = [this, &stage_infos](const ASTContext::aggregate_scalar_entry& entry,
 														const bool force_position = false) {
 			SmallVector<llvm::Metadata*, 6> ret_info;
-			
+			if (entry.hasAttr<MetalVertexAttributeAttr>() ||
+				(entry.hasAttr<MetalUserVaryingAttr>() &&
+				 (entry.hasAttr<GraphicsVertexPositionAttr>() || entry.hasAttr<GraphicsPointSizeAttr>()))) {
+				Error(entry.field_decl->getBeginLoc(), "conflicting Metal vertex-output semantic");
+				return;
+			}
 			if (entry.hasAttr<GraphicsVertexPositionAttr>() || force_position) {
 				ret_info.push_back(llvm::MDString::get(VMContext, "air.position"));
+				if (entry.hasAttr<MetalInvariantAttr>())
+					ret_info.push_back(llvm::MDString::get(VMContext, "air.invariant"));
 			} else if (entry.hasAttr<GraphicsPointSizeAttr>()) {
 				ret_info.push_back(llvm::MDString::get(VMContext, "air.point_size"));
 			} else {
 				ret_info.push_back(llvm::MDString::get(VMContext, "air.vertex_output"));
-				ret_info.push_back(llvm::MDString::get(VMContext, StringRef(entry.mangled_name)));
+				const auto *User = entry.getAttr<MetalUserVaryingAttr>();
+				const std::string Semantic = User ? "user(" + User->getSemantic()->getName().str() + ")" : entry.mangled_name;
+				ret_info.push_back(llvm::MDString::get(VMContext, Semantic));
 			}
 			
 			ret_info.push_back(llvm::MDString::get(VMContext, "air.arg_type_name"));
@@ -4450,7 +5043,7 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			++arg_idx; // next llvm arg
 		}
 		
-		{
+		if (!explicit_front_facing) {
 			SmallVector<llvm::Metadata*, 6> arg_info;
 			arg_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(arg_idx)));
 			arg_info.push_back(llvm::MDString::get(VMContext, "air.front_facing"));
@@ -4462,10 +5055,16 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			++arg_idx; // next llvm arg
 		}
 		
-		const auto add_fs_output = [this, &Builder, &stage_infos](const ASTContext::aggregate_scalar_entry& entry,
-																  const unsigned int& location) {
+		const auto add_fs_output = [this, &Builder, &stage_infos, &make_fc_predicate](const ASTContext::aggregate_scalar_entry& entry,
+																				   const unsigned int& location) {
 			SmallVector<llvm::Metadata*, 6> rtt_info;
 			
+            if (const auto *Conditional = entry.getAttr<MetalFunctionConstantPredicateAttr>()) {
+                auto *Predicate = make_fc_predicate(Conditional);
+                if (!Predicate) return;
+                rtt_info.push_back(llvm::MDString::get(VMContext, "air.function_constant"));
+                rtt_info.push_back(Predicate);
+            }
 			// #0/1: render target location index
 			rtt_info.push_back(llvm::MDString::get(VMContext, "air.render_target"));
 			rtt_info.push_back(llvm::ConstantAsMetadata::get(Builder.getInt32(location)));
@@ -4493,10 +5092,16 @@ void CodeGenModule::GenAIRMetadata(const FunctionDecl *FD, llvm::Function *Fn,
 			// * gather all fixed/attr locations, make sure none conflict
 			// * used fixed locations + generate automatic location for non-fixed outputs
 			std::unordered_set<unsigned int> fbo_locations;
+            std::unordered_set<unsigned int> unconditional_fbo_locations;
 			for (const auto& field : fields) {
 				if (field.hasAttr<GraphicsFBOColorLocationAttr>()) {
 					const auto loc_attr = field.getAttr<GraphicsFBOColorLocationAttr>();
-					if (!fbo_locations.insert(loc_attr->getEvalLocation()).second) {
+                    const auto Location = loc_attr->getEvalLocation();
+                    const bool Conditional = field.hasAttr<MetalFunctionConstantPredicateAttr>();
+                    const bool AlreadyUsed = !fbo_locations.insert(Location).second;
+                    const bool UnconditionalUsed = unconditional_fbo_locations.count(Location);
+                    if (!Conditional) unconditional_fbo_locations.insert(Location);
+                    if (AlreadyUsed && (!Conditional || UnconditionalUsed)) {
 						// TODO: should have been detected earlier ...
 						Error(loc_attr->getLocation(), StringRef("location already in use"));
 						// TODO: add note of prev location?
@@ -7952,6 +8557,46 @@ CodeGenModule::GetOrCreateLLVMGlobal(StringRef MangledName, llvm::Type *Ty,
     }
 
     setGVProperties(GV, D);
+
+    if (const auto *FC = D->getAttr<MetalFunctionConstantAttr>()) {
+      // Match the required-specialization representation in the reference AIR:
+      // a driver-filled initializer, a mutable backing value, and an
+      // air.static_init constructor. Neither global has a default value.
+      assert(LangOpts.Metal && GV->isDeclaration() &&
+             GV->getAddressSpace() == 2 && "invalid Metal specialization global");
+      GV->setConstant(false);
+      GV->setLinkage(llvm::GlobalValue::InternalLinkage);
+      GV->setInitializer(llvm::UndefValue::get(Ty));
+      const bool IsBool = D->getType()->isBooleanType();
+      const std::string InitName = D->getName().str() + ".MTL_FC_INIT_" +
+          std::to_string(FC->getIndex()) + (IsBool ? "_b" : "_i");
+      auto *Placeholder = new llvm::GlobalVariable(
+          TheModule, Ty, true, llvm::GlobalValue::InternalLinkage,
+          llvm::UndefValue::get(Ty), InitName, nullptr,
+          llvm::GlobalVariable::NotThreadLocal, 2,
+          /*isExternallyInitialized=*/true);
+      Placeholder->setSection("air.fc_initializer");
+      Placeholder->setAlignment(GV->getAlign());
+      llvm::Metadata *Ops[] = {
+          llvm::ConstantAsMetadata::get(Placeholder),
+          llvm::MDString::get(VMContext, IsBool ? "bool" : "int"),
+          llvm::MDString::get(VMContext, D->getName()),
+          llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+              Int32Ty, FC->getIndex())),
+          llvm::ConstantAsMetadata::get(llvm::ConstantInt::getTrue(VMContext))};
+      TheModule.getOrInsertNamedMetadata("air.function_constants")
+          ->addOperand(llvm::MDNode::get(VMContext, Ops));
+      auto *CtorTy = llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext), false);
+      auto *Ctor = llvm::Function::Create(
+          CtorTy, llvm::GlobalValue::InternalLinkage,
+          "__metal_fc_init_" + std::to_string(FC->getIndex()), TheModule);
+      Ctor->setSection("air.static_init");
+      llvm::IRBuilder<> B(llvm::BasicBlock::Create(VMContext, "entry", Ctor));
+      B.CreateStore(B.CreateLoad(Ty, Placeholder), GV);
+      B.CreateRetVoid();
+      AddGlobalCtor(Ctor);
+    }
+
 
     // If required by the ABI, treat declarations of static data members with
     // inline initializers as definitions.

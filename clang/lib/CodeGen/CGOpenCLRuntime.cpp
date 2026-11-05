@@ -94,8 +94,7 @@ llvm::Type *CGOpenCLRuntime::convertOpenCLSpecificType(const Type *T) {
       case BuiltinType::OCLImage1dArray:
                 return get_or_create_opaque_ptr_type("struct._texture_1d_array_t", AddrSpc);
       case BuiltinType::OCLImage1dBuffer:
-        llvm_unreachable("Unsupported image type (1D-buffer is not supported by metal)!");
-        return nullptr;
+        return get_or_create_opaque_ptr_type("struct._texture_buffer_1d_t", AddrSpc);
       case BuiltinType::OCLImage2d:
         return get_or_create_opaque_ptr_type("struct._texture_2d_t", AddrSpc);
       case BuiltinType::OCLImage2dArray:

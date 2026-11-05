@@ -3005,6 +3005,383 @@ void Sema::AddFloorImageFlagsAttr(SourceRange AttrRange, Decl *D, Expr *E, const
   D->addAttr(::new (Context) FloorImageFlagsAttr(TmpAttr));
 }
 
+// Do not silently accept an attribute which would otherwise be dropped before
+// AIR lowering. This first milestone only supports concrete resource bindings.
+static void handleMetalFunctionConstantAttr(Sema &S, Decl *D,
+                                            const ParsedAttr &AL) {
+  auto error = [&](const auto &Message) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error, Message));
+    D->setInvalidDecl();
+  };
+  if (!S.getLangOpts().Metal) {
+    error("function_constant attribute requires Metal language mode");
+    return;
+  }
+  if (isa<FieldDecl>(D) || isa<ParmVarDecl>(D)) {
+    // Narrow first interface milestone: game-generated color first, then a
+    // direct required bool constant. Expressions and other interfaces fail.
+    const auto *Color = D->getAttr<GraphicsFBOColorLocationAttr>();
+    const auto *VD = cast<ValueDecl>(D);
+    const auto *Vec = VD->getType()->getAs<VectorType>();
+    unsigned ColorCount = 0;
+    for (const auto *A : D->attrs()) ColorCount += isa<GraphicsFBOColorLocationAttr>(A);
+    if (ColorCount != 1 || !Color || Color->getEvalLocation() > 7 || !Vec ||
+        Vec->getNumElements() != 4 ||
+        !Vec->getElementType()->isSpecificBuiltinType(BuiltinType::Float) ||
+        D->hasAttr<MetalFunctionConstantPredicateAttr>()) {
+      error("conditional function_constant requires float4 with preceding color(0..7)");
+      return;
+    }
+    if (!AL.isArgExpr(0)) {
+      error("conditional function_constant requires a direct bool function constant");
+      return;
+    }
+    Expr *Condition = AL.getArgAsExpr(0)->IgnoreParenImpCasts();
+    const auto *Ref = dyn_cast<DeclRefExpr>(Condition);
+    const auto *Constant = Ref ? dyn_cast<VarDecl>(Ref->getDecl()) : nullptr;
+    if (!Constant || !Constant->hasAttr<MetalFunctionConstantAttr>() ||
+        !Constant->getType()->isBooleanType()) {
+      error("conditional function_constant requires a direct bool function constant");
+      return;
+    }
+    D->addAttr(::new (S.Context)
+        MetalFunctionConstantPredicateAttr(S.Context, AL, Condition));
+    return;
+  }
+  auto *V = dyn_cast<VarDecl>(D);
+  if (!V || isa<ParmVarDecl>(V) ||
+      !V->getDeclContext()->isTranslationUnit()) {
+    error("conditional function_constant interfaces and non-global declarations are not supported");
+    return;
+  }
+  const QualType T = V->getType();
+  const auto *BT = T->getAs<BuiltinType>();
+  if (T.getAddressSpace() != LangAS::opencl_constant || !BT ||
+      (BT->getKind() != BuiltinType::Bool && BT->getKind() != BuiltinType::Int) ||
+      T.isVolatileQualified()) {
+    error("function_constant requires a non-volatile constant bool or int scalar");
+    return;
+  }
+  if (V->getStorageClass() != SC_None || V->isConstexpr() ||
+      V->hasAttr<MetalFunctionConstantAttr>()) {
+    error("function_constant storage specifiers and duplicate attributes are not supported");
+    return;
+  }
+  if (!AL.isArgExpr(0)) {
+    error("function_constant requires a numeric constant index");
+    return;
+  }
+  uint32_t Index;
+  if (!checkUInt32Argument(S, AL, AL.getArgAsExpr(0), Index, 1,
+                          /*StrictlyUnsigned=*/true)) {
+    D->setInvalidDecl();
+    return;
+  }
+  if (Index > 65535) {
+    error("function_constant index must be in range 0 through 65535");
+    return;
+  }
+  for (const Decl *Other : S.Context.getTranslationUnitDecl()->decls()) {
+    const auto *OV = dyn_cast<VarDecl>(Other);
+    if (!OV || OV == V)
+      continue;
+    if (OV->getDeclName() == V->getDeclName()) {
+      error("function_constant redeclarations are not supported");
+      return;
+    }
+    if (const auto *FC = OV->getAttr<MetalFunctionConstantAttr>()) {
+      if (FC->getIndex() == Index) {
+        error("duplicate function_constant index");
+        return;
+      }
+    }
+  }
+  V->addAttr(::new (S.Context) MetalFunctionConstantAttr(S.Context, AL, Index));
+  // Leave the AST value unknown until specialization. CodeGen lowers this
+  // declaration to an externally initialized AIR placeholder plus static init,
+  // never to an ordinary zero-initialized constant.
+  V->setStorageClass(SC_Extern);
+  V->setType(S.Context.getConstType(T));
+}
+
+static void handleMetalThreadgroupBindingAttr(Sema &S, Decl *D,
+                                        const ParsedAttr &AL) {
+  if (!S.getLangOpts().Metal) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error, "threadgroup resource attribute requires Metal language mode"));
+    return;
+  }
+  if (!AL.isArgExpr(0)) {
+    S.Diag(AL.getLoc(), diag::err_attribute_argument_type)
+        << AL << AANT_ArgumentIntegerConstant;
+    return;
+  }
+  uint32_t Index;
+  if (!checkUInt32Argument(S, AL, AL.getArgAsExpr(0), Index, 1,
+                           /*StrictlyUnsigned=*/true))
+    return;
+  if (Index > 30) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error, "threadgroup resource index is outside the supported range 0 through 30"));
+    return;
+  }
+  const auto *Param = cast<ParmVarDecl>(D);
+  const QualType Type = Param->getType();
+  if ((!Type->isPointerType() && !Type->isReferenceType()) ||
+      Type->getPointeeType().getAddressSpace() != LangAS::opencl_local) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error,
+        "threadgroup resource attribute requires a threadgroup pointer or reference"));
+    return;
+  }
+  const auto ObjectDiagnostic = S.getDiagnostics().getCustomDiagID(
+      DiagnosticsEngine::Error,
+      "threadgroup resource binding requires a complete object type");
+  if (Type->getPointeeType()->isFunctionType()) {
+    S.Diag(AL.getLoc(), ObjectDiagnostic);
+    return;
+  }
+  // Instantiate complete class-template specializations before inspecting
+  // their layout; a raw isIncompleteType check rejects valid MSL helpers.
+  if (S.RequireCompleteType(AL.getLoc(), Type->getPointeeType(), ObjectDiagnostic))
+    return;
+  if (D->hasAttr<MetalThreadgroupBindingAttr>()) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error, "duplicate threadgroup resource attribute on parameter"));
+    return;
+  }
+  D->addAttr(::new (S.Context) MetalThreadgroupBindingAttr(S.Context, AL, Index));
+}
+
+static void handleMetalBufferBindingAttr(Sema &S, Decl *D,
+                                        const ParsedAttr &AL) {
+  if (!S.getLangOpts().Metal) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error, "buffer attribute requires Metal language mode"));
+    return;
+  }
+  if (!AL.isArgExpr(0)) {
+    S.Diag(AL.getLoc(), diag::err_attribute_argument_type)
+        << AL << AANT_ArgumentIntegerConstant;
+    return;
+  }
+  uint32_t Index;
+  if (!checkUInt32Argument(S, AL, AL.getArgAsExpr(0), Index, 1,
+                           /*StrictlyUnsigned=*/true))
+    return;
+  if (Index > 30) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error, "Metal buffer index must be in range 0 through 30"));
+    return;
+  }
+  const auto *Param = cast<ParmVarDecl>(D);
+  const QualType Type = Param->getType();
+  if ((!Type->isPointerType() && !Type->isReferenceType()) ||
+      (Type->getPointeeType().getAddressSpace() != LangAS::opencl_global &&
+       Type->getPointeeType().getAddressSpace() != LangAS::opencl_constant)) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error,
+        "buffer attribute requires a device or constant pointer or reference"));
+    return;
+  }
+  if (D->hasAttr<MetalBufferBindingAttr>()) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error, "duplicate buffer attribute on parameter"));
+    return;
+  }
+  D->addAttr(::new (S.Context) MetalBufferBindingAttr(S.Context, AL, Index));
+}
+
+static void handleMetalArgumentIDAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  auto error = [&](const auto &Message) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error, Message));
+  };
+  if (!S.getLangOpts().Metal) {
+    error("id attribute requires Metal language mode");
+    return;
+  }
+  uint32_t Index;
+  if (!AL.isArgExpr(0)) {
+    S.Diag(AL.getLoc(), diag::err_attribute_argument_type)
+        << AL << AANT_ArgumentIntegerConstant;
+    return;
+  }
+  if (!checkUInt32Argument(S, AL, AL.getArgAsExpr(0), Index, 1,
+                           /*StrictlyUnsigned=*/true))
+    return;
+  if (Index > 65535) {
+    error("Metal argument ID exceeds the supported 65535 limit");
+    return;
+  }
+  const auto *Field = cast<FieldDecl>(D);
+  const auto Type = Field->getType();
+  const bool IsBuffer = Type->isPointerType() &&
+      (Type->getPointeeType().getAddressSpace() == LangAS::opencl_global ||
+       Type->getPointeeType().getAddressSpace() == LangAS::opencl_constant);
+  QualType ResourceType = Type;
+  if (Type->isAggregateImageType()) {
+    const auto *R = Type->getAsCXXRecordDecl();
+    if (R && R->hasDefinition() && !R->getNumBases() &&
+        R->isStandardLayout() && R->isTriviallyCopyable() &&
+        std::distance(R->field_begin(), R->field_end()) == 1 &&
+        S.Context.getTypeSize(Type) == 64 && S.Context.getTypeAlign(Type) == 64)
+      ResourceType = (*R->field_begin())->getType();
+  }
+  const auto *Builtin = ResourceType->getAs<BuiltinType>();
+  const bool IsImage2D = Builtin &&
+      (Builtin->getKind() == BuiltinType::OCLImage2d ||
+       Builtin->getKind() == BuiltinType::OCLImage3d ||
+       Builtin->getKind() == BuiltinType::OCLImage2dArray ||
+       Builtin->getKind() == BuiltinType::OCLImageCube ||
+       Builtin->getKind() == BuiltinType::OCLImage1dBuffer);
+  if (Field->isBitField() || Field->getParent()->isUnion() ||
+      !(IsBuffer || IsImage2D || Type->isSamplerT())) {
+    error("id supports pointers, samplers and single-handle float 2D/3D/buffer textures");
+    return;
+  }
+  if (D->hasAttr<MetalArgumentIDAttr>()) {
+    error("duplicate id attribute on argument-buffer field");
+    return;
+  }
+  D->addAttr(::new (S.Context) MetalArgumentIDAttr(S.Context, AL, Index));
+}
+
+// A deliberately small, concrete stage-IO type surface. No aggregate flattening
+// or interpolation attribute is accepted and then silently discarded.
+static void handleMetalInvariant(Sema &S, Decl *D, const ParsedAttr &AL) {
+  const auto *F = cast<FieldDecl>(D);
+  const auto *V = F->getType()->getAs<VectorType>();
+  if (!S.getLangOpts().Metal || F->isBitField() || !V || V->getNumElements() != 4 ||
+      !V->getElementType()->isSpecificBuiltinType(BuiltinType::Float) ||
+      F->hasAttr<MetalInvariantAttr>()) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error,
+        "Metal invariant requires one attribute on a float4 position field"));
+    return;
+  }
+  // Position and invariant may appear in either order; the completed interface
+  // is validated when a shader entry uses the record.
+  D->addAttr(::new (S.Context) MetalInvariantAttr(S.Context, AL));
+}
+
+static void handleMetalThreadBuiltin(Sema &S, Decl *D, const ParsedAttr &AL) {
+  const auto T = cast<ParmVarDecl>(D)->getType();
+  const auto *V = T->getAs<VectorType>();
+  const StringRef Name = AL.getAttrName()->getName();
+  const bool Position = Name == "threadgroup_position_in_grid" || Name == "thread_position_in_threadgroup";
+  if (!S.getLangOpts().Metal ||
+      !(T->isSpecificBuiltinType(BuiltinType::UInt) ||
+        (Position && V && V->getNumElements() == 3 && V->getElementType()->isSpecificBuiltinType(BuiltinType::UInt))) ||
+      D->hasAttr<MetalThreadBuiltinAttr>()) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error,
+        "Metal thread builtin requires one attribute on a by-value uint (or uint3 position) parameter"));
+    return;
+  }
+  D->addAttr(::new (S.Context) MetalThreadBuiltinAttr(S.Context, AL));
+}
+
+static void handleMetalFrontFacing(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (!S.getLangOpts().Metal ||
+      !cast<ParmVarDecl>(D)->getType()->isSpecificBuiltinType(BuiltinType::Bool) ||
+      D->hasAttr<MetalFrontFacingAttr>()) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error,
+        "Metal front_facing requires one attribute on a by-value bool parameter"));
+    return;
+  }
+  D->addAttr(::new (S.Context) MetalFrontFacingAttr(S.Context, AL));
+}
+
+static void handleMetalVertexBuiltin(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (!S.getLangOpts().Metal ||
+      !cast<ParmVarDecl>(D)->getType()->isSpecificBuiltinType(BuiltinType::UInt) ||
+      D->hasAttr<MetalVertexBuiltinAttr>()) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error,
+        "Metal vertex builtin requires one attribute on a by-value uint parameter"));
+    return;
+  }
+  D->addAttr(::new (S.Context) MetalVertexBuiltinAttr(S.Context, AL));
+}
+
+static bool checkMetalIOField(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (!isa<FieldDecl>(D)) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error, "Metal stage IO attribute requires a field"));
+    return false;
+  }
+  QualType T = cast<FieldDecl>(D)->getType();
+  if (const auto *V = T->getAs<VectorType>()) {
+    if (V->getNumElements() < 2 || V->getNumElements() > 4) {
+      S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+          DiagnosticsEngine::Error, "Metal stage IO supports only 2 to 4 vector elements"));
+      return false;
+    }
+    T = V->getElementType();
+  }
+  const bool Numeric = T->isSpecificBuiltinType(BuiltinType::Float) ||
+      T->isSpecificBuiltinType(BuiltinType::Half) ||
+      T->isSpecificBuiltinType(BuiltinType::Int) ||
+      T->isSpecificBuiltinType(BuiltinType::UInt);
+  if (!S.getLangOpts().Metal || !Numeric || cast<FieldDecl>(D)->isBitField()) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error,
+        "Metal stage IO requires a float, half, int or uint scalar/vector field"));
+    return false;
+  }
+  return true;
+}
+static void handleMetalVertexAttribute(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (!checkMetalIOField(S, D, AL)) return;
+  uint32_t Index;
+  if (!AL.isArgExpr(0)) {
+    S.Diag(AL.getLoc(), diag::err_attribute_argument_type)
+        << AL << AANT_ArgumentIntegerConstant;
+    return;
+  }
+  if (!checkUInt32Argument(S, AL, AL.getArgAsExpr(0), Index, 1, true)) return;
+  if (Index > 30 || D->hasAttr<MetalVertexAttributeAttr>() ||
+      D->hasAttr<MetalUserVaryingAttr>()) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error, "invalid or conflicting Metal vertex attribute"));
+    return;
+  }
+  D->addAttr(::new (S.Context) MetalVertexAttributeAttr(S.Context, AL, Index));
+}
+static void handleMetalUserVarying(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (!checkMetalIOField(S, D, AL)) return;
+  if (!AL.isArgIdent(0)) {
+    S.Diag(AL.getLoc(), diag::err_attribute_argument_type)
+        << AL << AANT_ArgumentIdentifier;
+    return;
+  }
+  IdentifierInfo *Semantic = AL.getArgAsIdent(0)->Ident;
+  const auto Name = Semantic->getName();
+  unsigned Index;
+  const auto Digits = Name.drop_front(std::min<size_t>(4, Name.size()));
+  if (!Name.startswith("locn") || Digits.empty() ||
+      (Digits.size() > 1 && Digits.front() == '0') ||
+      Digits.getAsInteger(10, Index) || Index > 65535 ||
+      D->hasAttr<MetalUserVaryingAttr>() || D->hasAttr<MetalVertexAttributeAttr>()) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error, "user attribute requires a distinct locnN semantic"));
+    return;
+  }
+  D->addAttr(::new (S.Context) MetalUserVaryingAttr(S.Context, AL, Semantic));
+}
+static void handleMetalInterpolation(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (!checkMetalIOField(S, D, AL)) return;
+  if (D->hasAttr<MetalInterpolationAttr>() || D->hasAttr<GraphicsInterpolateFlatAttr>()) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error, "conflicting Metal interpolation attributes"));
+    return;
+  }
+  D->addAttr(::new (S.Context) MetalInterpolationAttr(S.Context, AL));
+}
+
 static void handleGraphicsFBOColorLocationAttr(Sema &S, Decl *D, const ParsedAttr &Attr) {
   if (!Attr.checkExactlyNumArgs(S, 1)) {
     Attr.setInvalid();
@@ -9018,6 +9395,9 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
   case ParsedAttr::AT_GraphicsMeshShader:
     handleSimpleAttribute<GraphicsMeshShaderAttr>(S, D, AL);
     break;
+  case ParsedAttr::AT_MetalPositionInPatch:
+    handleSimpleAttribute<MetalPositionInPatchAttr>(S, D, AL);
+    break;
   case ParsedAttr::AT_GraphicsTessellationPatch:
     handleGraphicsTessellationPatchAttr(S, D, AL);
     break;
@@ -9073,6 +9453,16 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
     handleSimpleAttribute<GraphicsPointSizeAttr>(S, D, AL);
     break;
   case ParsedAttr::AT_GraphicsInterpolateFlat:
+    // flat predates the explicit MSL interface syntax and also annotates
+    // aggregate fields. Validate the numeric-field restriction only when an
+    // entry selects the explicit stage_in interface, not on legacy declarations.
+    if (S.getLangOpts().Metal && !isa<RecordDecl>(D)) {
+      if (D->hasAttr<MetalInterpolationAttr>() || D->hasAttr<GraphicsInterpolateFlatAttr>()) {
+        S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+            DiagnosticsEngine::Error, "conflicting Metal interpolation attributes"));
+        break;
+      }
+    }
     handleSimpleAttribute<GraphicsInterpolateFlatAttr>(S, D, AL);
     break;
   case ParsedAttr::AT_GraphicsPrimitiveCulled:
@@ -9081,7 +9471,45 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
   case ParsedAttr::AT_GraphicsPerPrimitive:
     handleSimpleAttribute<GraphicsPerPrimitiveAttr>(S, D, AL);
     break;
+  case ParsedAttr::AT_MetalArgumentID:
+    handleMetalArgumentIDAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_MetalFunctionConstant:
+    handleMetalFunctionConstantAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_MetalThreadgroupBinding:
+    handleMetalThreadgroupBindingAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_MetalBufferBinding:
+    handleMetalBufferBindingAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_MetalInvariant:
+    handleMetalInvariant(S, D, AL);
+    break;
+  case ParsedAttr::AT_MetalThreadBuiltin:
+    handleMetalThreadBuiltin(S, D, AL);
+    break;
+  case ParsedAttr::AT_MetalFrontFacing:
+    handleMetalFrontFacing(S, D, AL);
+    break;
+  case ParsedAttr::AT_MetalVertexBuiltin:
+    handleMetalVertexBuiltin(S, D, AL);
+    break;
+  case ParsedAttr::AT_MetalVertexAttribute:
+    handleMetalVertexAttribute(S, D, AL);
+    break;
+  case ParsedAttr::AT_MetalUserVarying:
+    handleMetalUserVarying(S, D, AL);
+    break;
+  case ParsedAttr::AT_MetalInterpolation:
+    handleMetalInterpolation(S, D, AL);
+    break;
   case ParsedAttr::AT_GraphicsStageInput:
+    if (AL.getAttrName()->getName() == "stage_in" && !S.getLangOpts().Metal) {
+      S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+          DiagnosticsEngine::Error, "stage_in requires Metal language mode"));
+      break;
+    }
     handleSimpleAttribute<GraphicsStageInputAttr>(S, D, AL);
     break;
   case ParsedAttr::AT_Cleanup:
@@ -9595,6 +10023,25 @@ void Sema::ProcessDeclAttributes(Scope *S, Decl *D, const Declarator &PD) {
 
   // Apply additional attributes specified by '#pragma clang attribute'.
   AddPragmaAttributes(S, D);
+
+  // MSL spells a post-tessellation entry as [[patch(...)]] vertex. Resolve
+  // that combination after all attribute positions have been processed, so
+  // source ordering cannot accidentally leave it on the ordinary vertex ABI.
+  if (getLangOpts().Metal && D->hasAttr<GraphicsTessellationPatchAttr>()) {
+    auto *FD = dyn_cast<FunctionDecl>(D);
+    if (!FD || (!FD->hasAttr<GraphicsVertexShaderAttr>() &&
+                !FD->hasAttr<GraphicsTessellationEvaluationShaderAttr>())) {
+      Diag(D->getBeginLoc(), getDiagnostics().getCustomDiagID(
+          DiagnosticsEngine::Error, "patch requires a post-tessellation vertex entry"));
+      D->setInvalidDecl();
+    } else if (FD->hasAttr<GraphicsVertexShaderAttr>()) {
+      FD->dropAttr<GraphicsVertexShaderAttr>();
+      FD->addAttr(GraphicsTessellationEvaluationShaderAttr::CreateImplicit(Context));
+      const auto *FT = FD->getType()->castAs<FunctionType>();
+      FD->setType(QualType(Context.adjustFunctionType(
+          FT, FT->getExtInfo().withCallingConv(CC_FloorTessEval)), 0));
+    }
+  }
 }
 
 /// Is the given declaration allowed to use a forbidden type?

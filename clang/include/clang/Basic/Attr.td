@@ -1194,6 +1194,49 @@ def CXX11NoReturn : InheritableAttr {
   let SimpleHandler = 1;
 }
 
+// Numeric MSL specialization constants. Conditional interface attributes are
+// deliberately diagnosed until their AIR interface semantics are implemented.
+// Internal AST form selected by the shared function_constant parser when
+// applied to a supported conditional render-target interface.
+def MetalFunctionConstantPredicate : InheritableAttr {
+  let Spellings = [];
+  let Args = [ExprArgument<"Condition">];
+  let Documentation = [Undocumented];
+}
+
+def MetalFunctionConstant : InheritableAttr {
+  let Spellings = [CXX11<"", "function_constant", 200809>];
+  let Args = [UnsignedArgument<"Index">];
+  let Documentation = [Undocumented];
+}
+
+// Explicit MSL top-level buffer binding. Argument-buffer field IDs are a
+// separate ABI contract and deliberately are not accepted by this milestone.
+// Explicit dynamically allocated threadgroup-memory binding. Its location
+// namespace is separate from device/constant buffer bindings.
+def MetalThreadgroupBinding : InheritableAttr {
+  let Spellings = [CXX11<"", "threadgroup", 200809>];
+  let Subjects = SubjectList<[ParmVar], ErrorDiag>;
+  let Args = [UnsignedArgument<"Index">];
+  let Documentation = [Undocumented];
+}
+
+def MetalBufferBinding : InheritableAttr {
+  let Spellings = [CXX11<"", "buffer", 200809>];
+  let Subjects = SubjectList<[ParmVar], ErrorDiag>;
+  let Args = [UnsignedArgument<"Index">];
+  let Documentation = [Undocumented];
+}
+
+// Sparse Metal argument-buffer pointer resource IDs. Other resource kinds
+// require their own AIR handle lowering and are rejected by this milestone.
+def MetalArgumentID : InheritableAttr {
+  let Spellings = [CXX11<"", "id", 200809>];
+  let Subjects = SubjectList<[Field], ErrorDiag>;
+  let Args = [UnsignedArgument<"Index">];
+  let Documentation = [Undocumented];
+}
+
 // floor attributes
 def ComputeKernel : DeclOrTypeAttr {
   let Spellings = [GNU<"compute_kernel">, CXX11<"","compute_kernel", 200809>];
@@ -1315,6 +1358,13 @@ def MeshMaxWorkGroups : DeclOrTypeAttr {
   }];
   let Subjects = SubjectList<[Function], ErrorDiag>;
   let Documentation = [Undocumented];
+}
+
+def MetalPositionInPatch : InheritableAttr {
+  let Spellings = [CXX11<"", "position_in_patch", 200809>];
+  let Subjects = SubjectList<[ParmVar], ErrorDiag>;
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
 }
 
 def GraphicsTessellationPatch : InheritableAttr {
@@ -1511,9 +1561,63 @@ def GraphicsPerPrimitive : InheritableAttr {
   let Documentation = [Undocumented];
 }
 
+// Explicit Apple-MSL graphics interfaces. Keep the existing floor spelling and
+// automatic field-name interface unchanged unless these attributes are used.
+// Preserve the output-position semantic in AIR. This does not implement the
+// separate -fpreserve-invariance compilation mode.
+def MetalInvariant : InheritableAttr {
+  let Spellings = [CXX11<"", "invariant", 200809>];
+  let Subjects = SubjectList<[Field], ErrorDiag>;
+  let Documentation = [Undocumented];
+}
+def MetalThreadBuiltin : InheritableAttr {
+  let Spellings = [CXX11<"", "thread_index_in_simdgroup", 200809>,
+                   CXX11<"", "thread_index_in_threadgroup", 200809>,
+                   CXX11<"", "threadgroup_position_in_grid", 200809>,
+                   CXX11<"", "thread_position_in_threadgroup", 200809>];
+  let Subjects = SubjectList<[ParmVar], ErrorDiag>;
+  let Documentation = [Undocumented];
+}
+
+def MetalFrontFacing : InheritableAttr {
+  let Spellings = [CXX11<"", "front_facing", 200809>];
+  let Subjects = SubjectList<[ParmVar], ErrorDiag>;
+  let Documentation = [Undocumented];
+}
+def MetalVertexBuiltin : InheritableAttr {
+  let Spellings = [CXX11<"", "vertex_id", 200809>, CXX11<"", "instance_id", 200809>,
+                   CXX11<"", "base_instance", 200809>];
+  let Subjects = SubjectList<[ParmVar], ErrorDiag>;
+  let Documentation = [Undocumented];
+}
+def MetalVertexAttribute : InheritableAttr {
+  let Spellings = [CXX11<"", "attribute", 200809>];
+  let Args = [UnsignedArgument<"Index">];
+  let Subjects = SubjectList<[Field], ErrorDiag>;
+  let Documentation = [Undocumented];
+}
+def MetalUserVarying : InheritableAttr {
+  let Spellings = [CXX11<"", "user", 200809>];
+  let Args = [IdentifierArgument<"Semantic">];
+  let Subjects = SubjectList<[Field], ErrorDiag>;
+  let Documentation = [Undocumented];
+}
+def MetalInterpolation : InheritableAttr {
+  let Spellings = [CXX11<"", "center_perspective", 200809>,
+    CXX11<"", "center_no_perspective", 200809>,
+    CXX11<"", "centroid_perspective", 200809>,
+    CXX11<"", "centroid_no_perspective", 200809>,
+    CXX11<"", "sample_perspective", 200809>,
+    CXX11<"", "sample_no_perspective", 200809>];
+  let Subjects = SubjectList<[Field], ErrorDiag>;
+  let Documentation = [Undocumented];
+}
+
 // stage input (just fragment shader input right now)
 def GraphicsStageInput : Attr {
-  let Spellings = [GNU<"stage_input">, CXX11<"","stage_input", 200809>];
+  let Spellings = [GNU<"stage_input">, CXX11<"","stage_input", 200809>,
+                   CXX11<"", "stage_in", 200809>];
+  let Accessors = [Accessor<"isMSL", [CXX11<"", "stage_in", 200809>]>];
   let Subjects = SubjectList<[ParmVar], ErrorDiag>;
   let Documentation = [Undocumented];
 }

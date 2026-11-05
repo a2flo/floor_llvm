@@ -3230,7 +3230,16 @@ bool FunctionDecl::isExternC() const {
 }
 
 bool FunctionDecl::isInExternCContext() const {
-  if (hasAttr<ComputeKernelAttr>())
+  // Metal library functions are looked up by their source entry name. Give
+  // graphics entries the same language linkage as compute entries, including
+  // [[patch(...)]] vertex entries after Sema changes their attribute to
+  // GraphicsTessellationEvaluationShaderAttr. Ordinary C++ helper overloads
+  // and non-Metal graphics compilation are unchanged.
+  if (hasAttr<ComputeKernelAttr>() ||
+      (getASTContext().getLangOpts().Metal &&
+       (hasAttr<GraphicsVertexShaderAttr>() ||
+        hasAttr<GraphicsFragmentShaderAttr>() ||
+        hasAttr<GraphicsTessellationEvaluationShaderAttr>())))
     return true;
   return getLexicalDeclContext()->isExternCContext();
 }

@@ -8878,7 +8878,8 @@ static bool isOpenCLSizeDependentType(ASTContext &C, QualType Ty) {
 }
 
 static OpenCLParamType getOpenCLKernelParameterType(Sema &S, QualType PT, const bool is_metal,
-                                                    const bool is_fragment_shader) {
+                                                  const bool is_fragment_shader,
+                                                  bool ExplicitThreadgroup = false) {
   if (PT->isDependentType())
     return InvalidKernelParam;
 
@@ -8886,8 +8887,8 @@ static OpenCLParamType getOpenCLKernelParameterType(Sema &S, QualType PT, const 
     QualType PointeeType = PT->getPointeeType();
     if (PointeeType.getAddressSpace() == LangAS::opencl_generic ||
         PointeeType.getAddressSpace() == LangAS::opencl_private ||
-        // NOTE: we do not support local address space kernel pointers!
-        PointeeType.getAddressSpace() == LangAS::opencl_local ||
+        // Only an explicitly bound Metal threadgroup resource is supported.
+        (PointeeType.getAddressSpace() == LangAS::opencl_local && !ExplicitThreadgroup) ||
         PointeeType.getAddressSpace() == LangAS::Default)
       return InvalidAddrSpacePtrKernelParam;
 
@@ -8982,10 +8983,15 @@ static void checkIsValidOpenCLKernelParameter(
 
   // Cache the valid types we encounter to avoid rechecking structs that are
   // used again
-  if (ValidTypes.count(PT.getTypePtr()))
+  const bool ThreadgroupPointer = (PT->isPointerType() || PT->isReferenceType()) &&
+      PT->getPointeeType().getAddressSpace() == LangAS::opencl_local;
+  // Explicit resource binding is per parameter, not a property of its type.
+  // Never reuse a cached bound pointer to admit an unbound local parameter.
+  if (!ThreadgroupPointer && ValidTypes.count(PT.getTypePtr()))
     return;
 
-  switch (getOpenCLKernelParameterType(S, PT, is_metal, is_fragment_shader)) {
+  switch (getOpenCLKernelParameterType(S, PT, is_metal, is_fragment_shader,
+      is_metal && Param->hasAttr<MetalThreadgroupBindingAttr>())) {
   case PtrPtrKernelParam:
     // OpenCL v3.0 s6.11.a:
     // A kernel function argument cannot be declared as a pointer to a pointer
@@ -9734,6 +9740,19 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
 
   // Handle attributes.
   ProcessDeclAttributes(S, NewFD, D);
+  // Conditional parameters are an entry-interface feature, never ordinary
+  // helper-function annotations that can be silently discarded.
+  if (getLangOpts().Metal && !NewFD->hasAttr<GraphicsFragmentShaderAttr>()) {
+    for (const auto *P : NewFD->parameters()) {
+      if (P->hasAttr<MetalFunctionConstantPredicateAttr>()) {
+        Diag(P->getLocation(), getDiagnostics().getCustomDiagID(
+            DiagnosticsEngine::Error,
+            "conditional color parameters require a fragment entry function"));
+        NewFD->setInvalidDecl();
+      }
+    }
+  }
+
 
 #if 0 // we don't want this
   if (getLangOpts().OpenCL) {
@@ -10142,6 +10161,127 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
 
   MarkUnusedFileScopedDecl(NewFD);
 
+  if (getLangOpts().Metal) {
+    // GraphicsExpandIOType runs before AIR metadata validation. Reject invalid
+    // position types in explicit MSL interfaces before aggregate ABI expansion,
+    // without tightening the older floor vector-compatible record convention.
+    std::function<bool(const CXXRecordDecl *, SmallVectorImpl<const FieldDecl *> &)> Inspect;
+    Inspect = [&](const CXXRecordDecl *R, SmallVectorImpl<const FieldDecl *> &Invalid) {
+      if (!R || !(R = R->getDefinition())) return false;
+      bool HasExplicitMSL = false;
+      for (const auto &Base : R->bases())
+        HasExplicitMSL |= Inspect(Base.getType()->getAsCXXRecordDecl(), Invalid);
+      for (const auto *F : R->fields()) {
+        HasExplicitMSL |= F->hasAttr<MetalVertexAttributeAttr>() ||
+                          F->hasAttr<MetalUserVaryingAttr>() || F->hasAttr<MetalInterpolationAttr>() || F->hasAttr<MetalInvariantAttr>();
+        if (F->hasAttr<GraphicsVertexPositionAttr>()) {
+          const auto *V = F->getType()->getAs<VectorType>();
+          if (!V || V->getNumElements() != 4 ||
+              !V->getElementType()->isSpecificBuiltinType(BuiltinType::Float))
+            Invalid.push_back(F);
+        }
+        HasExplicitMSL |= Inspect(Context.getBaseElementType(F->getType())->getAsCXXRecordDecl(), Invalid);
+      }
+      return HasExplicitMSL;
+    };
+    auto Diagnose = [&](const SmallVectorImpl<const FieldDecl *> &Invalid) {
+      for (const auto *F : Invalid) {
+        Diag(F->getBeginLoc(), Diags.getCustomDiagID(DiagnosticsEngine::Error,
+            "explicit MSL position field must have type float4"));
+        D.setInvalidType();
+        NewFD->setInvalidDecl();
+      }
+    };
+    SmallVector<const FieldDecl *, 4> Invalid;
+    if (Inspect(NewFD->getReturnType()->getAsCXXRecordDecl(), Invalid))
+      Diagnose(Invalid);
+    for (const auto *P : NewFD->parameters()) {
+      const auto *Stage = P->getAttr<GraphicsStageInputAttr>();
+      if (!Stage || !Stage->isMSL()) continue;
+      Invalid.clear();
+      Inspect(P->getType()->getAsCXXRecordDecl(), Invalid);
+      Diagnose(Invalid);
+    }
+  }
+
+  if (getLangOpts().Metal) {
+    unsigned SeenThreadBuiltins = 0;
+    for (const auto *P : NewFD->parameters()) {
+      const auto *A = P->getAttr<MetalThreadBuiltinAttr>();
+      if (!A) continue;
+      const StringRef Name = A->getSpelling();
+      const unsigned Slot = Name == "thread_index_in_simdgroup" ? 0 : Name == "thread_index_in_threadgroup" ? 1 : Name == "threadgroup_position_in_grid" ? 2 : 3;
+      if ((!NewFD->hasAttr<ComputeKernelAttr>() &&
+           !(NewFD->hasAttr<GraphicsFragmentShaderAttr>() && Slot == 0)) ||
+          (SeenThreadBuiltins & (1u << Slot)) ||
+          P->hasAttr<GraphicsStageInputAttr>() || P->hasAttr<MetalBufferBindingAttr>() ||
+          P->hasAttr<MetalVertexBuiltinAttr>() || P->hasAttr<GraphicsVertexPositionAttr>() ||
+          P->hasAttr<MetalFrontFacingAttr>() || P->hasAttr<GraphicsFBOColorLocationAttr>() ||
+          P->hasAttr<GraphicsFBODepthTypeAttr>() || P->hasAttr<GraphicsPointSizeAttr>() ||
+          P->hasAttr<MetalFunctionConstantPredicateAttr>()) {
+        Diag(P->getBeginLoc(), getDiagnostics().getCustomDiagID(
+            DiagnosticsEngine::Error,
+            "Metal thread builtin requires a unique semantic on a compute entry (or SIMD index on a fragment entry)"));
+        NewFD->setInvalidDecl();
+      }
+      SeenThreadBuiltins |= 1u << Slot;
+    }
+  }
+
+  if (getLangOpts().Metal) {
+    for (const auto *P : NewFD->parameters()) {
+      if (P->hasAttr<MetalThreadgroupBindingAttr>() &&
+          !NewFD->hasAttr<ComputeKernelAttr>()) {
+        Diag(P->getBeginLoc(), getDiagnostics().getCustomDiagID(
+            DiagnosticsEngine::Error,
+            "threadgroup resource bindings require a compute kernel"));
+        NewFD->setInvalidDecl();
+      }
+    }
+    bool Position = false, FrontFacing = false;
+    for (const auto *P : NewFD->parameters()) {
+      const bool IsPosition = P->hasAttr<GraphicsVertexPositionAttr>();
+      const bool IsFrontFacing = P->hasAttr<MetalFrontFacingAttr>();
+      if (!IsPosition && !IsFrontFacing) continue;
+      const auto *V = P->getType()->getAs<VectorType>();
+      if (!NewFD->hasAttr<GraphicsFragmentShaderAttr>() ||
+          (IsPosition && IsFrontFacing) ||
+          (IsPosition && (Position || !V || V->getNumElements() != 4 ||
+              !V->getElementType()->isSpecificBuiltinType(BuiltinType::Float))) ||
+          (IsFrontFacing && (FrontFacing || !P->getType()->isSpecificBuiltinType(BuiltinType::Bool))) ||
+          P->hasAttr<GraphicsStageInputAttr>() || P->hasAttr<MetalBufferBindingAttr>() ||
+          P->hasAttr<MetalVertexBuiltinAttr>() || P->hasAttr<GraphicsFBOColorLocationAttr>() ||
+          P->hasAttr<GraphicsFBODepthTypeAttr>() || P->hasAttr<GraphicsPointSizeAttr>()) {
+        Diag(P->getBeginLoc(), getDiagnostics().getCustomDiagID(
+            DiagnosticsEngine::Error,
+            "Metal fragment builtin requires a unique position float4 or front_facing bool parameter on a fragment entry"));
+        NewFD->setInvalidDecl();
+      }
+      Position |= IsPosition;
+      FrontFacing |= IsFrontFacing;
+    }
+  }
+
+  if (getLangOpts().Metal) {
+    bool VertexID = false, InstanceID = false, BaseInstance = false;
+    for (const auto *P : NewFD->parameters()) {
+      if (const auto *A = P->getAttr<MetalVertexBuiltinAttr>()) {
+        const auto Name = StringRef(A->getSpelling());
+        bool &Present = Name == "vertex_id" ? VertexID : Name == "instance_id" ? InstanceID : BaseInstance;
+        if (!NewFD->hasAttr<GraphicsVertexShaderAttr>() || Present ||
+            P->hasAttr<GraphicsStageInputAttr>() || P->hasAttr<MetalBufferBindingAttr>() ||
+            P->hasAttr<GraphicsVertexPositionAttr>() || P->hasAttr<MetalFrontFacingAttr>() ||
+            P->hasAttr<GraphicsFBOColorLocationAttr>() || P->hasAttr<GraphicsFBODepthTypeAttr>() ||
+            P->hasAttr<GraphicsPointSizeAttr>()) {
+          Diag(A->getLocation(), Diags.getCustomDiagID(DiagnosticsEngine::Error,
+              "Metal builtin parameter requires a unique semantic on a vertex shader"));
+          D.setInvalidType();
+          NewFD->setInvalidDecl();
+        }
+        Present = true;
+      }
+    }
+  }
 
   if (getLangOpts().OpenCL && (NewFD->hasAttr<ComputeKernelAttr>() ||
                                NewFD->hasAttr<GraphicsTessellationControlShaderAttr>() ||
@@ -10182,9 +10322,15 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
     // only check this for OpenCL/Metal/Vulkan
     if (getLangOpts().OpenCL) {
       llvm::SmallPtrSet<const Type *, 16> ValidTypes;
-      for (auto Param : NewFD->parameters())
+      for (auto Param : NewFD->parameters()) {
+        // Metal front_facing is an explicit scalar bool input, unlike OpenCL
+        // kernel parameters. Do not cache bool as generally permitted here.
+        if (getLangOpts().Metal && NewFD->hasAttr<GraphicsFragmentShaderAttr>() &&
+            Param->hasAttr<MetalFrontFacingAttr>() && Param->getType()->isBooleanType())
+          continue;
         checkIsValidOpenCLKernelParameter(*this, D, Param, ValidTypes, getLangOpts().Metal,
                                           getLangOpts().Vulkan, NewFD->hasAttr<GraphicsFragmentShaderAttr>());
+      }
     }
 
     // arg_buffer<> must only be used directly
@@ -12469,6 +12615,14 @@ void Sema::AddInitializerToDecl(Decl *RealDecl, Expr *Init, bool DirectInit) {
     return;
   }
 
+  if (VDecl->hasAttr<MetalFunctionConstantAttr>()) {
+    Diag(VDecl->getLocation(), getDiagnostics().getCustomDiagID(
+        DiagnosticsEngine::Error,
+        "function_constant initializers are not supported"));
+    VDecl->setInvalidDecl();
+    return;
+  }
+
   // C++11 [decl.spec.auto]p6. Deduce the type which 'auto' stands in for.
   if (VDecl->getType()->isUndeducedType()) {
     // Attempt typo correction early so that the type of the init expression can
@@ -12959,6 +13113,14 @@ void Sema::ActOnUninitializedDecl(Decl *RealDecl) {
 
   if (VarDecl *Var = dyn_cast<VarDecl>(RealDecl)) {
     QualType Type = Var->getType();
+    if (Var->hasAttr<MetalFunctionConstantAttr>() && Var->getPreviousDecl()) {
+      Diag(Var->getLocation(), getDiagnostics().getCustomDiagID(
+          DiagnosticsEngine::Error,
+          "function_constant redeclarations are not supported"));
+      Var->setInvalidDecl();
+      return;
+    }
+
 
     // C++1z [dcl.dcl]p1 grammar implies that an initializer is mandatory.
     if (isa<DecompositionDecl>(RealDecl)) {
@@ -17324,7 +17486,8 @@ FieldDecl *Sema::CheckFieldDecl(DeclarationName Name, QualType T,
     // OpenCL v1.2 s6.9b,r & OpenCL v2.0 s6.12.5 - The following types cannot be
     // used as structure or union field: image, sampler, event or block types.
     // NOTE: image types are allowed and necessary part of aggregate images
-    if (T->isEventT() /* || T->isImageType() */ || T->isSamplerT() ||
+    if (T->isEventT() /* || T->isImageType() */ ||
+        (T->isSamplerT() && !LangOpts.Metal) ||
         T->isBlockPointerType()) {
       Diag(Loc, diag::err_opencl_type_struct_or_union_field) << T;
       Record->setInvalidDecl();
@@ -17938,6 +18101,55 @@ void Sema::ActOnFields(Scope *S, SourceLocation RecLoc, Decl *EnclosingDecl,
 
   RecordDecl *Record = dyn_cast<RecordDecl>(EnclosingDecl);
   CXXRecordDecl *CXXRecord = dyn_cast<CXXRecordDecl>(EnclosingDecl);
+
+  // A sparse argument buffer is a resource table, not an ordinary C++ record.
+  // Reject unsupported layouts rather than accepting an ID that is ignored.
+  if (getLangOpts().Metal && Record) {
+    bool HasIDs = false;
+    for (const Decl *D : Fields)
+      HasIDs |= D->hasAttr<MetalArgumentIDAttr>();
+    if (HasIDs) {
+      bool HavePrevious = false;
+      unsigned Previous = 0;
+      bool Invalid = Record->isUnion() ||
+          (CXXRecord && CXXRecord->getNumBases() != 0);
+      for (Decl *D : Fields) {
+        const auto *ID = D->getAttr<MetalArgumentIDAttr>();
+        if (!ID || (HavePrevious && ID->getIndex() <= Previous))
+          Invalid = true;
+        if (const auto *OuterField = dyn_cast<FieldDecl>(D)) {
+          const FieldDecl *Field = OuterField;
+          if (OuterField->getType()->isAggregateImageType()) {
+            const auto *R = OuterField->getType()->getAsCXXRecordDecl();
+            if (R && R->hasDefinition() && !R->field_empty())
+              Field = *R->field_begin();
+          }
+          if (Field->getType()->isImageType()) {
+            const auto *Flags = Field->getAttr<FloorImageFlagsAttr>();
+            const auto *Data = Field->getAttr<FloorImageDataTypeAttr>();
+            const bool WritableShape = Field->getType()->isSpecificBuiltinType(BuiltinType::OCLImage2d) ||
+                Field->getType()->isSpecificBuiltinType(BuiltinType::OCLImage3d);
+            if (!Flags || !(Flags->isReadOnly() || (WritableShape && Flags->isWriteOnly())) || !Data ||
+                !Data->getImageDataType()->isSpecificBuiltinType(BuiltinType::Float)) {
+              Diag(Field->getLocation(), getDiagnostics().getCustomDiagID(
+                  DiagnosticsEngine::Error,
+                  "id textures require float data and supported sample/read or 2D/3D write access"));
+              Invalid = true;
+            }
+          }
+        }
+        if (ID) {
+          HavePrevious = true;
+          Previous = ID->getIndex();
+        }
+      }
+      if (Invalid) {
+        Diag(RecLoc, getDiagnostics().getCustomDiagID(DiagnosticsEngine::Error,
+            "argument-buffer fields require distinct ascending id attributes without inheritance"));
+        Record->setInvalidDecl();
+      }
+    }
+  }
 
   // Start counting up the number of named members; make sure to include
   // members of anonymous structs and unions in the total.

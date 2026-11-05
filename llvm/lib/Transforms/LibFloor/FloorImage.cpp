@@ -147,7 +147,10 @@ void FloorImageBasePass::visitCallBase(CallBase& CB) {
 	if(!func) return;
 	
 	const auto full_func_name = func->getName();
-	if(full_func_name.startswith(image_read_prefix) ||
+    if (full_func_name.startswith("floor.opaque.gather_image.")) {
+        handle_gather_image(CB);
+        was_modified = true;
+    } else if(full_func_name.startswith(image_read_prefix) ||
 	   full_func_name.startswith(image_write_prefix)) {
 		// strip off .(i|f)(1|2|3) from the end of the func name
 		const auto func_name = full_func_name.rsplit('.').first;
@@ -160,6 +163,10 @@ void FloorImageBasePass::visitCallBase(CallBase& CB) {
 		handle_query_lod(CB, full_func_name);
 		was_modified = true;
 	}
+}
+
+void FloorImageBasePass::handle_gather_image(CallBase& CB) {
+    ctx->emitError(&CB, "image gather is unsupported by this backend");
 }
 
 void FloorImageBasePass::handle_image(CallBase& CB, const StringRef& func_name) {

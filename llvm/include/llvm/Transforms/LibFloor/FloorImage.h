@@ -61,6 +61,7 @@ namespace llvm {
 		void visitCallBase(CallBase& CB);
 		
 		void handle_image(CallBase& CB, const StringRef& func_name);
+        virtual void handle_gather_image(CallBase& CB);
 		void handle_image_query(CallBase& CB, const StringRef& func_name);
 		void handle_query_lod(CallBase& CB, const StringRef& func_name);
 		

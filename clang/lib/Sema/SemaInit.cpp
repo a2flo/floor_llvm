@@ -8806,6 +8806,13 @@ ExprResult InitializationSequence::Perform(Sema &S,
              "Sampler initialization on non-sampler type.");
       Expr *Init = CurInit.get()->IgnoreParens();
       QualType SourceType = Init->getType();
+      // Metal samplers are opaque runtime handles, including argument-buffer
+      // member expressions. They are not integer sampler initializers.
+      if (S.getLangOpts().Metal && Entity.isParameterKind() &&
+          SourceType->isSamplerT()) {
+        CurInit = S.DefaultLvalueConversion(Init);
+        break;
+      }
       // Case 1
       if (Entity.isParameterKind()) {
         if (!SourceType->isSamplerT() && !SourceType->isIntegerType()) {

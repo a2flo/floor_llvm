@@ -5291,8 +5291,7 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
     }
     auto ctrl_pnt_gv = CGM.GetGlobalValue(func_name);
     if (!ctrl_pnt_gv || !isa<llvm::Function>(ctrl_pnt_gv)) {
-      assert(false && "this should have been defined/created in CGM");
-      llvm::errs() << "control point function getter '" << func_name << "' is not defined at this point, but should be!\n";
+      CGM.Error(E->getExprLoc(), "patch_control_point access requires a matching patch stage input");
       return RValue::getIgnored();
     }
 

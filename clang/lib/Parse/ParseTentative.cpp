@@ -1261,6 +1261,8 @@ Parser::isCXXDeclarationSpecifier(Parser::TPResult BracedCastResult,
   };
   switch (Tok.getKind()) {
   case tok::identifier: {
+    if (getLangOpts().Metal &&
+        Tok.getIdentifierInfo()->getName() == "threadgroup") return TPResult::True;
     // Check for need to substitute AltiVec __vector keyword
     // for "vector" identifier.
     if (TryAltiVecVectorToken())

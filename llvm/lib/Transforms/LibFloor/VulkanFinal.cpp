@@ -1032,8 +1032,8 @@ namespace {
 		struct combined_st_entry_t {
 			llvm::Type* type;
 			llvm::Value* value;
-			size_t value_size;
-			size_t elemental_size;
+			uint64_t value_size;
+			uint64_t elemental_size;
 		};
 
 		bool runOnFunction(Function &F) override {

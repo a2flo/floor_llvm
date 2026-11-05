@@ -382,9 +382,12 @@ public:
     PointerWidth = PointerAlign = 64;
     SizeType     = TargetInfo::UnsignedLong;
     PtrDiffType = IntPtrType = TargetInfo::SignedLong;
-    // for initial compilation and optimization, allow more liberal vector alignment to enable better libfloor vector <-> LLVM vector replacements/casting/optimizations
-    // -> this will later be reset during MetalFinalModuleCleanup in MetalFinal
-    resetDataLayout("e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:8:8-v24:8:8-v32:8:8-v48:8:8-v64:8:8-v96:8:8-v128:8:8-v192:8:8-v256:8:8-v512:8:8-v1024:8:8-n8:16:32");
+    // Use the final AIR storage layout from the start. Lowering records with
+    // byte-aligned vectors inserts explicit padding based on smaller vector
+    // allocation sizes (for example, 12 instead of 16 bytes for float3).
+    // Raising the alignment in MetalFinalModuleCleanup cannot repair those
+    // records or array strides already used by code generation/optimization.
+    resetDataLayout("e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32");
     AddrSpaceMap = &AIRAddrSpaceMap;
   }
   

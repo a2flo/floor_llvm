@@ -1858,6 +1858,15 @@ void ItaniumRecordLayoutBuilder::LayoutField(const FieldDecl *D,
   CharUnits FieldOffset =
       (IsUnion || IsOverlappingEmptyField) ? CharUnits::Zero() : getDataSize();
 
+  // Keep generated GEP offsets consistent with the host's eight-byte resource
+  // slots. AIR metadata IDs alone would leave sparse accesses densely packed.
+  if (Context.getLangOpts().Metal) {
+    if (const auto *ID = D->getAttr<MetalArgumentIDAttr>())
+      FieldOffset = std::max(FieldOffset,
+          CharUnits::fromQuantity(uint64_t(ID->getIndex()) * 8));
+  }
+
+
   const bool DefaultsToAIXPowerAlignment =
       Context.getTargetInfo().defaultsToAIXPowerAlignment();
   bool FoundFirstNonOverlappingEmptyFieldForAIX = false;

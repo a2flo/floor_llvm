@@ -3368,6 +3368,15 @@ void Parser::ParseDeclarationSpecifiers(DeclSpec &DS,
     case tok::kw___super:
     case tok::kw_decltype:
     case tok::identifier: {
+      // A contextual Metal qualifier must not be a macro: the same spelling
+      // is also the name of the [[threadgroup(index)]] resource attribute.
+      if (getLangOpts().Metal && Tok.is(tok::identifier) &&
+          Tok.getIdentifierInfo()->getName() == "threadgroup") {
+        DS.getAttributes().addNew(PP.getIdentifierInfo("local_as"), Loc,
+                                  nullptr, Loc, nullptr, 0, ParsedAttr::AS_GNU);
+        ConsumeToken();
+        continue;
+      }
       // This identifier can only be a typedef name if we haven't already seen
       // a type-specifier.  Without this check we misparse:
       //  typedef int X; struct Y { short X; };  as 'short int'.
@@ -5025,6 +5034,8 @@ bool Parser::isTypeSpecifierQualifier() {
   default: return false;
 
   case tok::identifier:   // foo::bar
+    if (getLangOpts().Metal &&
+        Tok.getIdentifierInfo()->getName() == "threadgroup") return true;
     if (TryAltiVecVectorToken())
       return true;
     LLVM_FALLTHROUGH;
@@ -5160,6 +5171,8 @@ bool Parser::isDeclarationSpecifier(bool DisambiguatingWithExpression) {
            getLangOpts().getOpenCLCompatibleVersion() >= 200;
 
   case tok::identifier:   // foo::bar
+    if (getLangOpts().Metal &&
+        Tok.getIdentifierInfo()->getName() == "threadgroup") return true;
     // Unfortunate hack to support "Class.factoryMethod" notation.
     if (getLangOpts().ObjC && NextToken().is(tok::period))
       return false;
@@ -5538,6 +5551,16 @@ void Parser::ParseTypeQualifierListOpt(
     const char *PrevSpec = nullptr;
     unsigned DiagID = 0;
     SourceLocation Loc = Tok.getLocation();
+
+    // Unlike the other compatibility spellings, threadgroup is contextual
+    // because it is also the name of an indexed resource attribute.
+    if (getLangOpts().Metal && Tok.is(tok::identifier) &&
+        Tok.getIdentifierInfo()->getName() == "threadgroup") {
+      DS.getAttributes().addNew(PP.getIdentifierInfo("local_as"), Loc,
+                                nullptr, Loc, nullptr, 0, ParsedAttr::AS_GNU);
+      EndLoc = ConsumeToken();
+      continue;
+    }
 
     switch (Tok.getKind()) {
     case tok::code_completion:
@@ -6469,8 +6492,7 @@ void Parser::InitCXXThisScopeForDeclaratorIfRelevant(
   // Carry on using the first addr space for the qualifiers of 'this'.
   // The diagnostic will be given later while creating the function
   // prototype for the method.
-#if 0 // TODO: do we want this?
-  if (getLangOpts().OpenCLCPlusPlus || getLangOpts().CPlusPlus) {
+  if (getLangOpts().Metal) {
     for (ParsedAttr &attr : DS.getAttributes()) {
       LangAS ASIdx = attr.asOpenCLLangAS();
       if (ASIdx != LangAS::Default) {
@@ -6479,7 +6501,6 @@ void Parser::InitCXXThisScopeForDeclaratorIfRelevant(
       }
     }
   }
-#endif
   ThisScope.emplace(Actions, dyn_cast<CXXRecordDecl>(Actions.CurContext), Q,
                     IsCXX11MemberFunction);
 }
@@ -6579,8 +6600,18 @@ void Parser::ParseFunctionDeclarator(Declarator &D,
       // correct the order if the user gets it wrong. Ideally we should deal
       // with the pure-specifier in the same way.
 
+      // MSL address-space qualifiers belong to the implicit object of a
+      // member. Keep free-function GNU attributes on their existing path.
+      const bool IsMetalMember = getLangOpts().Metal &&
+          D.getDeclSpec().getStorageClassSpec() != DeclSpec::SCS_typedef &&
+          (D.getContext() == DeclaratorContext::Member
+               ? !D.getDeclSpec().isFriendSpecified()
+               : D.getContext() == DeclaratorContext::File &&
+                     D.getCXXScopeSpec().isValid() &&
+                     Actions.CurContext->isRecord());
       // Parse cv-qualifier-seq[opt].
-      ParseTypeQualifierListOpt(DS, AR_NoAttributesParsed,
+      ParseTypeQualifierListOpt(DS, IsMetalMember ? AR_GNUAttributesParsed
+                                                 : AR_NoAttributesParsed,
                                 /*AtomicAllowed*/ false,
                                 /*IdentifierRequired=*/false,
                                 llvm::function_ref<void()>([&]() {
